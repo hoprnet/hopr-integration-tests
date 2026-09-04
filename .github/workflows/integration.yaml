@@ -44,7 +44,7 @@ on:
 # Uniform indentation on purpose: `>-` only folds lines at the SAME indent as the
 # first one, so an indented continuation would leave real newlines in this string.
 run-name: >-
-  ${{ inputs.marker != '' && format('Integration [{0}]', inputs.marker) || (github.event_name == 'repository_dispatch' && format('Integration ({0} {1})', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || 'Integration throughput test')) }}
+  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration ({0} {1})', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || 'Integration throughput test')) }}
 # PR events: one group per PR, cancel-in-progress (a new push supersedes the
 # previous run of that PR). Dispatch/manual/merge-queue: a single shared group that
 # never cancels, so those runs stack and execute one after another. Merge-queue runs
@@ -65,8 +65,14 @@ jobs:
     runs-on: [self-hosted, hetzner]
     timeout-minutes: 90
     env:
-      PROJECT: ${{ github.event.client_payload.project || github.event.inputs.project }}
-      OVERRIDE_REV: ${{ github.event.client_payload.rev || github.event.inputs.rev }}
+      PROJECT: ${{ inputs.project || github.event.client_payload.project }}
+      OVERRIDE_REV: ${{ inputs.rev || github.event.client_payload.rev }}
+      # `workflow_dispatch` delivers its arguments under `inputs.*` while
+      # `repository_dispatch` puts them under `github.event.client_payload.*`. This
+      # workflow accepts both, so every argument reads from both — otherwise a
+      # dispatch silently arrives with the field empty. Same shape as
+      # gnosis_vpn-infrastructure's restart-hoprd.yaml.
+      #
       # Defaults for the non-triggering projects (blokli always tracks the head
       # of its `release/0.13` branch, re-resolved per run).
       # hoprd is split into v4 / v5: `main` is v5, and this test targets v4 (the
@@ -202,7 +208,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_REF: ${{ github.event.pull_request.head.ref }}
-          MARKER: ${{ inputs.marker }}
+          MARKER: ${{ inputs.marker || github.event.client_payload.marker }}
           MQ_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           # Keyed on what was actually supplied rather than on the event name. The
