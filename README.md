@@ -60,7 +60,7 @@ one that a local cluster can drive — `return_path` and `exit_origination` alon
 | --------------------------- | --------------------------------------------------------- | ----- | --------------------------- |
 | `tests/integration.rs`      | a 3-node cluster                                          | yes   | `just integration-binchain` |
 | `tests/return_path.rs`      | a 5-node cluster (more CPU than the throughput tests)     | yes   | `just return-path`          |
-| `tests/exit_origination.rs` | a cluster + a pseudonym-lifetime wait                     | yes   | see `run.sh`                |
+| `tests/exit_origination.rs` | a cluster + a pseudonym-lifetime wait                     | yes   | `just exit-origination`     |
 | `tests/rotsee.rs`           | a funded Gnosis identity + exit node (`EDGLI_ROTSEE_*`)   | no    | `just rotsee`               |
 | `tests/profiling.rs`        | `--features prof` + `--profile tracer` + `tokio_unstable` | no    | `just profile`              |
 
