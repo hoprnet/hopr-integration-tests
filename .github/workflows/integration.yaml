@@ -91,6 +91,10 @@ jobs:
       # (pump.rs / session_metrics.rs), and `warn` still lets the stack speak up
       # when something is actually wrong. Node logs are unaffected — localcluster
       # always writes those to `hoprd_<i>.log`, and they are uploaded on failure.
+      # Without this `cluster.rs` drops the cluster TempDir at teardown and the
+      # per-node hoprd_<i>.log files are gone before the upload step runs — which is
+      # exactly what left run 34098266229 undiagnosable.
+      HOPRD_KEEP_ARTIFACTS: 1
       RUST_LOG: warn,hoprd_integration_test=info
       # Without this libtest captures a PASSING test's output, so a green run would
       # show no measurements at all — the one thing worth reading. Safe to enable
@@ -127,6 +131,10 @@ jobs:
         run: |
           pkill -f "${GITHUB_WORKSPACE}/result-" || true
           rm -rf /tmp/hopr-nodes /tmp/hoprd-it-* /tmp/hopr-chain || true
+          # HOPRD_KEEP_ARTIFACTS leaks the cluster dir on purpose, so previous runs'
+          # copies pile up on a persistent runner. Reap them before, not after, so a
+          # failed run's evidence survives until it has been uploaded and read.
+          find /tmp -maxdepth 3 -type d -name 'hoprd-it-*' -exec rm -rf {} + 2>/dev/null || true
           rm -f result-hoprd result-localcluster result-bloklid result-foundry || true
       # Same reason as pr.yaml: the checkout git-cleans the workspace, so a target
       # dir inside it is rebuilt from scratch on every run of a persistent box.
@@ -245,11 +253,13 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: integration-logs-${{ github.run_id }}-${{ github.run_attempt }}
-          # hoprd_<i>.log lives under the per-run cluster dir; the chain logs under
-          # the chain data dir; nix-build.log next to the checkout.
+          # The cluster dir is a tempfile::TempDir under the dev shell's TMPDIR, so it
+          # lands at /tmp/nix-shell.*/nix-shell.*/hoprd-it-*/ — NOT /tmp/hoprd-it-*,
+          # which is what an earlier version of this globbed and never matched.
           path: |
             nix-build.log
             /tmp/hopr-chain/*.log
+            /tmp/nix-shell.*/**/hoprd-it-*/**/*.log
             /tmp/hoprd-it-*/**/*.log
             /tmp/hopr-nodes/**/*.log
           if-no-files-found: warn
