@@ -7,12 +7,12 @@ pumps a payload through **0-hop and 1-hop UDP sessions** to the exit node's
 built-in loopback — measuring goodput and datagram loss.
 
 It is the gate for the **hoprd v4 line** (`release/4.1`) against `edge-client`
-`main` and blokli `release/0.13`, and runs on a dedicated self-hosted Hetzner
+`release/4.1` and blokli `release/0.13`, and runs on a dedicated self-hosted Hetzner
 runner (label `hetzner`).
 
 It is wired into all three upstream repos: a hoprd merge to its v4 line **blocks**
 on it before the docker image is built or tagged, so a red gate means nothing gets
-promoted or deployed; edge-client (`main`) and blokli (`release/0.13`) fire it on
+promoted or deployed; edge-client (`release/4.1`) and blokli (`release/0.13`) fire it on
 merge and are told about failures via Zulip; and a PR in any of the three labelled
 `run-integration` runs it as a check on that PR. Details and the token/permission
 prerequisites are in [`runner/README.md`](runner/README.md).
@@ -276,7 +276,7 @@ stack). Concurrency: a new push to a PR **cancels** that PR's in-progress run;
 dispatch/manual runs **stack** (shared group, never cancelled) and execute one
 after another. **No version state is stored:** the triggering project supplies its
 rev via the dispatch; `hoprd` otherwise defaults to the **v4 line** and
-`edge-client` to its `main` HEAD; **blokli always tracks the head of its
+`edge-client` to its `release/4.1` HEAD; **blokli always tracks the head of its
 `release/0.13` branch** — the Jura (v4) line — re-resolved per run
 (`nix build --refresh`) and built from its flake. So every run tests one project's
 change against the current tip of the other and the current 0.13 blokli. `run.sh` builds `hoprd` + `hoprd-localcluster` from the hoprd ref, builds
@@ -289,8 +289,10 @@ Nothing is committed back.
 ### hoprd v4 / v5
 
 hoprd `main` is **v5**. This test targets **v4**: the integration crate pins
-`hopr-lib` to hoprnet `release/4.0`, which is also what `edge-client` `main`
-resolves, so a v5 hoprd binary would run against a v4 library set. `run.sh`
+`hopr-lib` to hoprnet `release/4.0`, which is what `edge-client` `release/4.1`
+resolves too — its `main` repinned to hoprnet `master` (v5) in #151 on 2026-09-04,
+which is why the v4 branch exists. A v5 hoprd binary would run against a v4
+library set. `run.sh`
 therefore builds hoprd from `HOPRD_LINE` — **`release/4.1`**, hoprd's only v4
 branch — and rejects a dispatched hoprd rev that is not contained in it (bypass:
 `HOPRD_SKIP_LINE_CHECK=1`). hoprd's merge workflow should only dispatch from
