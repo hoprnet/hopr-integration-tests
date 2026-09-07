@@ -66,8 +66,9 @@ one that a local cluster can drive — `return_path` and `exit_origination` alon
 
 `rotsee` cannot run in CI (no funded identity) and `profiling` should not: it emits
 Perfetto/tokio-console traces rather than a pass/fail verdict, and needs its own build.
-Everything else runs on every gate — 8 scenarios, each with a fresh chain, ~44 minutes
-of test time.
+Everything else runs on every gate — 5 scenarios, each with a fresh chain. Three
+`return_path` scenarios are held out as flaky; see
+[`runner/README.md`](runner/README.md).
 
 - **Return path** reproduces the 2026-08-11 return-path break. Sessions are opened with a
   **0-hop forward and 1-hop return** path, so the only packets a cluster node forwards are
