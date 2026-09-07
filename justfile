@@ -101,8 +101,17 @@ return-path *scenarios: build build-chain
     # Named explicitly rather than left to the default filter: run-binchain.sh gives each
     # scenario a fresh chain, and the kill scenario leaves a dead node behind it.
     SCENARIOS='{{scenarios}}'
-    [ -n "${SCENARIOS}" ] || SCENARIOS='return_paths_should_spread_across_distinct_relayers session_should_survive_return_relayer_loss a_symmetric_session_should_survive_relayer_loss'
+    [ -n "${SCENARIOS}" ] || SCENARIOS='return_paths_should_spread_across_distinct_relayers session_should_survive_return_relayer_loss session_should_survive_forward_relayer_loss session_should_survive_common_mode_return_outage a_symmetric_session_should_survive_relayer_loss'
     export SCENARIOS TEST_TARGET=return_path
+    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
+
+# Exit-origination repro (binary chain): does the exit keep originating packets when
+# one of its return paths can never be resolved? See integration/tests/exit_origination.rs.
+exit-origination: build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export SCENARIOS=exit_should_keep_originating_when_a_return_path_becomes_unresolvable
+    export TEST_TARGET=exit_origination
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
 
 # Run a single test against a fresh env (e.g. `just scenario zero_hop`).

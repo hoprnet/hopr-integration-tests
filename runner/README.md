@@ -24,8 +24,9 @@ stable hardware.
 
 The boxes are provisioned out of the **gitops** repo, not here:
 `ansible/playbooks/install-github-hetzner-runner.yaml` (see `ansible/README.md`
-there). Two servers, four runner instances each — `github-hetzner-runner@1..4` —
-registered at the **org** level with the single label `hetzner`.
+there). Two servers, **one** runner instance each
+(`github_hetzner_runner_instances: 1`, set in gitops commit `1d25673`), registered at
+the **org** level with the single label `hetzner`.
 
 ```bash
 # gitops repo
@@ -128,7 +129,7 @@ Unlike a hosted VM, nothing is reinstalled per run:
 - **Room under `~runner/.cache`** for the cargo target dirs. `actions/checkout`
   runs `git clean -ffdx`, which deletes the gitignored `integration/target` on
   every run — so both workflows redirect `CARGO_TARGET_DIR` to
-  `$HOME/.cache/hoprd-test/cargo-target-$RUNNER_NAME`, outside the workspace and
+  `$HOME/.cache/hopr-integration-tests/cargo-target-$RUNNER_NAME`, outside the workspace and
   keyed per runner instance (concurrent jobs would otherwise serialise on cargo's
   target-dir lock). Nothing prunes these; delete them by hand if the disk fills.
 
@@ -139,32 +140,32 @@ GitHub-hosted runners.
 ### Dedicating the box — two gitops changes still open
 
 A throughput number is only comparable to another number from the same idle
-machine, so the box has to be **dedicated to hoprd-test** and **run one job at a
+machine, so the box has to be **dedicated to hopr-integration-tests** and **run one job at a
 time**. Neither is achievable from this repo — both are gitops / org settings:
 
 1. **Restrict the runners to this repository.** They are registered at the _org_
    level, so today any hoprnet repo can schedule onto them. The mechanism is a
-   GitHub **runner group** scoped to `hoprd-test` (Org → Settings → Actions →
-   Runner groups: limit repository access to `hoprd-test`, leave _Allow public
+   GitHub **runner group** scoped to `hopr-integration-tests` (Org → Settings → Actions →
+   Runner groups: limit repository access to `hopr-integration-tests`, leave _Allow public
    repositories_ off), not a label — a label expresses a preference, it does not
    deny anyone. Renaming the label would also work but breaks every workflow
    referencing it, so prefer the group.
-2. **One runner instance per box** — `github_hetzner_runner_instances: 1` in the
-   gitops role, down from 4. Four instances means up to four concurrent jobs on
-   one machine's cores. Per-workflow concurrency groups cannot fix this: they
-   serialise runs _within_ one workflow, so `pr.yaml`'s `unit` job would still run
-   alongside an `integration.yaml` measurement. One instance serialises the whole
-   machine, which is what a measurement needs; PR unit tests then queue behind a
-   60–90 minute run.
+2. ~~One runner instance per box~~ — **already done.** The role sets
+   `github_hetzner_runner_instances: 1`, so a box runs one job at a time and cannot
+   contend with itself. Note the consequence: PR `unit` jobs queue behind a ~60
+   minute integration run rather than running beside it.
 
-Until both land: if the numbers move without a code change, check what else was
-scheduled on the box. Two concurrent chains would also collide on ports 8080/8545.
+So a slow measurement on this box is **not** explained by parallel jobs on the same
+box — one instance rules that out. With two boxes and one instance each, a `unit` job
+and an `integration` job land on different machines. What remains as an explanation is
+the machine itself (per-core speed, core count) or something outside the box, not
+self-contention.
 
 Both boxes register the _same_ `hetzner` label, so a run lands on either one — a
 baseline established on one box is only a baseline for that box. If the two ever
 differ in spec, give this workflow its own label.
 
-## Repo secrets (hoprd-test)
+## Repo secrets (hopr-integration-tests)
 
 Set under Settings → Secrets and variables → Actions:
 
@@ -178,8 +179,11 @@ The `bloklid-anvil` image is in a **public** GCP Artifact Registry repo
 needed to pull it. CI does not use it at all (binary chain); it is a local-only
 alternative path.
 
-Plus `HOPRD_TEST_DISPATCH_TOKEN` in **hoprd / edge-client / blokli** (Actions
-read+write on hoprd-test) so their merge workflows can trigger this one.
+The upstream repos do not use a PAT to reach this one. They mint a short-lived
+**GitHub App token** instead — `vars.GH_APP_HOPRNET_BOT_CLIENT_ID` plus
+`secrets.GH_APP_HOPRNET_BOT_PRIVATE_KEY`, scoped to `owner: hoprnet` /
+`repositories: hopr-integration-tests` — the same pattern as the cross-repo
+dispatches in blokli's and hoprd's `merge.yaml`. See the prerequisites below.
 
 Optional repo _variables_:
 
@@ -211,13 +215,13 @@ different `HOPRD_LINE` values rather than loosening the check.
 
 ### How the upstream repos call in
 
-| Repo              | When                                                       | Behaviour                                                                               |
-| ----------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| hoprd             | merge to `vars.MAINTENANCE_RELEASE_BRANCH` (`release/4.1`) | **Blocks.** Runs before `build-docker`, so a red gate means no image, no tag, no deploy |
-| edge-client       | merge to `main`                                            | Fire-and-forget; failure reported by the Zulip message below                            |
-| blokli            | merge to `release/0.13`                                    | Fire-and-forget; same                                                                   |
-| all three         | PR labelled `run-integration`                              | Waits, so the verdict is a check on that PR                                             |
-| hoprd-test itself | merge queue to `main`                                      | Blocks its own merges — see below                                                       |
+| Repo                          | When                                                       | Behaviour                                                                               |
+| ----------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| hoprd                         | merge to `vars.MAINTENANCE_RELEASE_BRANCH` (`release/4.1`) | **Blocks.** Runs before `build-docker`, so a red gate means no image, no tag, no deploy |
+| edge-client                   | merge to `main`                                            | Fire-and-forget; failure reported by the Zulip message below                            |
+| blokli                        | merge to `release/0.13`                                    | Fire-and-forget; same                                                                   |
+| all three                     | PR labelled `run-integration`                              | Waits, so the verdict is a check on that PR                                             |
+| hopr-integration-tests itself | merge queue to `main`                                      | Blocks its own merges — see below                                                       |
 
 Two mechanisms, deliberately:
 
@@ -231,7 +235,7 @@ Two mechanisms, deliberately:
   rather than start. So the caller passes a unique marker, `run-name` puts it in the
   run title, and the caller polls for the run whose title carries it.
 
-**hoprd's gate is scoped to the v4 line on purpose.** hoprd-test only supports v4
+**hoprd's gate is scoped to the v4 line on purpose.** hopr-integration-tests only supports v4
 (its crate pins hoprnet `release/4.0`) and rejects a rev off that line, so pointing
 the gate at `main` (v5) would fail every merge. Keying on
 `vars.MAINTENANCE_RELEASE_BRANCH` rather than a literal branch means a bump to
@@ -244,7 +248,7 @@ would all be refused.
 
 ### This repo gates its own changes too
 
-`integration.yaml` also runs on `merge_group` for hoprd-test's own `main`. The
+`integration.yaml` also runs on `merge_group` for hopr-integration-tests's own `main`. The
 `run-integration` label is opt-in, so without a queue gate an unlabelled PR could
 change the harness, the thresholds or the scripts and merge without the test ever
 running — the one repo where that matters most. The job already admitted any
@@ -256,7 +260,7 @@ the runner executes one job at a time anyway. The cost is that a candidate can w
 behind an upstream gate run, so keep the queue's max wait comfortably above the
 ~30-40 minute runtime.
 
-**hoprd-test has no rulesets at all** as of 2026-09-04 — `main` is unprotected, so
+**hopr-integration-tests has no rulesets at all** as of 2026-09-04 — `main` is unprotected, so
 this trigger fires but nothing enforces it. To make it a real gate, create a ruleset
 for `main` with a merge queue rule and `Integration throughput` among its required
 status checks.
@@ -264,23 +268,31 @@ status checks.
 ### Prerequisites in the upstream repos
 
 - **`run-integration` label** — present in hoprd, edge-client and blokli.
-- **`HOPRD_TEST_DISPATCH_TOKEN`** — needs **`actions: write`** on hoprd-test to
-  dispatch _and_ **`actions: read`** to list and watch runs. A dispatch-only token
-  makes a waiting gate fire the run and then fail with
-  `never found a run tagged …`, which looks like a hoprd-test problem but is not.
-  It is not a repo-level secret in any of the four repos, so it must be an org
-  secret; verify it is visible to all three before relying on the gates.
+- **A GitHub App installed on `hoprnet` with access to `hopr-integration-tests`.**
+  The gates mint a token per run via `actions/create-github-app-token`
+  (`vars.GH_APP_HOPRNET_BOT_CLIENT_ID` + `secrets.GH_APP_HOPRNET_BOT_PRIVATE_KEY`).
+  The installation needs **Actions: write** — write to dispatch, and read (implied
+  by write) to list and watch runs. A dispatch-only grant makes a waiting gate fire
+  the run and then fail with `never found a run tagged …`, which looks like a
+  problem in this repo but is not.
+
+  The older `HOPRD_TEST_DISPATCH_TOKEN` PAT is no longer used and its name predates
+  the rename; there is nothing to migrate, but do not re-add it.
 
 ### What the gate runs
 
-Every suite a local cluster can drive, on every run — 8 scenarios, each with its own
-fresh chain, ~44 min of test time (~62 min including build):
+Every suite a local cluster can drive, on every run — 5 scenarios, each with its own
+fresh chain, ~28 min of test time (~45 min including build):
 
-| Suite              | Scenarios                                                                             |
-| ------------------ | ------------------------------------------------------------------------------------- |
-| `integration`      | `zero_hop`, `one_hop`                                                                 |
-| `return_path`      | spread, return-relayer loss, forward-relayer loss, common-mode outage, symmetric loss |
-| `exit_origination` | the unresolvable-return-path repro                                                    |
+| Suite              | Scenarios                                 |
+| ------------------ | ----------------------------------------- |
+| `integration`      | `zero_hop`, `one_hop`                     |
+| `return_path`      | return-relayer loss, forward-relayer loss |
+| `exit_origination` | the unresolvable-return-path repro        |
+
+Three `return_path` scenarios are held out as flaky — `spread` (asserts a ratio on a
+random draw) and the two survival scenarios that miss their recovery deadline on some
+machines but not others. Run them by hand with `just return-path <name>`.
 
 `rotsee` is excluded (needs a funded Gnosis identity and a reachable public exit) and
 so is `profiling` (emits traces, not a verdict, and needs `--features prof` +
@@ -311,13 +323,13 @@ stack.
 
 ## Triggering / validating
 
-- **On a hoprd-test PR:** add the `run-integration` label → the test runs against
+- **On a hopr-integration-tests PR:** add the `run-integration` label → the test runs against
   the hoprd v4 line, edge-client main, and blokli `release/0.13`.
-- **Manual:** `gh workflow run integration.yaml -R hoprnet/hoprd-test`
-  then `gh run watch -R hoprnet/hoprd-test --exit-status`.
+- **Manual:** `gh workflow run integration.yaml -R hoprnet/hopr-integration-tests`
+  then `gh run watch -R hoprnet/hopr-integration-tests --exit-status`.
 - **Simulate a merge trigger:**
   ```bash
-  gh api repos/hoprnet/hoprd-test/dispatches \
+  gh api repos/hoprnet/hopr-integration-tests/dispatches \
     -f event_type=integration \
     -f 'client_payload[project]=edge-client' \
     -f 'client_payload[rev]=<edge-client main sha>'

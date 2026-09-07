@@ -1,4 +1,4 @@
-# hoprd-test
+# hopr-integration-tests
 
 Cross-repo **integration throughput test** for the HOPR stack: stands up a
 3-node `hoprd-localcluster` (anvil + blokli + 3 `hoprd` processes, full-mesh
@@ -60,14 +60,15 @@ one that a local cluster can drive — `return_path` and `exit_origination` alon
 | --------------------------- | --------------------------------------------------------- | ----- | --------------------------- |
 | `tests/integration.rs`      | a 3-node cluster                                          | yes   | `just integration-binchain` |
 | `tests/return_path.rs`      | a 5-node cluster (more CPU than the throughput tests)     | yes   | `just return-path`          |
-| `tests/exit_origination.rs` | a cluster + a pseudonym-lifetime wait                     | yes   | see `run.sh`                |
+| `tests/exit_origination.rs` | a cluster + a pseudonym-lifetime wait                     | yes   | `just exit-origination`     |
 | `tests/rotsee.rs`           | a funded Gnosis identity + exit node (`EDGLI_ROTSEE_*`)   | no    | `just rotsee`               |
 | `tests/profiling.rs`        | `--features prof` + `--profile tracer` + `tokio_unstable` | no    | `just profile`              |
 
 `rotsee` cannot run in CI (no funded identity) and `profiling` should not: it emits
 Perfetto/tokio-console traces rather than a pass/fail verdict, and needs its own build.
-Everything else runs on every gate — 8 scenarios, each with a fresh chain, ~44 minutes
-of test time.
+Everything else runs on every gate — 5 scenarios, each with a fresh chain. Three
+`return_path` scenarios are held out as flaky; see
+[`runner/README.md`](runner/README.md).
 
 - **Return path** reproduces the 2026-08-11 return-path break. Sessions are opened with a
   **0-hop forward and 1-hop return** path, so the only packets a cluster node forwards are
@@ -277,7 +278,7 @@ comparable. The `#[ignore]` e2e is **not** run here. All three build in the
 hoprnet dev shell. Locally: `just lint` + `just unit`.
 
 `integration.yaml` runs on `repository_dispatch[integration]` (fired by `hoprd` /
-`edge-client` on merge), on manual `workflow_dispatch`, and on a hoprd-test PR
+`edge-client` on merge), on manual `workflow_dispatch`, and on a hopr-integration-tests PR
 labelled **`run-integration`** (to test changes to this repo against the live
 stack). Concurrency: a new push to a PR **cancels** that PR's in-progress run;
 dispatch/manual runs **stack** (shared group, never cancelled) and execute one
@@ -312,7 +313,7 @@ Defaults are overridable via repo variables `HOPRD_LINE`, `HOPRD_REF`,
 Manual run:
 
 ```bash
-gh workflow run integration.yaml -R hoprnet/hoprd-test \
+gh workflow run integration.yaml -R hoprnet/hopr-integration-tests \
   -f project=hoprd -f rev=<sha>          # or project=edge-client
 # empty inputs → hoprd at release/4.1, edge-client at main, blokli at release/0.13
 ```

@@ -2933,8 +2933,8 @@ dependencies = [
 
 [[package]]
 name = "edgli"
-version = "4.1.0"
-source = "git+https://github.com/hoprnet/edge-client?branch=main#7d4de8ecfdc22bab2f7bb9674beccbafa053f56b"
+version = "4.1.1"
+source = "git+https://github.com/hoprnet/edge-client?branch=release%2F4.1#1e2114196b6739f7349aaf9d67737e38a526a774"
 dependencies = [
  "anyhow",
  "async-signal",
@@ -2953,6 +2953,9 @@ dependencies = [
  "lazy_static",
  "mimalloc",
  "multiaddr",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "serde_yaml",
  "signal-hook",
  "smart-default",
@@ -4023,7 +4026,7 @@ dependencies = [
 [[package]]
 name = "hopr-crypto-packet"
 version = "1.4.0"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "bimap",
  "const-hex",
@@ -4059,7 +4062,7 @@ dependencies = [
 [[package]]
 name = "hopr-lib"
 version = "4.0.4"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -4111,7 +4114,7 @@ dependencies = [
 [[package]]
 name = "hopr-protocol-app"
 version = "1.0.1"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "hopr-crypto-packet",
  "hopr-types",
@@ -4124,7 +4127,7 @@ dependencies = [
 [[package]]
 name = "hopr-protocol-hopr"
 version = "6.1.0"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4153,7 +4156,7 @@ dependencies = [
 [[package]]
 name = "hopr-protocol-session"
 version = "1.5.0"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "aquamarine",
  "asynchronous-codec",
@@ -4184,7 +4187,7 @@ dependencies = [
 [[package]]
 name = "hopr-protocol-start"
 version = "1.1.0"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "aquamarine",
  "flagset",
@@ -4250,8 +4253,8 @@ dependencies = [
 
 [[package]]
 name = "hopr-transport"
-version = "0.48.0"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+version = "0.48.3"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4294,7 +4297,7 @@ dependencies = [
 [[package]]
 name = "hopr-transport-mixer"
 version = "0.4.1"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "futures",
  "futures-timer",
@@ -4333,7 +4336,7 @@ dependencies = [
 [[package]]
 name = "hopr-transport-probe"
 version = "0.8.0"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4358,8 +4361,8 @@ dependencies = [
 
 [[package]]
 name = "hopr-transport-session"
-version = "0.28.0"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+version = "0.29.0"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4391,7 +4394,7 @@ dependencies = [
 [[package]]
 name = "hopr-transport-tag-allocator"
 version = "0.1.1"
-source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#adefa298ade3d61c45f194000e4feca2cc073a26"
+source = "git+https://github.com/hoprnet/hoprnet?branch=release%2F4.0#bcda1b4bb72c6e0cd743b312216a1d298d8d7ebf"
 dependencies = [
  "hopr-protocol-app",
  "serde",
@@ -4506,7 +4509,6 @@ dependencies = [
  "console-subscriber",
  "edgli",
  "futures",
- "hopr-lib",
  "nix 0.31.3",
  "rand 0.10.2",
  "reqwest",
@@ -6156,6 +6158,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-http"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5683015d09e2df236ef005b17f6f196f0d5f6313c4fa43a7b6a53b52776e4331"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http",
+ "opentelemetry",
+ "reqwest",
+]
+
+[[package]]
+name = "opentelemetry-otlp"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9966929966d17620d7c316c643ba62631826e10021409357772d5eea84f62c35"
+dependencies = [
+ "http",
+ "opentelemetry",
+ "opentelemetry-http",
+ "opentelemetry-proto",
+ "opentelemetry_sdk",
+ "prost",
+ "reqwest",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tonic-types",
+]
+
+[[package]]
 name = "opentelemetry-prometheus-text-exporter"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6164,6 +6198,19 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "smartstring",
+]
+
+[[package]]
+name = "opentelemetry-proto"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638"
+dependencies = [
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "prost",
+ "tonic",
+ "tonic-prost",
 ]
 
 [[package]]
@@ -7315,6 +7362,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -8462,9 +8510,11 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
+ "rustls-native-certs",
  "socket2 0.6.5",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",
@@ -8480,6 +8530,17 @@ checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
 dependencies = [
  "bytes",
  "prost",
+ "tonic",
+]
+
+[[package]]
+name = "tonic-types"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ab1b02061f83d519bba3caa167f88f261ef05720ab8ebc954ade70de3348e8"
+dependencies = [
+ "prost",
+ "prost-types",
  "tonic",
 ]
 
