@@ -63,7 +63,10 @@ jobs:
     # A dedicated machine rather than a hosted VM: the onion encoder is CPU-bound
     # and the throughput thresholds only mean anything on a stable core count.
     runs-on: [self-hosted, hetzner]
-    timeout-minutes: 90
+    # ~62 min expected: ~44 min of tests across 8 scenarios (each with its own fresh
+    # chain) plus 15-20 min of build when Cachix misses. 90 was cutting it close once
+    # return_path and exit_origination joined the run.
+    timeout-minutes: 150
     env:
       PROJECT: ${{ inputs.project || github.event.client_payload.project }}
       OVERRIDE_REV: ${{ inputs.rev || github.event.client_payload.rev }}

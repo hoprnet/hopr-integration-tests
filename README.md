@@ -52,15 +52,22 @@ there is nothing to configure.
 
 ### Manual test binaries (not run in CI)
 
-Three extra test binaries reuse the same `IntegrationEnv` harness but need resources CI
-does not provide, so they live in their **own** test targets — CI only runs
-`--test integration`, so these never run automatically:
+Four extra test binaries reuse the same `IntegrationEnv` harness. CI now runs every
+one that a local cluster can drive — `return_path` and `exit_origination` alongside
+`integration` — and skips only the two that need something a cluster cannot give:
 
-| Binary                 | What it needs                                             | Run with           |
-| ---------------------- | --------------------------------------------------------- | ------------------ |
-| `tests/return_path.rs` | a 5-node cluster (more CPU than the throughput tests)     | `just return-path` |
-| `tests/rotsee.rs`      | a funded Gnosis identity + exit node (`EDGLI_ROTSEE_*`)   | `just rotsee`      |
-| `tests/profiling.rs`   | `--features prof` + `--profile tracer` + `tokio_unstable` | `just profile`     |
+| Binary                      | What it needs                                             | In CI | Run with                    |
+| --------------------------- | --------------------------------------------------------- | ----- | --------------------------- |
+| `tests/integration.rs`      | a 3-node cluster                                          | yes   | `just integration-binchain` |
+| `tests/return_path.rs`      | a 5-node cluster (more CPU than the throughput tests)     | yes   | `just return-path`          |
+| `tests/exit_origination.rs` | a cluster + a pseudonym-lifetime wait                     | yes   | see `run.sh`                |
+| `tests/rotsee.rs`           | a funded Gnosis identity + exit node (`EDGLI_ROTSEE_*`)   | no    | `just rotsee`               |
+| `tests/profiling.rs`        | `--features prof` + `--profile tracer` + `tokio_unstable` | no    | `just profile`              |
+
+`rotsee` cannot run in CI (no funded identity) and `profiling` should not: it emits
+Perfetto/tokio-console traces rather than a pass/fail verdict, and needs its own build.
+Everything else runs on every gate — 8 scenarios, each with a fresh chain, ~44 minutes
+of test time.
 
 - **Return path** reproduces the 2026-08-11 return-path break. Sessions are opened with a
   **0-hop forward and 1-hop return** path, so the only packets a cluster node forwards are

@@ -271,6 +271,24 @@ status checks.
   It is not a repo-level secret in any of the four repos, so it must be an org
   secret; verify it is visible to all three before relying on the gates.
 
+### What the gate runs
+
+Every suite a local cluster can drive, on every run — 8 scenarios, each with its own
+fresh chain, ~44 min of test time (~62 min including build):
+
+| Suite              | Scenarios                                                                             |
+| ------------------ | ------------------------------------------------------------------------------------- |
+| `integration`      | `zero_hop`, `one_hop`                                                                 |
+| `return_path`      | spread, return-relayer loss, forward-relayer loss, common-mode outage, symmetric loss |
+| `exit_origination` | the unresolvable-return-path repro                                                    |
+
+`rotsee` is excluded (needs a funded Gnosis identity and a reachable public exit) and
+so is `profiling` (emits traces, not a verdict, and needs `--features prof` +
+`--profile tracer` + `tokio_unstable`).
+
+Suites do not short-circuit: a failure in one still runs the rest, so a red run
+reports everything that is broken rather than only the first thing.
+
 ### The failure notification
 
 A red run posts to Zulip (stream **HOPRd**, topic **integration**) naming the

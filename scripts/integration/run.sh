@@ -206,8 +206,37 @@ print(f"  edgli pinned: {pinned.splitlines()[0]}")
 PY
 (cd "${REPO_ROOT}/integration" && cargo update -p edgli)
 
-# ── Run the test against a fresh flake-built chain per scenario ──
-# run-binchain.sh starts/stops bloklid+anvil per scenario (HOPRD_CHAIN_URL) and
-# runs both hop counts (zero_hop, one_hop) as separate tests.
+# ── Run every localcluster suite, fresh chain per scenario ──
+# Everything that a local cluster can drive. `rotsee` is excluded because it needs a
+# funded Gnosis identity and a reachable public exit; `profiling` because it emits
+# traces rather than a verdict and needs its own build (--features prof, --profile
+# tracer, tokio_unstable).
+#
+# One run-binchain.sh call per test binary; it starts/stops bloklid+anvil per
+# scenario and reaps stray nodes in between. Suites are NOT short-circuited — a
+# failure in one still runs the rest, so a red run reports everything broken rather
+# than only the first thing.
+BINCHAIN="$(dirname "${BASH_SOURCE[0]}")/run-binchain.sh"
+suite_rc=0
+
+run_suite() { # target, then scenario names
+  local target="$1"
+  shift
+  echo "═══════ suite: ${target} ═══════"
+  if ! SCENARIOS="$*" TEST_TARGET="${target}" bash "${BINCHAIN}"; then
+    echo "suite ${target} FAILED" >&2
+    suite_rc=1
+  fi
+}
+
 echo "running integration tests (binary chain) ..."
-exec bash "$(dirname "${BASH_SOURCE[0]}")/run-binchain.sh"
+run_suite integration zero_hop one_hop
+run_suite return_path \
+  return_paths_should_spread_across_distinct_relayers \
+  session_should_survive_return_relayer_loss \
+  session_should_survive_forward_relayer_loss \
+  session_should_survive_common_mode_return_outage \
+  a_symmetric_session_should_survive_relayer_loss
+run_suite exit_origination exit_should_keep_originating_when_a_return_path_becomes_unresolvable
+
+exit "${suite_rc}"
