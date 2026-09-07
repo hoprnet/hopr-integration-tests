@@ -187,7 +187,7 @@ Optional repo _variables_:
 | ------------ | -------------- | ---------------------------------------------------------------------- |
 | `HOPRD_LINE` | `release/4.1`  | hoprd release line the binaries and any dispatched rev must belong to  |
 | `HOPRD_REF`  | `$HOPRD_LINE`  | hoprd ref override                                                     |
-| `EDGLI_REF`  | `main`         | edge-client ref override                                               |
+| `EDGLI_REF`  | `release/4.1`  | edge-client ref override (the v4 line — `main` is v5 since #151)       |
 | `BLOKLI_REF` | `release/0.13` | blokli ref override (default is a moving branch, not a release number) |
 
 There are no gate variables — thresholds are hardcoded in

@@ -9,26 +9,33 @@ publish = false
 [dependencies]
 # edgli re-exports hopr_lib, strategy, traits and BlockchainConnectorConfig, so it
 # is the single source of the hoprnet rev — no second git dep to keep in sync.
-# Tracks edge-client `main`, which is what CI resolves to anyway: scripts/integration/run.sh
-# rewrites this to EDGLI_REF (default `main` HEAD, or the rev from a merge dispatch) and runs
-# `cargo update -p edgli`. A branch rather than a `rev` keeps the committed default from drifting
-# behind what CI actually tests; the lock still pins the exact commit for reproducibility.
+# Tracks edge-client `release/4.1`, NOT `main`. edge-client `main` moved its hopr-lib pin to
+# hoprnet `master` (v5) in #151 on 2026-09-04 — that rev is `identical` to master and `diverged`
+# from `release/4.0` — so tracking `main` would pair a v5 edge client with the v4 hoprd this gate
+# exists to test. `release/4.1` is cut from 1e211419, the last commit whose hopr-lib was still
+# `branch = "release/4.0"`.
+#
+# scripts/integration/run.sh rewrites this to EDGLI_REF and runs `cargo update -p edgli`. A branch
+# rather than a `rev` keeps the committed default from drifting behind what CI tests; the lock
+# still pins the exact commit for reproducibility.
 #
 # To test an unmerged edge-client change, override the ref rather than committing a rev here.
-edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", default-features = false, features = [
+edgli = { git = "https://github.com/hoprnet/edge-client", branch = "release/4.1", default-features = false, features = [
   "runtime-tokio",
   "blokli",
-] }
-
-# Pulled in only to switch on hopr-lib's `telemetry` feature, which is what compiles
-# `mod telemetry` into hopr-transport-session. Without it every per-session counter is absent
-# rather than zero, and "the session received nothing" is indistinguishable from "the metric was
-# never built". Must name the same source and branch edgli resolves — `release/4.0`, which
-# edge-client `main` pins — or the lock carries two hopr-libs and the entry runs a mixture.
-#
-# To test an unmerged hoprnet change, override this alongside `edgli` rather than committing a
-# feature branch here.
-hopr-lib = { git = "https://github.com/hoprnet/hoprnet", branch = "release/4.0", default-features = false, features = [
+  # Switches on `hopr-lib/telemetry`, which is what compiles `mod telemetry` into
+  # hopr-transport-session. Without it every per-session counter is absent rather
+  # than zero, and "the session received nothing" is indistinguishable from "the
+  # metric was never built".
+  #
+  # Requested through edgli's OWN feature rather than by depending on hopr-lib here
+  # and enabling it there. A direct dependency has to name the same source edgli
+  # names or cargo resolves two separate hopr-lib packages, and the feature then
+  # applies to ours while `edgli::hopr_lib` — which all of this code actually uses —
+  # gets the other one without it. That is exactly what broke on 2026-09-04:
+  # edge-client main moved its pin to a `rev` that had diverged from `release/4.0`,
+  # and `edgli::hopr_lib::collect_hopr_metrics` vanished because that copy was built
+  # without `telemetry`. Going through edgli makes the mismatch impossible.
   "telemetry",
 ] }
 

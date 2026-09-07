@@ -12,19 +12,23 @@
 # So a hoprd/edge-client merge is tested against the current tip of the other and
 # the current Jura blokli.
 #
-# Branch model — hoprd is split into v4 and v5. hoprd `main` is v5; this test
-# targets v4, because the integration crate pins hoprnet `release/4.0` (hopr-lib)
-# and edge-client `main` resolves the same hopr-lib. Building hoprd from `main`
-# would run a v5 binary against a v4 library set, which is not a supported
-# combination. So HOPRD_LINE below is the branch the hoprd binaries come from, and
-# any dispatched hoprd rev is required to be contained in it.
+# Branch model — every project is split into v4 and v5, and this test targets v4:
+#   hoprd       v4 = release/4.1   (v5 = main)
+#   hoprnet     v4 = release/4.0   (v5 = master)
+#   edge-client v4 = release/4.1   (v5 = main)  <- cut 2026-09-07 from 1e211419
+#   blokli      v4 = release/0.13  (the Jura line)
+# edge-client `main` used to track hoprnet `release/4.0` and no longer does: #151
+# repinned it to hoprnet `master` on 2026-09-04. Tracking `main` would therefore pair
+# a v5 edge client with a v4 hoprd, so EDGLI_REF defaults to the v4 branch instead.
+# HOPRD_LINE below is the branch the hoprd binaries come from, and any dispatched
+# hoprd rev is required to be contained in it.
 #
 # Inputs (env):
 #   PROJECT          hoprd | edge-client | blokli | "" (manual = all defaults)
 #   OVERRIDE_REV     git rev for PROJECT when it is hoprd or edge-client
 #   HOPRD_LINE       hoprd release line the rev must belong to (default: release/4.1)
 #   HOPRD_REF        default hoprd ref       (default: ${HOPRD_LINE})
-#   EDGLI_REF        default edge-client ref (default: main)
+#   EDGLI_REF        default edge-client ref (default: release/4.1, the v4 line)
 #   BLOKLI_REF       blokli ref override     (default: release/0.13, a moving branch)
 #   HOPRD_SKIP_LINE_CHECK  set to 1 to run a hoprd rev outside HOPRD_LINE anyway
 #   NIX_SYSTEM_SUFFIX    nix output arch suffix (default: x86_64-linux)
@@ -36,7 +40,7 @@ ARCH="${NIX_SYSTEM_SUFFIX:-x86_64-linux}"
 
 HOPRD_LINE="${HOPRD_LINE:-release/4.1}"
 HOPRD_REF="${HOPRD_REF:-${HOPRD_LINE}}"
-EDGLI_REF="${EDGLI_REF:-main}"
+EDGLI_REF="${EDGLI_REF:-release/4.1}"
 
 # The triggering project overrides its own rev; the other keeps its default above.
 case "${PROJECT:-}" in
@@ -46,7 +50,7 @@ edge-client) EDGLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=edge-c
 # so a dispatch from it must actually build the dispatched rev rather than the
 # branch head. Set here and consumed by the BLOKLI_REF default further down.
 blokli) BLOKLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=blokli}" ;;
-"" | manual) echo "no PROJECT override — hoprd at ${HOPRD_LINE}, edge-client at main, blokli at ${BLOKLI_REF:-release/0.13}" ;;
+"" | manual) echo "no PROJECT override — hoprd at ${HOPRD_LINE}, edge-client at ${EDGLI_REF}, blokli at ${BLOKLI_REF:-release/0.13}" ;;
 *)
   echo "unknown PROJECT '${PROJECT}'" >&2
   exit 2
