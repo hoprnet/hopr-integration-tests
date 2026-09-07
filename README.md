@@ -1,4 +1,4 @@
-# hoprd-test
+# hopr-integration-tests
 
 Cross-repo **integration throughput test** for the HOPR stack: stands up a
 3-node `hoprd-localcluster` (anvil + blokli + 3 `hoprd` processes, full-mesh
@@ -277,7 +277,7 @@ comparable. The `#[ignore]` e2e is **not** run here. All three build in the
 hoprnet dev shell. Locally: `just lint` + `just unit`.
 
 `integration.yaml` runs on `repository_dispatch[integration]` (fired by `hoprd` /
-`edge-client` on merge), on manual `workflow_dispatch`, and on a hoprd-test PR
+`edge-client` on merge), on manual `workflow_dispatch`, and on a hopr-integration-tests PR
 labelled **`run-integration`** (to test changes to this repo against the live
 stack). Concurrency: a new push to a PR **cancels** that PR's in-progress run;
 dispatch/manual runs **stack** (shared group, never cancelled) and execute one
@@ -312,7 +312,7 @@ Defaults are overridable via repo variables `HOPRD_LINE`, `HOPRD_REF`,
 Manual run:
 
 ```bash
-gh workflow run integration.yaml -R hoprnet/hoprd-test \
+gh workflow run integration.yaml -R hoprnet/hopr-integration-tests \
   -f project=hoprd -f rev=<sha>          # or project=edge-client
 # empty inputs → hoprd at release/4.1, edge-client at main, blokli at release/0.13
 ```

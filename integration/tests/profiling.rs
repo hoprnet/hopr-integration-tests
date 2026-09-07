@@ -12,7 +12,7 @@
 //! # Requirements (all three must hold or tokio-console sees nothing)
 //!
 //! 1. `RUSTFLAGS="--cfg tokio_unstable --check-cfg cfg(tokio_unstable)"` — enables tokio's
-//!    task instrumentation at compile time. (hoprd-test has no base rustflags to clobber,
+//!    task instrumentation at compile time. (hopr-integration-tests has no base rustflags to clobber,
 //!    so setting `RUSTFLAGS` here is safe — unlike edge-client, which relies on a
 //!    `.cargo/config.toml`.)
 //! 2. `--profile tracer` — inherits `release` (no stack overflow) but re-enables

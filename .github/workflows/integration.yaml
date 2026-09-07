@@ -6,7 +6,7 @@ name: Integration throughput test
 #   * manual workflow_dispatch,
 #   * the MERGE QUEUE for this repo's own `main` — so a change here cannot land
 #     without the test passing, whether or not anyone remembered the label,
-#   * a hoprd-test PR labelled `run-integration` (to run it before queueing).
+#   * a hopr-integration-tests PR labelled `run-integration` (to run it before queueing).
 # Each triggering project supplies its own rev; the other two use the defaults in
 # scripts/integration/run.sh.
 on:
@@ -140,7 +140,7 @@ jobs:
       # dir inside it is rebuilt from scratch on every run of a persistent box.
       - name: Point cargo at a persistent target dir
         run: |
-          dir="${HOME}/.cache/hoprd-test/cargo-target-${RUNNER_NAME}"
+          dir="${HOME}/.cache/hopr-integration-tests/cargo-target-${RUNNER_NAME}"
           mkdir -p "${dir}"
           echo "CARGO_TARGET_DIR=${dir}" >> "${GITHUB_ENV}"
       # Deliberately NOT `hopr-workflows/actions/setup-nix` here. That action falls
@@ -228,10 +228,10 @@ jobs:
           # would have labelled every hoprd merge gate a "manual run".
           if [ "${EVENT}" = "merge_group" ]; then
             # This repo's own merge queue: the candidate is this PR merged into main.
-            echo "TRIGGER=hoprd-test merge queue ([\`${MQ_SHA:0:8}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${MQ_SHA}))"
+            echo "TRIGGER=hopr-integration-tests merge queue ([\`${MQ_SHA:0:8}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${MQ_SHA}))"
           elif [ "${EVENT}" = "pull_request" ]; then
             # A PR in THIS repo.
-            echo "TRIGGER=hoprd-test PR [#${PR_NUMBER}](${PR_URL}) (\`${PR_REF}\`)"
+            echo "TRIGGER=hopr-integration-tests PR [#${PR_NUMBER}](${PR_URL}) (\`${PR_REF}\`)"
           elif [ -n "${PROJECT}" ] && [ -n "${OVERRIDE_REV}" ]; then
             # A gate or label run from hoprd / edge-client / blokli. MARKER is set
             # only by the waiting callers, which is what distinguishes their runs

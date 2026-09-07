@@ -105,7 +105,7 @@ jobs:
       # because the `runner` context is not available at that level.
       - name: Point cargo at a persistent target dir
         run: |
-          dir="${HOME}/.cache/hoprd-test/cargo-target-${RUNNER_NAME}"
+          dir="${HOME}/.cache/hopr-integration-tests/cargo-target-${RUNNER_NAME}"
           mkdir -p "${dir}"
           echo "CARGO_TARGET_DIR=${dir}" >> "${GITHUB_ENV}"
       # Same as integration.yaml: `setup-nix` would try `install-nix-action`, which
