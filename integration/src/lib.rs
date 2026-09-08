@@ -28,6 +28,11 @@ pub mod pix;
 pub mod pump;
 pub mod relayers;
 pub mod session_metrics;
+// Ungated for the same reason `pix` is: the profile is arithmetic over constants, and its
+// compile-time guards and unit tests are what catch a geometry edited without re-deriving what
+// depends on it. Those should run in the default `cargo test --lib`, not only under `--features pix`.
+pub mod shapes;
+pub mod udp_service;
 
 /// Payload size pumped through each session. Also sizes the strategy's expected
 /// packet count for channel funding (see [`env`]).
@@ -47,3 +52,10 @@ pub use edgli::hopr_lib::api::types::primitive::prelude::HoprBalance;
 /// The session type scenarios operate on, re-exported to spare callers the path through
 /// Edgli's re-export chain.
 pub use edgli::hopr_lib::exports::transport::HoprSession;
+
+/// What a Session connects to at the far end, re-exported for the same reason as [`HoprSession`].
+///
+/// `ExitNode(0)` is the Exit's built-in loopback and is what most scenarios want. The `UdpStream`
+/// and `TcpStream` variants point at an ordinary socket on the Exit's host, which is how a shape
+/// gets traffic that is *not* symmetric — see `env::IntegrationEnv::open_pix_session_with`.
+pub use edgli::hopr_lib::exports::transport::SessionTarget;

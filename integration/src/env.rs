@@ -187,6 +187,18 @@ impl IntegrationEnv {
     /// nothing here funds the entry any more.
     #[cfg(feature = "pix")]
     pub async fn setup_pix(budget: crate::HoprBalance) -> anyhow::Result<Self> {
+        Self::setup_pix_with(crate::pix::entry_config(budget)?).await
+    }
+
+    /// As [`Self::setup_pix`], but with the entry's whole PIX settlement configuration supplied.
+    ///
+    /// A traffic-shape scenario needs this because its price, per-deposit ceiling and budget are
+    /// all derived from a geometry 2 500x the demo one: at the demo price a cycle there costs more
+    /// than the demo's own `max_ssa_allocation`, so every deposit is refused for being over the
+    /// ceiling — which reads from the Exit as an entry that never paid. See
+    /// [`crate::shapes::entry_config`].
+    #[cfg(feature = "pix")]
+    pub async fn setup_pix_with(pix: edgli::PixEntryConfig) -> anyhow::Result<Self> {
         cluster::request_pix();
         let cluster = cluster::bring_up().await?;
         let summary = cluster.summary.clone();
@@ -197,9 +209,7 @@ impl IntegrationEnv {
             &extra,
             &NetTuning::local(),
             cluster_size(),
-            ExtraStrategies {
-                pix: Some(crate::pix::entry_config(budget)?),
-            },
+            ExtraStrategies { pix: Some(pix) },
         )
         .await?;
 
@@ -402,22 +412,59 @@ impl IntegrationEnv {
              {return_hops} return): the share encryption key derives from the first relayer's \
              acknowledgement, so a zero-hop path is refused"
         );
+        self.open_pix_session_with(
+            forward_hops,
+            return_hops,
+            SurbBalancerConfig {
+                target_surb_buffer_size: PIX_RESPONSE_BUFFER_BYTES / SESSION_MTU as u64,
+                max_surbs_per_sec: PIX_MAX_SURB_UPSTREAM_BITS / (8 * SURB_SIZE as u64),
+                ..SurbBalancerConfig::default()
+            },
+            SessionTarget::ExitNode(0),
+        )
+        .await
+    }
+
+    /// [`open_pix_session`](Self::open_pix_session) with the SURB balancer and the target named by
+    /// the caller.
+    ///
+    /// Both are what a traffic-shape scenario has to own rather than inherit:
+    ///
+    /// * the **balancer** because buffer depth is the knob with a measured failure on both sides —
+    ///   too shallow starves the Exit mid-cycle, too deep parks share-less SURBs ahead of the
+    ///   cycle's own — and the right depth is a fraction of a cycle, so it moves with the geometry
+    ///   rather than being a constant. See `crate::shapes::surb_buffer_target`.
+    /// * the **target** because `ExitNode(0)` is the Exit's built-in loopback, which echoes every
+    ///   byte back. That makes every shape byte-symmetric, and PIX is paid for the *return*
+    ///   direction — so the shapes that matter most to it, a bulk upload with almost nothing coming
+    ///   back, cannot be expressed against a loopback at all. A `UdpStream` target pointed at an
+    ///   asymmetric service is how they are.
+    #[cfg(feature = "pix")]
+    pub async fn open_pix_session_with(
+        &self,
+        forward_hops: usize,
+        return_hops: usize,
+        surb_management: SurbBalancerConfig,
+        target: SessionTarget,
+    ) -> anyhow::Result<(HoprSession, Address)> {
+        anyhow::ensure!(
+            forward_hops >= 1 && return_hops >= 1,
+            "PIX needs at least one relay on each path (got {forward_hops} forward, \
+             {return_hops} return): the share encryption key derives from the first relayer's \
+             acknowledgement, so a zero-hop path is refused"
+        );
         let dest = self.dest_for(forward_hops)?;
         let base = HoprSessionClientConfig {
             forward_path: HopRouting::try_from(forward_hops)?,
             return_path: HopRouting::try_from(return_hops)?,
             capabilities: SessionCapability::Segmentation | SessionCapability::NoDelay,
             always_max_out_surbs: true,
-            surb_management: Some(SurbBalancerConfig {
-                target_surb_buffer_size: PIX_RESPONSE_BUFFER_BYTES / SESSION_MTU as u64,
-                max_surbs_per_sec: PIX_MAX_SURB_UPSTREAM_BITS / (8 * SURB_SIZE as u64),
-                ..SurbBalancerConfig::default()
-            }),
+            surb_management: Some(surb_management),
             ..Default::default()
         };
         let (session, _) = self
             .edgli
-            .connect_to(dest, SessionTarget::ExitNode(0), self.edgli.with_pix(base)?)
+            .connect_to(dest, target, self.edgli.with_pix(base)?)
             .await?;
         Ok((session, dest))
     }
@@ -526,8 +573,18 @@ async fn boot_edgli(
         );
     }
 
+    // The population floor is the target, so the close pass can never run: it stops as soon as
+    // `remaining_open <= min_open_channels`, and with the two equal there is nothing it may close.
+    //
+    // A floor of one let it close two of three channels ten minutes into a quiet Session, after
+    // which every forward send failed with `cannot find 1 hop path` — 16 866 times in one run,
+    // while the Session itself was healthy and had just completed a PIX cycle. Zeroing
+    // `close_below_quality_score` below removes the *quality* trigger but not the others, and no
+    // scenario in this crate relies on the strategy closing a channel: the one that needs a
+    // relayer gone kills its process instead. So the floor is the reliable guard, and the quality
+    // threshold stays as defence in depth.
     let sizing = IncentiveConfiguration {
-        min_open_channels: 1,
+        min_open_channels: target_channels + genesis_channels,
         target_open_channels: target_channels + genesis_channels,
         ..Default::default()
     };
@@ -546,6 +603,22 @@ async fn boot_edgli(
                 require_observed_since_start: false,
                 ..Default::default()
             };
+            // Never close a channel over its peer's quality score.
+            //
+            // Eligibility above governs which peers are worth *opening* to; this governs closing,
+            // and on a local cluster the two disagree in a way that ends long scenarios. Probing
+            // needs traffic to score a peer, and a Session that is deliberately quiet — an idle
+            // PIX shape sends 32 bytes every 25 s — produces almost none, so the score decays
+            // below the 0.3 default and the strategy closes the channel underneath a Session that
+            // is working perfectly. Measured: channels opened at T+0 were closed at T+10m07s,
+            // after which every forward send failed with `cannot find 1 hop path` — 17 522 times
+            // in one run.
+            //
+            // Zeroed rather than lowered, for the reason `min_peer_quality_score` above is: the
+            // three relays in a local cluster are the only ones there are, so closing one on
+            // quality does not reroute around a bad peer, it removes the path. Scenarios that
+            // *want* a peer gone kill the process instead — see `tests/return_path.rs`.
+            lc.closure.close_below_quality_score = 0.0;
             lc.tick_interval = tuning.strategy_tick;
         }
     }

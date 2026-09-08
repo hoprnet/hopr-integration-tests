@@ -129,6 +129,32 @@ pub fn pix_enabled() -> bool {
     REQUESTED_PIX.get().copied().unwrap_or(false)
 }
 
+static REQUESTED_PIX_SETTINGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Ask for PIX to be enabled with a *named geometry*, before the first [`bring_up`].
+///
+/// Implies [`request_pix`]. `yaml` is a `hoprd-localcluster` PIX config — every field optional and
+/// merged onto the demo defaults — written into the cluster's data dir and passed as
+/// `--pix-config <path>`.
+///
+/// Why a scenario would want this: `--enable-pix` alone selects a demo geometry of 8 polynomials
+/// x (2 + 2), which is a cycle of **32 packets**. That is the right size for asserting the deposit
+/// exchange happens at all — it is what `tests/pix.rs` uses — and useless for asking whether a
+/// *traffic shape* sustains its cycles, because a single 64 KiB write spans two of them. Anything
+/// measuring a shape has to state a geometry whose cycle is long enough for the shape to exist
+/// inside it.
+///
+/// The ratios that govern PIX are what such a geometry has to preserve, not the absolute rates:
+/// the SURB buffer as a fraction of a cycle's emission, the free credit against the queue depth,
+/// and the fill rate against the recovery deadline. See `tests/pix_shapes.rs`, which derives all
+/// three from one profile.
+///
+/// First call in a test binary wins.
+pub fn request_pix_settings(yaml: impl Into<String>) -> &'static str {
+    request_pix();
+    REQUESTED_PIX_SETTINGS.get_or_init(|| yaml.into())
+}
+
 pub const API_PORT_BASE: u16 = 13000;
 pub const P2P_PORT_BASE: u16 = 19000;
 pub const API_HOST: &str = "127.0.0.1";
@@ -524,8 +550,20 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         &channel_funding_amount(),
     ]);
     if pix_enabled() {
-        tracing::info!("cluster nodes will be configured for PIX");
-        cmd.arg("--enable-pix");
+        // `--pix-config` implies `--enable-pix`, so the two are exclusive rather than additive:
+        // passing both would be harmless today but states the geometry twice.
+        if let Some(yaml) = REQUESTED_PIX_SETTINGS.get() {
+            let path = data_dir.join("pix.yaml");
+            std::fs::write(&path, yaml).context("writing PIX settings")?;
+            cmd.args(["--pix-config", path.to_str().unwrap()]);
+            tracing::info!(
+                ?path,
+                "cluster nodes will be configured for PIX with a named geometry"
+            );
+        } else {
+            tracing::info!("cluster nodes will be configured for PIX at the demo geometry");
+            cmd.arg("--enable-pix");
+        }
     }
     // Written inside the data dir so it lives exactly as long as the cluster does.
     if let Some(yaml) = REQUESTED_LATENCY.get() {

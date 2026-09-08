@@ -78,17 +78,42 @@ pub const MAX_DEPOSIT_TRACKING_TIME: std::time::Duration = std::time::Duration::
 /// is reached would never end.
 pub const SPEND_WINDOW: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
+#[cfg(feature = "pix")]
+static REQUESTED_DIMENSIONS: std::sync::OnceLock<edgli::PixGlobalConfig> =
+    std::sync::OnceLock::new();
+
+/// Ask for the Entry to announce a geometry other than [`dimensions`]'s default, before the first
+/// [`IntegrationEnv::setup_pix`](crate::IntegrationEnv::setup_pix).
+///
+/// The two halves have to be requested together and cannot be derived from one another here: this
+/// sets what the *Entry* announces, while `cluster::request_pix_settings` sets the window the
+/// *Exit* accepts, and they are read by different processes. A mismatch is not subtle but it is
+/// silent from this side — the Exit refuses the Session with `UnacceptablePixParams` before a byte
+/// moves, which arrives here as a session-open timeout. [`crate::shapes::install_profile`] is the
+/// supported way to move both at once.
+///
+/// First call in a test binary wins.
+#[cfg(feature = "pix")]
+pub fn request_dimensions(cfg: edgli::PixGlobalConfig) -> &'static edgli::PixGlobalConfig {
+    REQUESTED_DIMENSIONS.get_or_init(|| cfg)
+}
+
 /// The generator dimensions this test runs with, as edgli's `protocol.pix`.
+///
+/// The demo geometry unless [`request_dimensions`] named another.
 ///
 /// `additional_shares` is `Some` deliberately — see [`PIX_ADDITIONAL_SHARES`].
 #[cfg(feature = "pix")]
 pub fn dimensions() -> edgli::PixGlobalConfig {
-    edgli::PixGlobalConfig {
-        num_ssa_parts: PIX_POLYS,
-        ssa_part_size: PIX_SHARES,
-        additional_shares: Some(PIX_ADDITIONAL_SHARES),
-        ..Default::default()
-    }
+    REQUESTED_DIMENSIONS
+        .get()
+        .cloned()
+        .unwrap_or_else(|| edgli::PixGlobalConfig {
+            num_ssa_parts: PIX_POLYS,
+            ssa_part_size: PIX_SHARES,
+            additional_shares: Some(PIX_ADDITIONAL_SHARES),
+            ..Default::default()
+        })
 }
 
 /// The entry-side settlement configuration matching [`dimensions`], budgeted at `budget` wxHOPR.

@@ -144,6 +144,40 @@ pub struct PumpOpts {
     /// burst and then nothing, which both distorts share pacing and lets a cycle outrun the
     /// deposit paying for it.
     pub chunk: Option<usize>,
+    /// The schedule the payload is offered on; `None` is [`Shape::Constant`].
+    ///
+    /// `pace` and `chunk` fix a *rate*; this fixes what the traffic looks like around that rate.
+    /// An application does not usually offer bytes uniformly — a browser is quiet and then busy,
+    /// and a VPN client with nothing to carry still sends a keep-alive every 25 s — and PIX is
+    /// sensitive to the difference in a way a throughput test is not, because a cycle advances on
+    /// the *return* packets the shape produces and its deadline runs whether or not any arrive.
+    pub shape: Option<Shape>,
+}
+
+/// How the writer distributes a payload over time.
+///
+/// Only the writer reads this. Attribution, the stopping rule and every [`Transfer`] statistic are
+/// unchanged by it — they already handle silence, holes and out-of-phase arrivals, which is what a
+/// shaped stream produces anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shape {
+    /// One chunk every `pace`, until the payload is spent. The behaviour before shapes existed.
+    #[default]
+    Constant,
+    /// `on` bytes offered at the pace, then `off` of silence, repeating.
+    ///
+    /// Browsing: a page load is a burst of a few tens of kB and then a pause while it is read. The
+    /// duty cycle is what makes it a shape rather than a slower constant stream — the same bytes
+    /// spread evenly would keep a PIX cycle advancing steadily, where a real client leaves gaps
+    /// the Exit's own fill has to decide whether to cover.
+    Burst { on: usize, off: Duration },
+    /// One `bytes`-sized write every `every`, ignoring the payload's length beyond it.
+    ///
+    /// Idle: WireGuard's persistent keep-alive is one small datagram every 25 s, and that is the
+    /// whole of what an otherwise-silent tunnel puts on the wire. It is far below any rate that
+    /// advances a PIX cycle, which is the point — this is the shape that strands a deposit unless
+    /// the Exit fills the cycle itself.
+    Keepalive { every: Duration, bytes: usize },
 }
 
 /// Result of one loopback round-trip.
@@ -451,7 +485,17 @@ pub async fn pump_loopback(
 /// rather than a session working — and a recovery that takes longer than that has nothing left to
 /// demonstrate itself on.
 pub fn pace_for_rate(mbps: f64) -> Option<Duration> {
-    (mbps > 0.0).then(|| Duration::from_secs_f64(IO_CHUNK as f64 / (mbps * 1_000_000.0)))
+    pace_for_rate_with_chunk(mbps, IO_CHUNK)
+}
+
+/// [`pace_for_rate`] for a caller that also sets [`PumpOpts::chunk`].
+///
+/// The delay is per *write*, so deriving it from [`IO_CHUNK`] while the writer offers something
+/// else scales the achieved rate by the ratio of the two — at a chunk of 900 against the 64 KiB
+/// default, by a factor of 73, silently and in the direction of far too slow. Any caller pairing a
+/// rate with a chunk has to state both here.
+pub fn pace_for_rate_with_chunk(mbps: f64, chunk: usize) -> Option<Duration> {
+    (mbps > 0.0 && chunk > 0).then(|| Duration::from_secs_f64(chunk as f64 / (mbps * 1_000_000.0)))
 }
 
 /// Upper bound on a single drain, however busy the stream stays.
@@ -531,7 +575,12 @@ pub async fn pump_halves(
     let total_bytes = payload.len();
     // Zero would spin forever offering nothing, so an explicit 0 falls back rather than hanging.
     // Resolved before the pace, which the environment expresses per chunk.
-    let chunk = opts.chunk.filter(|c| *c > 0).unwrap_or(IO_CHUNK);
+    // `Keepalive` carries its own write size — one datagram per interval is the whole shape, so a
+    // separate `chunk` would either split the datagram or pad it.
+    let chunk = match opts.shape {
+        Some(Shape::Keepalive { bytes, .. }) => bytes.max(1),
+        _ => opts.chunk.filter(|c| *c > 0).unwrap_or(IO_CHUNK),
+    };
     let pace = opts.pace.or_else(|| send_pace_per_chunk(chunk));
 
     // Everything is stamped against the moment the pump started, not the first byte back. On a
@@ -544,13 +593,38 @@ pub async fn pump_halves(
 
     let send = async {
         let mut offset = 0;
+        // Bytes offered since the last burst boundary, for `Shape::Burst`. Counted rather than
+        // derived from `offset` so a burst boundary does not have to divide the payload evenly.
+        let mut since_pause = 0usize;
         while offset < payload.len() {
             let end = (offset + chunk).min(payload.len());
             tx.write_all(&payload[offset..end]).await?;
-            if let Some(d) = pace {
-                tokio::time::sleep(d).await;
-            }
+            let written = end - offset;
             offset = end;
+
+            match opts.shape.unwrap_or_default() {
+                Shape::Constant => {
+                    if let Some(d) = pace {
+                        tokio::time::sleep(d).await;
+                    }
+                }
+                Shape::Burst { on, off } => {
+                    since_pause += written;
+                    if since_pause >= on {
+                        since_pause = 0;
+                        // Flushed at the boundary so the burst is on the wire before the gap, not
+                        // sitting in a buffer that makes the gap look shorter than it is.
+                        tx.flush().await?;
+                        tokio::time::sleep(off).await;
+                    } else if let Some(d) = pace {
+                        tokio::time::sleep(d).await;
+                    }
+                }
+                Shape::Keepalive { every, .. } => {
+                    tx.flush().await?;
+                    tokio::time::sleep(every).await;
+                }
+            }
         }
         tx.flush().await?;
         // After the flush, so the cap starts from the last byte actually handed over rather than
@@ -1373,5 +1447,73 @@ mod tests {
         assert_eq!(dead.steady_state_mbps(Duration::from_secs(3)), 0.0);
         assert_eq!(dead.inter_arrival_quantile(0.5), None);
         assert!((dead.longest_stall() - 30.0).abs() < 1e-9);
+    }
+
+    /// A rate paired with a chunk has to be derived from *that* chunk.
+    ///
+    /// [`pace_for_rate`] assumes [`IO_CHUNK`], so a caller setting `PumpOpts::chunk` and reaching
+    /// for it gets a pace 73x too slow at the 900-byte chunk the PIX scenarios use — a run that
+    /// then measures its own pacing bug as a throughput result.
+    #[test]
+    fn a_pace_derived_for_one_chunk_does_not_fit_another() {
+        let default_chunk = pace_for_rate(1.0).expect("a positive rate paces");
+        let small_chunk = pace_for_rate_with_chunk(1.0, 900).expect("a positive rate paces");
+
+        assert_eq!(
+            Duration::from_secs_f64(IO_CHUNK as f64 / 1_000_000.0),
+            default_chunk
+        );
+        assert_eq!(Duration::from_secs_f64(900.0 / 1_000_000.0), small_chunk);
+        // The trap, stated as a ratio so it cannot be read as a rounding difference.
+        assert!(
+            default_chunk.as_secs_f64() / small_chunk.as_secs_f64() > 70.0,
+            "the two paces differ by {:.0}x; a caller taking the wrong one is not making a small error",
+            default_chunk.as_secs_f64() / small_chunk.as_secs_f64()
+        );
+    }
+
+    /// A zero rate or a zero chunk paces nothing rather than dividing by zero.
+    #[test]
+    fn a_degenerate_rate_or_chunk_yields_no_pace() {
+        assert_eq!(None, pace_for_rate(0.0));
+        assert_eq!(None, pace_for_rate(-1.0));
+        assert_eq!(None, pace_for_rate_with_chunk(1.0, 0));
+    }
+
+    /// `Keepalive` sizes its own write, so a stray `chunk` cannot split or pad the datagram.
+    ///
+    /// The resolution lives in `pump_halves`, which needs a session; this pins the rule itself,
+    /// which is the part a refactor would silently drop.
+    #[test]
+    fn a_keepalive_shape_writes_one_datagram_per_interval() {
+        let opts = PumpOpts {
+            chunk: Some(64 * 1024),
+            shape: Some(Shape::Keepalive {
+                every: Duration::from_secs(25),
+                bytes: 32,
+            }),
+            ..Default::default()
+        };
+
+        // Mirrors the resolution in `pump_halves`: the shape wins over `chunk`.
+        let resolved = match opts.shape {
+            Some(Shape::Keepalive { bytes, .. }) => bytes.max(1),
+            _ => opts.chunk.filter(|c| *c > 0).unwrap_or(IO_CHUNK),
+        };
+        assert_eq!(32, resolved, "a keep-alive must not be sized by `chunk`");
+    }
+
+    /// The default shape is the behaviour that existed before shapes did.
+    ///
+    /// `PumpOpts::default()` is what every existing caller passes, so this is what says the
+    /// addition changed none of them.
+    #[test]
+    fn the_default_shape_is_constant() {
+        assert_eq!(Shape::Constant, Shape::default());
+        assert_eq!(None, PumpOpts::default().shape);
+        assert_eq!(
+            Shape::Constant,
+            PumpOpts::default().shape.unwrap_or_default()
+        );
     }
 }

@@ -38,7 +38,11 @@ edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", defau
 #
 # To test an unmerged hoprnet change, override this alongside `edgli` rather than committing a
 # feature branch here.
-hopr-lib = { git = "https://github.com/hoprnet/hoprnet", rev = "85e698a726710e205e8f76f4df7ad52debd2ff86", default-features = false, features = [
+#
+# Carries the Exit-side PIX fill (hoprnet#8396) that `tests/pix_shapes.rs` measures. edge-client
+# picked the same rev up in #160, so the three sides agree again by the ordinary mechanism and the
+# `[patch]` that held them together while it did not is gone.
+hopr-lib = { git = "https://github.com/hoprnet/hoprnet", rev = "57b5e6792391ef6d10c0029bcea274ee188be1cf", default-features = false, features = [
   "telemetry",
 ] }
 
@@ -119,4 +123,3 @@ debug-assertions = true
 [profile.flamegraph]
 inherits = "release"
 debug = true
-
