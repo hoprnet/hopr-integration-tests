@@ -51,14 +51,27 @@ the floor `validate_incoming_session_pix_config` enforces (`quota_range_max / 18
 Measured on a 3-node local cluster, 1 hop, binary chain. Every figure is from a run whose log is
 named beside it.
 
-| shape | traffic offered | result | run |
-| --- | --- | --- | --- |
-| **geometry spike** | 88 MB at 300 pkt/s | 100 % arrival at 0.21 Mbps; 1 cycle recovered + swept, 2 deposits confirmed; 590 s incl. bootstrap | `pix-spike` |
-| **idle** | 25 keep-alives of 32 B, one per 25 s | cycle recovered and successor funded **on fill alone**; liveness echo 7 200/7 200 B afterwards; 791 s | `run2` |
-| **browsing** | 40 kB bursts every 3 s (~13 kB/s) for 540 s | cycle recovered + successor funded; 708 s | `run3` |
-| **download** | service pushes 2 cycles at 300 pkt/s | *pending* | `run4` |
-| **upload** | 300 pkt/s into a sink for 540 s | *pending* | `run4` |
-| **mixed** | browse 180 s → quiet 120 s → bulk 1 cycle | *pending* | `run4` |
+All six pass. Counters are the Exit's `hopr_strategy_pix_*` delta over the scenario.
+
+| shape | traffic offered | recovered | swept | deposits | wall |
+| --- | --- | --- | --- | --- | --- |
+| **geometry spike** | 88 MB at 300 pkt/s, loopback | 1 | 1 | 2 | 590 s |
+| **idle** | 25 keep-alives of 32 B, one per 25 s | 1 | 1 | 2 | 791 s |
+| **browsing** | 40 kB bursts every 3 s (~13 kB/s), 540 s | 1 | 1 | 2 | 708 s |
+| **download** | service pushes 2 cycles at 300 pkt/s | 2 | 2 | 3 | 715 s |
+| **upload** | 300 pkt/s into a sink, nothing returns | 1 | 1 | 2 | 690 s |
+| **mixed** | browse 180 s → quiet 120 s → bulk 1 cycle | 2 | 2 | 3 | 1112 s |
+
+Not one scenario recorded a deposit timeout, and none was closed by the supervisor.
+
+Traffic that had to round-trip did: 100 % arrival on the spike, on the idle liveness echo
+(7 200/7 200 B) and on the mixed browsing phase; 99.9 % on the mixed bulk phase. The upload's
+sink absorbed everything offered and returned nothing, which is the shape.
+
+**The two shapes that carry no return traffic of their own — idle and upload — completed their
+cycles and funded their successors anyway.** That is Exit-side fill (hoprnet#8396) working end to
+end through a real chain, and it is the result this whole exercise was for: before it, both of
+those clients stranded every deposit they made while paying for the quota.
 
 ### What the numbers say
 
@@ -81,7 +94,11 @@ documents the flat 2048 as safe at any dimensions because `RecoveryProgress` now
 `shares_seen` rather than `useful_shares`. Nothing here needed it raised. **Those two documents
 should be corrected.**
 
-## Two findings that are not about PIX
+**A download completes cycles about twice as fast as anything else**, and for the expected reason:
+it is the only shape whose application traffic saturates the direction PIX bills, so it swept two
+cycles in the time the others took to sweep one. Fill has nothing to make up on it.
+
+## Three findings that are not about PIX
 
 **The entry closed its own channels ten minutes in.** `close_below_quality_score` defaults to 0.3
 and is separate from the eligibility threshold this harness already zeroes. Probing needs traffic
@@ -99,6 +116,13 @@ against the payload that was *sent*, because every other scenario here targets t
 A download's reply volume is the service's choice, so the pump declared `Complete` after 0.23 s
 against a 491 s push; an upload's is zero, so it would have declared `NeverStarted` at 30 s. Both
 shapes now drive the Session directly.
+
+**Reading a Session whose peer has stopped sending burns CPU.** The download's drain originally ran
+out its full budget rather than stopping when the sweeps landed, and spent two hours reading a
+Session whose service had finished pushing — four CPU-hours in thirty wall-clock minutes, roughly
+seven cores. The scenarios now stop their traffic as soon as the cycles they were waiting for have
+completed, which is correct regardless; but a read loop on an idle Session costing that much is
+worth someone looking at upstream, since a real client does exactly that between transfers.
 
 ## Fidelity limits
 
