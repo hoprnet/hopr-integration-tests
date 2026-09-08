@@ -39,9 +39,9 @@ edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", defau
 # To test an unmerged hoprnet change, override this alongside `edgli` rather than committing a
 # feature branch here.
 #
-# Ahead of edgli's own pin at the moment, which is why the `[patch]` at the bottom of this file
-# exists: this names the rev carrying the Exit-side PIX fill that `tests/pix_shapes.rs` measures,
-# and edgli has not followed yet. See there.
+# Carries the Exit-side PIX fill (hoprnet#8396) that `tests/pix_shapes.rs` measures. edge-client
+# picked the same rev up in #160, so the three sides agree again by the ordinary mechanism and the
+# `[patch]` that held them together while it did not is gone.
 hopr-lib = { git = "https://github.com/hoprnet/hoprnet", rev = "57b5e6792391ef6d10c0029bcea274ee188be1cf", default-features = false, features = [
   "telemetry",
 ] }
@@ -123,33 +123,3 @@ debug-assertions = true
 [profile.flamegraph]
 inherits = "release"
 debug = true
-
-
-# ── Holding the three sides of a PIX run on one hoprnet rev ───────────────────
-#
-# hoprnet#8396 (Exit-side PIX fill) landed on `master` as 57b5e6792391ef6d10c0029bcea274ee188be1cf,
-# which is the rev named above and the one `hoprd` builds from. **`edgli` has not followed yet** —
-# its `main` still pins the pre-fill 85e698a726 — so the `rev` above cannot simply be bumped: cargo
-# would resolve edgli's pin and this one to two different sources, putting two `hopr-lib`s in the
-# lock with the entry running one and its metrics registered in the other. That is the exact
-# failure the comments on `hopr-lib` and `hopr-strategy` above exist to prevent.
-#
-# So a `[patch]`, which rewrites the source for every consumer at once and leaves edgli and this
-# crate unable to disagree. Cargo refuses to patch a git source with the same git URL — even at a
-# different rev; it answers "patches must point to different sources" — so the replacement has to
-# be a path.
-#
-# The path is a **worktree pinned to that commit**, not the working checkout, and deliberately: a
-# path patch makes whatever is on disk the dependency, so an ordinary checkout would silently
-# rebuild these tests against whatever branch someone happened to leave it on. Create it with
-#
-#     git -C ../hoprnet worktree add ../hoprnet-pixfill 57b5e679 --detach
-#
-# The Exit is a separate process built from `HOPRD_SRC` and shares none of this graph; it reaches
-# the same rev through its own `Cargo.toml`. Both sides move together or a run measures a mixture
-# of two protocol revisions — which is not a thing production ever runs.
-#
-# When edgli picks up the rev: delete this section, and the worktree with it. The `rev` above is
-# already correct and will start being the thing that resolves.
-[patch."https://github.com/hoprnet/hoprnet"]
-hopr-lib = { path = "../../hoprnet-pixfill/hopr/hopr-lib" }
