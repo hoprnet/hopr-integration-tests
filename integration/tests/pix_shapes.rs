@@ -101,6 +101,66 @@ async fn await_sweeps(
     Ok(delta)
 }
 
+/// How long to keep watching the Exit's Safe after its counters say it swept.
+///
+/// A sweep is two on-chain round trips behind the reply that completed the cycle, so the balance
+/// lags the counter and reading it the instant `await_sweeps` returns undercounts.
+const PAYMENT_SETTLE: Duration = Duration::from_secs(180);
+
+/// Assert the Exit's Safe actually **received** what its counters say it swept.
+///
+/// Every other assertion in this file reads `hopr_strategy_pix_*`, which is the Exit's own
+/// bookkeeping: `keys_recovered` and `sweeps` say it got as far as recovering a key and submitting
+/// a sweep. Neither says money moved, and there is a documented path where it does not — a cycle
+/// that completes before its deposit transaction is mined leaves the Exit recovering a key against
+/// a zero balance, logging "already swept", and the funds stranded at the stealth address. Both
+/// counters increment on that path. Only the Safe balance tells them apart, and being paid is the
+/// entire point of PIX.
+///
+/// # Why `>=` rather than an exact multiple
+///
+/// `tests/pix.rs` asserts the delta is an exact whole number of per-SSA deposits, and that is the
+/// stronger check — a delta that is not a multiple means something other than PIX sweeps moved the
+/// balance. It can afford that because its cycles are ~13 s and its traffic is light. These
+/// scenarios run for ten to twenty minutes and push tens of megabytes through a full mesh in which
+/// the Exit is also a *relay*, and cluster nodes run `AutoRedeeming` by default — so a winning
+/// ticket redeemed mid-run lands in the same Safe and breaks the multiple for a reason that has
+/// nothing to do with PIX. Exactness is reported rather than asserted; the floor is what is
+/// enforced, and it is what excludes the failure above.
+async fn assert_exit_was_paid(
+    exit: &NodeInfo,
+    before: &pix::NodeBalances,
+    swept: u64,
+    required: u64,
+) -> anyhow::Result<()> {
+    let per_cycle = shapes::per_cycle()?;
+    // Poll for what the counters claim, so a run that swept more than the scenario demands is
+    // given time to settle all of it before the floor below is applied.
+    let target = per_cycle * swept.max(required);
+    let deadline = std::time::Instant::now() + PAYMENT_SETTLE;
+    let mut delta = pix::node_balances(exit).await?.safe - before.safe;
+    while std::time::Instant::now() < deadline && delta < target {
+        tokio::time::sleep(SETTLE_POLL).await;
+        delta = pix::node_balances(exit).await?.safe - before.safe;
+        tracing::info!(%delta, %target, "waiting for the Exit's Safe to receive the swept cycles");
+    }
+
+    let floor = per_cycle * required;
+    tracing::info!(
+        %delta, %floor, %per_cycle, swept,
+        whole_cycles = ?pix::completed_cycles(delta, per_cycle),
+        "the Exit's Safe over the scenario"
+    );
+    assert!(
+        delta >= floor,
+        "the Exit's counters claim {swept} swept cycle(s) but its Safe rose by only {delta}, \
+         against {floor} for the {required} this scenario requires. A sweep counted without funds \
+         arriving is the 'already swept' path — the key was recovered against a stealth address \
+         the deposit had not reached."
+    );
+    Ok(())
+}
+
 /// Bytes of payload that offer `cycles` whole cycles of return traffic.
 ///
 /// The Exit's loopback echoes every byte, so one chunk offered is one return packet — and one
@@ -224,6 +284,7 @@ async fn the_profile_geometry_completes_a_cycle() -> anyhow::Result<()> {
     let exit = node_for(&env, exit_addr)?;
 
     let before = pix::sample_exit(&exit).await?;
+    let paid_before = pix::node_balances(&exit).await?;
     anyhow::ensure!(
         before.observable(),
         "the Exit exposes no hopr_strategy_pix_* counters at all — it was built without \
@@ -277,6 +338,8 @@ async fn the_profile_geometry_completes_a_cycle() -> anyhow::Result<()> {
         delta.summary()
     );
 
+    assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 1).await?;
+
     tracing::info!(summary = %delta.summary(), "profile geometry spike PASSED");
     Ok(())
 }
@@ -315,6 +378,7 @@ async fn an_idle_session_completes_its_cycle_on_exit_fill() -> anyhow::Result<()
         .await?;
     let exit = node_for(&env, exit_addr)?;
     let before = pix::sample_exit(&exit).await?;
+    let paid_before = pix::node_balances(&exit).await?;
 
     // The aim point fill plans against. A cycle that has not completed by then has not been filled;
     // one that completes long after it was filled by something else.
@@ -388,6 +452,8 @@ async fn an_idle_session_completes_its_cycle_on_exit_fill() -> anyhow::Result<()
         echo.arrival_pct()
     );
 
+    assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 1).await?;
+
     tracing::info!(summary = %delta.summary(), "idle shape PASSED");
     Ok(())
 }
@@ -423,6 +489,7 @@ async fn a_browsing_session_sustains_its_cycles() -> anyhow::Result<()> {
         .await?;
     let exit = node_for(&env, exit_addr)?;
     let before = pix::sample_exit(&exit).await?;
+    let paid_before = pix::node_balances(&exit).await?;
 
     let (mut rx, mut tx) = tokio::io::split(session);
     let aim_point = shapes::MAX_RECOVERY_TIME.mul_f64(shapes::FILL_FINISH_FRACTION);
@@ -486,6 +553,8 @@ async fn a_browsing_session_sustains_its_cycles() -> anyhow::Result<()> {
         delta.summary()
     );
 
+    assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 1).await?;
+
     tracing::info!(summary = %delta.summary(), "browsing shape PASSED");
     Ok(())
 }
@@ -522,6 +591,7 @@ async fn a_download_session_sustains_its_cycles() -> anyhow::Result<()> {
         .await?;
     let exit = node_for(&env, exit_addr)?;
     let before = pix::sample_exit(&exit).await?;
+    let paid_before = pix::node_balances(&exit).await?;
 
     let (mut rx, mut tx) = tokio::io::split(session);
     // One datagram is the whole request; everything after it is the service's stream coming back.
@@ -572,6 +642,8 @@ async fn a_download_session_sustains_its_cycles() -> anyhow::Result<()> {
         delta.summary()
     );
 
+    assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 2).await?;
+
     tracing::info!(summary = %delta.summary(), "download shape PASSED");
     Ok(())
 }
@@ -600,6 +672,7 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
         .await?;
     let exit = node_for(&env, exit_addr)?;
     let before = pix::sample_exit(&exit).await?;
+    let paid_before = pix::node_balances(&exit).await?;
 
     let (_rx, mut tx) = tokio::io::split(session);
     let aim_point = shapes::MAX_RECOVERY_TIME.mul_f64(shapes::FILL_FINISH_FRACTION);
@@ -637,6 +710,8 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
         delta.summary()
     );
 
+    assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 1).await?;
+
     tracing::info!(summary = %delta.summary(), "upload shape PASSED");
     Ok(())
 }
@@ -669,6 +744,7 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
         .await?;
     let exit = node_for(&env, exit_addr)?;
     let before = pix::sample_exit(&exit).await?;
+    let paid_before = pix::node_balances(&exit).await?;
     let (mut rx, mut tx) = tokio::io::split(session);
 
     // 1. Browsing for three minutes. Sized by duration, not by cycles: at ~13 kB/s a quarter of a
@@ -753,6 +829,8 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
          {}",
         delta.summary()
     );
+
+    assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 2).await?;
 
     tracing::info!(summary = %delta.summary(), "mixed shape PASSED");
     Ok(())
