@@ -7,58 +7,24 @@ license = "GPL-3.0-only"
 publish = false
 
 [dependencies]
-# edgli re-exports hopr_lib, strategy, traits and BlockchainConnectorConfig, so it
-# is the single source of the hoprnet rev — no second git dep to keep in sync.
-#
-# This manifest is the **v5 line**: edge-client `main`, which repinned hopr-lib to hoprnet
-# `master` in #151 on 2026-09-04. It is the only line that can build PIX — `pix-test` exists
-# nowhere on v4 — and the only one whose hoprd counterpart is `main`. The v4 counterpart is the
-# committed `Cargo.toml`; `scripts/integration/run.sh` swaps this file in when LINE=v5.
-#
-# run.sh rewrites this to EDGLI_REF and runs `cargo update -p edgli -p hopr-lib`. A branch rather
-# than a `rev` keeps the committed default from drifting behind what CI tests; the lock still
-# pins the exact commit for reproducibility. To test an unmerged edge-client change, override the
-# ref rather than committing a rev here.
+# The **v5** dependency set: edge-client `main`, which repinned hopr-lib to hoprnet `master` in
+# #151. The only line that can build PIX. `Cargo.toml` is the v4 set; run.sh swaps this in for
+# LINE=v5 and rewrites the ref below to EDGLI_REF.
 edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", default-features = false, features = [
   "runtime-tokio",
   "blokli",
 ] }
 
-# Pulled in only to switch on hopr-lib's `telemetry` feature, which is what compiles
-# `mod telemetry` into hopr-transport-session. Without it every per-session counter is absent
-# rather than zero, and "the session received nothing" is indistinguishable from "the metric was
-# never built". Must name the same source and rev edgli resolves, or the lock carries two
-# hopr-libs and the entry runs a mixture of the two. run.sh does not trust the value below to
-# have kept up: it reads edge-client's own manifest at the resolved sha, mirrors that pin onto
-# this one, and fails the run if the lock still ends up with two copies.
-#
-# That is why this is a `rev` and not a branch: hoprnet publishes neither `hopr-lib` nor
-# `hopr-utils-session`, so every consumer pins a master rev by hand, and tracking a branch here
-# would drift off whatever the Exit binary was built from and silently split the graph. The rev
-# is edge-client's own pin, copied verbatim — and `hoprd` pins the same one, so the three sides
-# of a PIX run agree by construction. Update them together or not at all.
-#
-# To test an unmerged hoprnet change, override this alongside `edgli` rather than committing a
-# feature branch here.
+# Here only for hopr-lib's `telemetry`. MUST name the rev edgli resolves or the lock carries two
+# hopr-libs; run.sh mirrors edge-client's pin over this and fails if two copies survive. A `rev`
+# not a branch: hoprnet publishes neither crate, so consumers pin a master rev by hand.
 hopr-lib = { git = "https://github.com/hoprnet/hoprnet", rev = "85e698a726710e205e8f76f4df7ad52debd2ff86", default-features = false, features = [
   "telemetry",
 ] }
 
-# Same trick as `hopr-lib` above, for the other half of the PIX picture. edge-client enables
-# `hopr-lib/telemetry` but NOT `hopr-strategy/telemetry`, so without this every entry-side
-# `hopr_strategy_pix_*` counter is absent rather than zero — and "the entry never deposited" and
-# "the counter was never built" are the same reading. Same source and version edgli resolves, so
-# the features unify onto one copy rather than adding a second.
-#
-# "Same version" is the load-bearing half, and it moves with the `hopr-lib` rev above: 4.0.0 is
-# what edge-client resolves on that rev, and a different major here would link a second
-# `hopr-strategy` whose counters are registered in the same process but incremented by nobody. The
-# reading would be a full set of zeroes rather than an error — which is the exact conclusion
-# `tests/pix.rs` draws from a zero. 1.0.2 → 4.0.0 came with the hoprnet bump; keep the three lines
-# in step.
-#
-# Not behind the `pix` feature: an unconditional feature flag on a dependency the entry already
-# links is cheaper than a conditional one, and the counters cost nothing when PIX is off.
+# The other half: edge-client enables `hopr-lib/telemetry` but not `hopr-strategy/telemetry`, so
+# without this every `hopr_strategy_pix_*` counter is absent rather than zero. Version must match
+# what edgli resolves (4.0.0) or a second copy links in and reads all zeroes.
 hopr-strategy = { version = "4.0.0", default-features = false, features = [
   "telemetry",
 ] }

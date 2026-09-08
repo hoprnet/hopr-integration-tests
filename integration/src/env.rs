@@ -536,11 +536,9 @@ async fn boot_edgli(
     // `channel_capacity` is left at its default deliberately -- raising it also raises the safe
     // gate below which the node opens *zero* channels, which is not what this scenario measures.
     let mut strat_cfg = default_strategy_cfg(&sizing)?;
-    // An `if let` rather than the irrefutable `let` this used to be: `EdgeStrategyKind` is
-    // `#[non_exhaustive]` since edge-client#151, so from a downstream crate the pattern is
-    // refutable even while `default_strategy_cfg` still yields only this one variant. The
-    // `allow` is what makes this line compile on BOTH lines: v4 (edge-client release/4.1)
-    // predates #151, so there the same pattern is irrefutable and `-D warnings` rejects it.
+    // `if let` because `EdgeStrategyKind` is `#[non_exhaustive]` since edge-client#151, so the
+    // pattern is refutable downstream; the `allow` is what keeps it compiling on v4, which
+    // predates #151 and would otherwise fail `-D warnings` on an irrefutable pattern.
     for kind in &mut strat_cfg.strategies {
         #[allow(irrefutable_let_patterns)]
         if let EdgeStrategyKind::ChannelLifecycle(lc) = kind {

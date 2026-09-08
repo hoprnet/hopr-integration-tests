@@ -7,26 +7,9 @@ license = "GPL-3.0-only"
 publish = false
 
 [dependencies]
-# edgli re-exports hopr_lib, strategy, traits and BlockchainConnectorConfig, so it
-# is the single source of the hoprnet rev — no second git dep to keep in sync.
-#
-# This manifest is the **v4 line**: edge-client `release/4.1`, cut from 1e211419 — the last
-# commit whose hopr-lib pin was still `branch = "release/4.0"`. edge-client `main` repinned to
-# hoprnet `master` (v5) in #151 on 2026-09-04, so tracking `main` here would pair a v5 edge
-# client with the v4 hoprd this gate exists to test. The v5 counterpart lives in
-# `Cargo.v5.toml`; `scripts/integration/run.sh` swaps it in when LINE=v5.
-#
-# `telemetry` is what compiles `mod telemetry` into hopr-transport-session. Without it every
-# per-session counter is absent rather than zero, and "the session received nothing" is
-# indistinguishable from "the metric was never built". Requesting it through edgli rather than
-# through a second `hopr-lib` dependency of our own is deliberate: a direct dep has to name the
-# exact same source and rev edgli resolves, and any drift links two hopr-libs whose metrics are
-# registered in one process and incremented by different copies.
-#
-# run.sh rewrites this to EDGLI_REF and runs `cargo update -p edgli`. A branch rather than a
-# `rev` keeps the committed default from drifting behind what CI tests; the lock still pins the
-# exact commit for reproducibility. To test an unmerged edge-client change, override the ref
-# rather than committing a rev here.
+# The **v4** dependency set (`Cargo.v5.toml` is v5; run.sh swaps it in for LINE=v5 and rewrites
+# the ref). `telemetry` goes through edgli, not a direct hopr-lib dep of ours: without it the
+# per-session counters are absent rather than zero, and a second hopr-lib splits the registry.
 edgli = { git = "https://github.com/hoprnet/edge-client", branch = "release/4.1", default-features = false, features = [
   "runtime-tokio",
   "blokli",
@@ -60,12 +43,9 @@ console-subscriber = { version = "0.5", optional = true }
 # `RUSTFLAGS="--cfg tokio_unstable --check-cfg cfg(tokio_unstable)"`.
 prof = ["dep:console-subscriber"]
 
-# Entry-side PIX: v5 only, and inert here.
-#
-# Declared so `#[cfg(feature = "pix")]` stays a *known* cfg — without the key, `-D warnings`
-# fails the build on `unexpected_cfgs`. Enabling it on this line does not work: PIX needs edgli's
-# `pix-test` deposit pool, which exists only on v5. Run the PIX scenarios with LINE=v5, which
-# swaps in `Cargo.v5.toml`.
+# Entry-side PIX: v5 only, inert here. Declared only so `#[cfg(feature = "pix")]` stays a known
+# cfg — without the key, `-D warnings` fails on `unexpected_cfgs`. Enabling it does not compile:
+# `edgli/pix-test` exists only on v5. Run PIX with LINE=v5.
 pix = []
 
 [dev-dependencies]

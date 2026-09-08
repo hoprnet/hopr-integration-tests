@@ -13,11 +13,8 @@ name: Integration throughput test
 # Each triggering project supplies its own rev; the other two use the defaults in
 # scripts/integration/run.sh.
 #
-# Every run targets ONE release line, v4 or v5 — the two are not mixable (see the
-# branch model in run.sh). A dispatch picks its line; runs that gate THIS repo (its
-# merge queue, and a labelled PR) fan out over both, because the test bodies are shared
-# source and a change here has to hold on either dependency set. v5 additionally runs
-# the PIX suite, which does not exist on v4.
+# One release line per run (see run.sh for the branch table). A dispatch picks its line;
+# runs that gate THIS repo fan out over both, since the test bodies are shared source.
 on:
   repository_dispatch:
     types: [integration]
@@ -83,14 +80,9 @@ jobs:
     # A dedicated machine rather than a hosted VM: the onion encoder is CPU-bound
     # and the throughput thresholds only mean anything on a stable core count.
     runs-on: [self-hosted, hetzner]
-    # One job per release line. Both lines for the triggers that gate THIS repo, since
-    # `integration/src` is shared source that has to build and pass against either
-    # dependency set; a single dispatched line otherwise. `fail-fast: false` so a v5
-    # break still reports the v4 verdict — the runner executes one job at a time, so
-    # they run back to back rather than in parallel.
-    #
-    # Note the job NAME carries the line, so required-check configuration has to name
-    # both "Integration throughput (v4)" and "Integration throughput (v5)".
+    # Both lines for the triggers that gate this repo, one dispatched line otherwise.
+    # `fail-fast: false` so a v5 break still reports the v4 verdict. NOTE the job name
+    # carries the line, so required checks must name "Integration throughput (v4|v5)".
     strategy:
       fail-fast: false
       matrix:
@@ -98,13 +90,11 @@ jobs:
           ${{ fromJSON((github.event_name == 'merge_group' || github.event_name == 'pull_request')
           && '["v4","v5"]'
           || format('["{0}"]', inputs.line || github.event.client_payload.line || 'v4')) }}
-    # Per LINE, not per run: ~20 min of tests (3 scenarios on v4, 5 on v5 — each with
-    # its own fresh chain) plus 15-20 min of build when Cachix misses. The two lines are
-    # separate jobs with a timeout each, so this does not need doubling.
+    # Per LINE, not per run: ~20 min of tests (3 scenarios on v4, 5 on v5, fresh chain
+    # each) plus 15-20 min of build on a Cachix miss. Each line is its own job.
     timeout-minutes: 150
     env:
-      # Which dependency set + branch set run.sh resolves. Everything else below is a
-      # per-project override within that line.
+      # Which branch + dependency set run.sh resolves; the rest override within it.
       LINE: ${{ matrix.line }}
       PROJECT: ${{ inputs.project || github.event.client_payload.project }}
       OVERRIDE_REV: ${{ inputs.rev || github.event.client_payload.rev }}
@@ -114,14 +104,9 @@ jobs:
       # dispatch silently arrives with the field empty. Same shape as
       # gnosis_vpn-infrastructure's restart-hoprd.yaml.
       #
-      # Per-project ref overrides, all empty by default: run.sh derives each one from
-      # LINE and re-resolves the branch head every run. Set a repository variable only
-      # to hold a line at a specific ref, and prefer a dispatch input for one-offs.
-      #
-      # HOPRD_LINE is the branch the hoprd binaries come from AND the line a dispatched
-      # hoprd rev must be contained in, which is what rejects a v5 sha dispatched at v4.
-      # Left empty here so it follows LINE; a repository variable pins it for both lines
-      # at once, which is almost never what you want.
+      # All empty by default so each follows LINE, re-resolved per run. HOPRD_LINE is
+      # also the line a dispatched rev must be contained in — that is what rejects a v5
+      # sha sent at v4. A repo variable pins it for BOTH lines, rarely what you want.
       HOPRD_LINE: ${{ vars.HOPRD_LINE }}
       HOPRD_REF: ${{ vars.HOPRD_REF }}
       EDGLI_REF: ${{ vars.EDGLI_REF }}
@@ -268,8 +253,7 @@ jobs:
           # that can carry a marker and so be waited on), so switching on the event
           # would have labelled every hoprd merge gate a "manual run".
           if [ "${EVENT}" = "schedule" ]; then
-            # Nightly: carries no inputs, so LINE falls through to its v4 default and
-            # run.sh resolves that line's branch heads, reported in RESOLVED_* below.
+            # Nightly carries no inputs, so LINE falls through to its v4 default.
             echo "TRIGGER=nightly v4 line"
           elif [ "${EVENT}" = "merge_group" ]; then
             # Fans out over both lines; ${LINE} says which one this job is.
