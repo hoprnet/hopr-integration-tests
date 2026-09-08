@@ -6,12 +6,8 @@ name: PR
 # and one there come from the same hardware. The heavy end-to-end run lives in
 # integration.yaml. See runner/README.md.
 #
-# Both jobs below fan out over the two release lines. `integration/src` is shared
-# source compiled against two different dependency sets (`Cargo.toml` is v4,
-# `Cargo.v5.toml` is v5), so a change can compile on one and not the other — and PIX
-# only exists on v5, which is where `--features pix` gets checked at all. The end-to-end
-# run is gated on a label, so without this a v5-only break would first surface in the
-# merge queue.
+# Both jobs fan out over the two release lines: shared source, two dependency sets
+# (`Cargo.toml` = v4, `Cargo.v5.toml` = v5), and v5 is where `--features pix` is checked.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -87,11 +83,8 @@ jobs:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
       # The crate builds in the hoprnet dev shell (it provides the rust toolchain
       # + the cached hopr-lib/edgli dependency tree).
-      # Cargo insists the manifest be named `Cargo.toml`, so the v5 set is copied over
-      # rather than passed with `--manifest-path`. Same swap run.sh does. A separate step
-      # rather than a branch inside the `bash -c` body below: that body is single-quoted so
-      # the inner shell expands it, which means any `${...}` in there is an SC2016 finding
-      # and actionlint fails the pre-commit hook.
+      # Same swap run.sh does. Its own step rather than a branch inside the single-quoted
+      # `bash -c` body below, where any `${...}` is an SC2016 finding that fails actionlint.
       - name: Select the v5 dependency set
         if: matrix.line == 'v5'
         run: |
@@ -105,8 +98,7 @@ jobs:
             cargo fmt --check
             cargo clippy -p hoprd-integration-test --all-targets -- -D warnings
           '
-      # PIX needs `edgli/pix-test`, which exists only on v5. On v4 the `pix` feature is
-      # declared but inert, and enabling it there does not compile.
+      # PIX needs `edgli/pix-test`, which exists only on v5.
       - name: Clippy with PIX
         if: matrix.line == 'v5'
         run: |
@@ -124,7 +116,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      # The runner executes one job at a time, so these two run back to back.
+      # The runner executes one job at a time anyway.
       max-parallel: 1
       matrix:
         line: [v4, v5]
@@ -162,11 +154,8 @@ jobs:
           done
           echo "::error::nix is not installed on this runner — see runner/README.md." >&2
           exit 1
-      # Cargo insists the manifest be named `Cargo.toml`, so the v5 set is copied over
-      # rather than passed with `--manifest-path`. Same swap run.sh does. A separate step
-      # rather than a branch inside the `bash -c` body below: that body is single-quoted so
-      # the inner shell expands it, which means any `${...}` in there is an SC2016 finding
-      # and actionlint fails the pre-commit hook.
+      # Same swap run.sh does. Its own step rather than a branch inside the single-quoted
+      # `bash -c` body below, where any `${...}` is an SC2016 finding that fails actionlint.
       - name: Select the v5 dependency set
         if: matrix.line == 'v5'
         run: |
@@ -179,8 +168,7 @@ jobs:
             cd integration
             cargo test --lib
           '
-      # `--features pix` adds the unit tests in src/pix.rs (the Prometheus exposition
-      # parser), which is the half a v4 run cannot reach.
+      # Adds the src/pix.rs unit tests (Prometheus parser), unreachable on v4.
       - name: Unit tests with PIX
         if: matrix.line == 'v5'
         run: |

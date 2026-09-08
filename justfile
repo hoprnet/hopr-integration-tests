@@ -30,10 +30,8 @@ hoprnet := env_var_or_default("HOPRNET_SHELL", "github:hoprnet/hoprnet")
 # Prefer the binary chain (build-chain / integration-binchain) locally.
 chain_image := env_var_or_default("BLOKLID_ANVIL_IMAGE", "europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil:latest-rhine")
 
-# Release line every ref below is derived from: v4 (default) or v5. Mirrors LINE in
-# scripts/integration/run.sh — the branch model lives in that file's header. The two lines are
-# not mixable: a v4 blokli cannot bootstrap a v5 localcluster, and a v5 edge client pairs with a
-# v4 hoprd only by accident.
+# Release line every ref below derives from: v4 (default) or v5. Mirrors LINE in
+# scripts/integration/run.sh, whose header carries the branch table. The lines are not mixable.
 line := env_var_or_default("LINE", "v4")
 
 # Blokli ref for the image-free binary chain. v0.14.0 is the first release whose contract

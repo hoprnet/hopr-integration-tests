@@ -3,30 +3,8 @@
 # link edgli, and run the integration throughput test against a fresh flake-built
 # chain per scenario (no docker image).
 #
-# Version model — no stored state, no commits:
-#   * the triggering project (PROJECT) uses the rev from the dispatch;
-#   * everything else defaults to the head of its branch on the selected LINE;
-#   * blokli is built from its flake — no docker image. A blokli dispatch overrides
-#     it with the merged/PR rev, same as the other two.
-# So a hoprd/edge-client merge is tested against the current tip of the other two.
-#
-# Branch model — every project is split into v4 and v5, and LINE picks the set:
-#                   LINE=v4          LINE=v5
-#   hoprd           release/4.1      main
-#   hoprnet         release/4.0      master
-#   edge-client     release/4.1      main       <- 4.1 cut 2026-09-07 from 1e211419
-#   blokli          release/0.13     v0.14.0
-#   PIX scenarios   no               yes
-# The two sides are NOT interchangeable in either direction: edge-client #151 repinned
-# `main` to hoprnet `master` on 2026-09-04, so a v5 edge client pairs with a v4 hoprd
-# only by accident, and blokli release/0.13 cannot bootstrap a v5 localcluster at all
-# (`service_registry` first appears in v0.14.0). HOPRD_LINE is the branch the hoprd
-# binaries come from, and any dispatched hoprd rev must be contained in it.
-#
-# One crate serves both lines: the test bodies are shared source, and only the
-# dependency set differs — `integration/Cargo.toml` is the v4 set, `Cargo.v5.toml` the
-# v5 one, and LINE=v5 swaps the latter in for the run (restored on exit). PIX exists
-# only on v5, since its deposit pool (`edgli/pix-test`) does not exist on v4.
+# No stored state: the dispatching project supplies its rev, everything else resolves to the
+# head of its branch on LINE. The lines are NOT mixable; README has the branch table.
 #
 # Inputs (env):
 #   LINE             v4 | v5 — which release line to test (default: v4)
@@ -45,8 +23,7 @@ CRATE_CARGO="${REPO_ROOT}/integration/Cargo.toml"
 CRATE_LOCK="${REPO_ROOT}/integration/Cargo.lock"
 ARCH="${NIX_SYSTEM_SUFFIX:-x86_64-linux}"
 
-# Every per-line default in one place. An explicit env override still wins, so a
-# cross-line experiment stays possible without editing this.
+# Per-line defaults; an explicit env override still wins.
 LINE="${LINE:-v4}"
 case "${LINE}" in
 v4)
@@ -165,27 +142,22 @@ if [ -n "${GITHUB_ENV:-}" ]; then
 fi
 
 # ── Put the selected line's dependency set in place ──
-# Cargo insists the manifest be named `Cargo.toml`, so the v5 set cannot simply be
-# passed with `--manifest-path`; it has to be copied over. Restored on exit so a
-# local `just`/`cargo` afterwards is back on the committed (v4) set rather than
-# silently building v5.
+# Copied rather than `--manifest-path`: cargo insists on the name `Cargo.toml`.
+# Restored on exit so a later local cargo run is not silently on v5.
 if [ "${LINE}" = "v5" ]; then
   echo "swapping in the v5 dependency set ..."
   MANIFEST_BACKUP="$(mktemp -d)"
   cp "${CRATE_CARGO}" "${MANIFEST_BACKUP}/Cargo.toml"
   cp "${CRATE_LOCK}" "${MANIFEST_BACKUP}/Cargo.lock"
   restore_manifest() {
-    # Idempotent: the signal handler below restores and then exits, which fires the EXIT
-    # trap as well.
+    # Idempotent: the signal handler exits, firing the EXIT trap too.
     [ -d "${MANIFEST_BACKUP}" ] || return 0
     cp "${MANIFEST_BACKUP}/Cargo.toml" "${CRATE_CARGO}"
     cp "${MANIFEST_BACKUP}/Cargo.lock" "${CRATE_LOCK}"
     rm -rf "${MANIFEST_BACKUP}"
   }
-  # Signals need their own trap: bash runs the EXIT trap on TERM/INT only if they are
-  # trapped explicitly, and a signal handler does NOT end the script — without the
-  # `exit` here a cancelled CI job would restore the v4 manifest and then carry on
-  # running the v5 suites against it.
+  # Signals need their own trap, and the `exit` is load-bearing: a handler does not end
+  # the script, so without it a cancelled job restores v4 then runs v5 suites against it.
   trap restore_manifest EXIT
   trap 'restore_manifest; exit 143' HUP INT TERM
   cp "${REPO_ROOT}/integration/Cargo.v5.toml" "${CRATE_CARGO}"
@@ -230,19 +202,16 @@ nix_build "bloklid + deployer" -L --refresh "github:hoprnet/blokli/${BLOKLI_REF}
 nix_build "anvil (foundry)" -L "nixpkgs#foundry" --out-link "${REPO_ROOT}/result-foundry"
 
 # ── The PIX exit binary (v5 only) ──
-# The deposit pool is a BUILD-TIME choice and a plain hoprd carries none: it bootstraps
-# normally and then simply never deposits, several minutes into a run. Built here rather
-# than after the other suites so a missing output fails in one minute instead of forty.
-# Only x86_64-linux: hoprd's flake exposes `binary-hoprd-pix-test` for that arch alone,
-# so a local darwin run has to go through `just pix`, which builds hoprd from source.
+# The deposit pool is a build-time choice: a plain hoprd bootstraps fine and then never
+# deposits. Built up front so a missing output fails in a minute, not after forty.
+# x86_64-linux only — the flake exposes no other arch, so darwin goes via `just pix`.
 PIX_SUITE=0
 if [ "${LINE}" = "v5" ]; then
   if [ "${ARCH}" = "x86_64-linux" ]; then
     nix_build "hoprd (PIX pool)" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-pix-test-${ARCH}" \
       --out-link "${REPO_ROOT}/result-hoprd-pix"
     PIX_BIN="${REPO_ROOT}/result-hoprd-pix/bin/hoprd"
-    # `POOL` in hoprd::strategy is a &str compiled in for exactly this check — the two
-    # pools are mutually exclusive and the binary carries exactly one.
+    # `POOL` in hoprd::strategy is compiled in for exactly this check.
     grep -qa 'non-anonymous-secp256k1' "${PIX_BIN}" || {
       echo "${PIX_BIN} carries no secp256k1 deposit pool — refusing to run the PIX suite" >&2
       exit 1
@@ -291,11 +260,9 @@ if n == 0:
 src = src[: stanza.start()] + pinned + src[stanza.end() :]
 print(f"  edgli pinned: {pinned.splitlines()[0]}")
 
-# The v5 set carries a direct `hopr-lib` (to switch on `hopr-strategy/telemetry`'s
-# sibling feature); it MUST name the same source and rev edgli resolves, or the lock
-# carries two hopr-libs whose metrics are registered in one process and incremented by
-# different copies. Mirror edge-client's own pin rather than trusting the committed one
-# to have kept up. The v4 set has no such dep and this is a no-op there.
+# The v5 set has a direct `hopr-lib` that MUST name the rev edgli resolves, else the lock
+# carries two copies and metrics are registered by one and incremented by the other.
+# Mirror edge-client's own pin rather than trust ours. No-op on v4 (no such dep).
 ours = re.search(r'^hopr-lib\s*=\s*\{.*?\}', src, re.S | re.M)
 if ours:
     theirs = re.search(r'^hopr-lib\s*=\s*\{.*?\}', os.environ['EDGLI_MANIFEST'], re.S | re.M)
@@ -315,10 +282,8 @@ open(path, 'w').write(src)
 PY
 (cd "${REPO_ROOT}/integration" && cargo update -p edgli -p hopr-lib)
 
-# Two copies of either crate is the failure mode the pins above exist to prevent, and
-# it is invisible at runtime: every metric the tests read is registered by one copy and
-# incremented by the other, so the reading is a full set of zeroes rather than an error
-# — which is exactly the conclusion `tests/pix.rs` draws from a zero. Catch it here.
+# Two copies is invisible at runtime: readings come back all-zero rather than erroring,
+# which is exactly what `tests/pix.rs` reads as "never deposited". Catch it here.
 for crate in hopr-lib hopr-strategy; do
   n="$(grep -c "^name = \"${crate}\"$" "${CRATE_LOCK}" || true)"
   if [ "${n}" -gt 1 ]; then
@@ -358,10 +323,8 @@ run_suite integration zero_hop one_hop
 # unforced random relayer draw, so a red says nothing. Locally: `just return-path`.
 run_suite exit_origination exit_should_keep_originating_when_a_return_path_becomes_unresolvable
 
-# Entry-side PIX: v5 only, both because `edgli/pix-test` exists nowhere on v4 and
-# because the exit needs the PIX-pool binary built above. Named explicitly rather than
-# left to the default filter — the two want different entry deposit budgets, and
-# run-binchain.sh gives each scenario its own chain.
+# Entry-side PIX: v5 only (`edgli/pix-test` has no v4 counterpart). Named explicitly —
+# the two want different entry deposit budgets, and each gets its own chain.
 if [ "${PIX_SUITE}" = "1" ]; then
   export HOPRD_BIN="${PIX_BIN}" CARGO_FEATURES="--features pix"
   run_suite pix \
