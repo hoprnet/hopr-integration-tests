@@ -3,6 +3,9 @@ name: Integration throughput test
 #   * hoprd merging to its v4 line, blokli merging to release/0.13, or edge-client
 #     merging to main — and by a `run-integration` label on a PR in any of them
 #     (all via workflow_dispatch / repository_dispatch from those repos),
+#   * a nightly schedule, which is the ONLY coverage the v4 release lines get: a
+#     merge queue can only be attached to a repository's default branch, so
+#     hoprd/edge-client/blokli cannot gate merges into their `release/*` branches,
 #   * manual workflow_dispatch,
 #   * the MERGE QUEUE for this repo's own `main` — so a change here cannot land
 #     without the test passing, whether or not anyone remembered the label,
@@ -41,10 +44,15 @@ on:
   # the job below already admits any non-`pull_request` event.
   merge_group:
     types: [checks_requested]
+  schedule:
+    # 02:00 UTC. No inputs, so run.sh falls through to its defaults, which ARE the v4
+    # lines (hoprd release/4.1, edge-client release/4.1, blokli release/0.13) — that
+    # is the whole point of this trigger.
+    - cron: "0 2 * * *"
 # Uniform indentation on purpose: `>-` only folds lines at the SAME indent as the
 # first one, so an indented continuation would leave real newlines in this string.
 run-name: >-
-  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration ({0} {1})', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || 'Integration throughput test')) }}
+  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration ({0} {1})', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly v4)' || 'Integration throughput test'))) }}
 # PR events: one group per PR, cancel-in-progress (a new push supersedes the
 # previous run of that PR). Dispatch/manual/merge-queue: a single shared group that
 # never cancels, so those runs stack and execute one after another. Merge-queue runs
@@ -226,7 +234,11 @@ jobs:
           # upstream gates arrive as `workflow_dispatch` (that is the only trigger
           # that can carry a marker and so be waited on), so switching on the event
           # would have labelled every hoprd merge gate a "manual run".
-          if [ "${EVENT}" = "merge_group" ]; then
+          if [ "${EVENT}" = "schedule" ]; then
+            # Nightly v4: no rev is dispatched, run.sh resolves the branch heads and
+            # reports them in RESOLVED_* below.
+            echo "TRIGGER=nightly v4 line"
+          elif [ "${EVENT}" = "merge_group" ]; then
             # This repo's own merge queue: the candidate is this PR merged into main.
             echo "TRIGGER=hopr-integration-tests merge queue ([\`${MQ_SHA:0:8}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${MQ_SHA}))"
           elif [ "${EVENT}" = "pull_request" ]; then
