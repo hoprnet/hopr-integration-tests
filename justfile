@@ -140,6 +140,42 @@ pix *scenarios: build-chain
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
 
+# PIX under end-user traffic shapes (binary chain; manual, NOT run in CI, hours per full pass).
+#
+# Same build path as `just pix`, but at a geometry whose cycle is long enough for a traffic shape
+# to exist inside it — see integration/src/shapes.rs. Needs a HOPRD_SRC carrying the Exit-side PIX
+# fill (hoprnet#8396); the idle scenario measures exactly that, and against a hoprd without it an
+# idle cycle strands its deposit by design.
+#
+# Optional args = test-name filters. The sweep drives this through scripts/integration/pix-sweep.sh.
+pix-shapes *scenarios: build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    src="$(cd '{{hoprd_src}}' && pwd)"
+    echo "building PIX-enabled hoprd + hoprd-localcluster from ${src}"
+    (cd "${src}" && nix develop -c cargo build --release -p hoprd --features strategy-pix-test)
+    (cd "${src}" && nix develop -c cargo build --release -p hoprd-localcluster)
+    export HOPRD_BIN="${src}/target/release/hoprd"
+    export HOPRD_LOCALCLUSTER_BIN="${src}/target/release/hoprd-localcluster"
+
+    grep -qa 'non-anonymous-secp256k1' "${HOPRD_BIN}" || {
+      echo "${HOPRD_BIN} was not built with the secp256k1 deposit pool. Rebuild it:" >&2
+      echo "    cargo build --release -p hoprd --features strategy-pix-test" >&2
+      exit 1
+    }
+    # The geometry seam these scenarios need. A hoprd-localcluster without it ignores --pix-config
+    # and silently runs the demo geometry, which every shape assertion would then be measuring.
+    "${HOPRD_LOCALCLUSTER_BIN}" --help 2>&1 | grep -q -- '--pix-config' || {
+      echo "${HOPRD_LOCALCLUSTER_BIN} has no --pix-config; HOPRD_SRC is behind the geometry seam." >&2
+      exit 1
+    }
+
+    SCENARIOS='{{scenarios}}'
+    [ -n "${SCENARIOS}" ] || SCENARIOS='the_profile_geometry_completes_a_cycle'
+    export SCENARIOS TEST_TARGET=pix_shapes CARGO_FEATURES='--features pix'
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
+    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
+
 # Run a single test against a fresh env (e.g. `just scenario zero_hop`).
 scenario name:
     @just integration '{{name}}'

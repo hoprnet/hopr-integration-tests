@@ -187,6 +187,18 @@ impl IntegrationEnv {
     /// nothing here funds the entry any more.
     #[cfg(feature = "pix")]
     pub async fn setup_pix(budget: crate::HoprBalance) -> anyhow::Result<Self> {
+        Self::setup_pix_with(crate::pix::entry_config(budget)?).await
+    }
+
+    /// As [`Self::setup_pix`], but with the entry's whole PIX settlement configuration supplied.
+    ///
+    /// A traffic-shape scenario needs this because its price, per-deposit ceiling and budget are
+    /// all derived from a geometry 2 500x the demo one: at the demo price a cycle there costs more
+    /// than the demo's own `max_ssa_allocation`, so every deposit is refused for being over the
+    /// ceiling — which reads from the Exit as an entry that never paid. See
+    /// [`crate::shapes::entry_config`].
+    #[cfg(feature = "pix")]
+    pub async fn setup_pix_with(pix: edgli::PixEntryConfig) -> anyhow::Result<Self> {
         cluster::request_pix();
         let cluster = cluster::bring_up().await?;
         let summary = cluster.summary.clone();
@@ -197,9 +209,7 @@ impl IntegrationEnv {
             &extra,
             &NetTuning::local(),
             cluster_size(),
-            ExtraStrategies {
-                pix: Some(crate::pix::entry_config(budget)?),
-            },
+            ExtraStrategies { pix: Some(pix) },
         )
         .await?;
 
@@ -402,22 +412,59 @@ impl IntegrationEnv {
              {return_hops} return): the share encryption key derives from the first relayer's \
              acknowledgement, so a zero-hop path is refused"
         );
+        self.open_pix_session_with(
+            forward_hops,
+            return_hops,
+            SurbBalancerConfig {
+                target_surb_buffer_size: PIX_RESPONSE_BUFFER_BYTES / SESSION_MTU as u64,
+                max_surbs_per_sec: PIX_MAX_SURB_UPSTREAM_BITS / (8 * SURB_SIZE as u64),
+                ..SurbBalancerConfig::default()
+            },
+            SessionTarget::ExitNode(0),
+        )
+        .await
+    }
+
+    /// [`open_pix_session`](Self::open_pix_session) with the SURB balancer and the target named by
+    /// the caller.
+    ///
+    /// Both are what a traffic-shape scenario has to own rather than inherit:
+    ///
+    /// * the **balancer** because buffer depth is the knob with a measured failure on both sides —
+    ///   too shallow starves the Exit mid-cycle, too deep parks share-less SURBs ahead of the
+    ///   cycle's own — and the right depth is a fraction of a cycle, so it moves with the geometry
+    ///   rather than being a constant. See `crate::shapes::surb_buffer_target`.
+    /// * the **target** because `ExitNode(0)` is the Exit's built-in loopback, which echoes every
+    ///   byte back. That makes every shape byte-symmetric, and PIX is paid for the *return*
+    ///   direction — so the shapes that matter most to it, a bulk upload with almost nothing coming
+    ///   back, cannot be expressed against a loopback at all. A `UdpStream` target pointed at an
+    ///   asymmetric service is how they are.
+    #[cfg(feature = "pix")]
+    pub async fn open_pix_session_with(
+        &self,
+        forward_hops: usize,
+        return_hops: usize,
+        surb_management: SurbBalancerConfig,
+        target: SessionTarget,
+    ) -> anyhow::Result<(HoprSession, Address)> {
+        anyhow::ensure!(
+            forward_hops >= 1 && return_hops >= 1,
+            "PIX needs at least one relay on each path (got {forward_hops} forward, \
+             {return_hops} return): the share encryption key derives from the first relayer's \
+             acknowledgement, so a zero-hop path is refused"
+        );
         let dest = self.dest_for(forward_hops)?;
         let base = HoprSessionClientConfig {
             forward_path: HopRouting::try_from(forward_hops)?,
             return_path: HopRouting::try_from(return_hops)?,
             capabilities: SessionCapability::Segmentation | SessionCapability::NoDelay,
             always_max_out_surbs: true,
-            surb_management: Some(SurbBalancerConfig {
-                target_surb_buffer_size: PIX_RESPONSE_BUFFER_BYTES / SESSION_MTU as u64,
-                max_surbs_per_sec: PIX_MAX_SURB_UPSTREAM_BITS / (8 * SURB_SIZE as u64),
-                ..SurbBalancerConfig::default()
-            }),
+            surb_management: Some(surb_management),
             ..Default::default()
         };
         let (session, _) = self
             .edgli
-            .connect_to(dest, SessionTarget::ExitNode(0), self.edgli.with_pix(base)?)
+            .connect_to(dest, target, self.edgli.with_pix(base)?)
             .await?;
         Ok((session, dest))
     }

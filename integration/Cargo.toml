@@ -37,7 +37,8 @@ edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", defau
 # of a PIX run agree by construction. Update them together or not at all.
 #
 # To test an unmerged hoprnet change, override this alongside `edgli` rather than committing a
-# feature branch here.
+# feature branch here — which is exactly what the `[patch]` at the bottom of this file does while
+# the PIX fill work is unmerged. See there.
 hopr-lib = { git = "https://github.com/hoprnet/hoprnet", rev = "85e698a726710e205e8f76f4df7ad52debd2ff86", default-features = false, features = [
   "telemetry",
 ] }
@@ -120,3 +121,27 @@ debug-assertions = true
 inherits = "release"
 debug = true
 
+
+# ── Unmerged hoprnet: Exit-side PIX fill ──────────────────────────────────────
+#
+# The PIX traffic-shape scenarios (`tests/pix_shapes.rs`) need hoprnet#8396, which is open rather
+# than merged. Until it lands there is no rev on `master` to pin, so both halves of this graph are
+# redirected at a local checkout of the PR branch.
+#
+# A `[patch]` rather than two edited `rev`s, because only one of the two is ours to edit: `edgli`
+# carries its *own* `hopr-lib` pin, and bumping the dependency above alone would put two hoprnets
+# in the lock — the entry running one and its metrics registered by the other, which is the exact
+# failure the comments on `hopr-lib` and `hopr-strategy` above describe. A patch rewrites the
+# source for every consumer at once, so edgli and this crate cannot disagree.
+#
+# Cargo refuses to patch a git source with the same git URL, so the replacement is a path. Which
+# means the checkout below IS the dependency: switching its branch changes what this builds,
+# silently. Keep it on the PR branch for the duration of a run.
+#
+# The Exit is a separate process built from `HOPRD_SRC` and shares none of this graph — it carries
+# the same rev through its own `Cargo.toml`. Both sides move together or a run measures a mixture.
+#
+# On merge: delete this section and set the `rev` above (and edgli's, and hoprd's) to the merge
+# commit.
+[patch."https://github.com/hoprnet/hoprnet"]
+hopr-lib = { path = "../../hoprnet/hopr/hopr-lib" }
