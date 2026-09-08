@@ -1,0 +1,123 @@
+[package]
+name = "hoprd-integration-test"
+version = "0.1.0"
+edition = "2024"
+description = "Cross-repo integration throughput test: edgli + hoprd localcluster + blokli/anvil"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+# edgli re-exports hopr_lib, strategy, traits and BlockchainConnectorConfig, so it
+# is the single source of the hoprnet rev — no second git dep to keep in sync.
+#
+# This manifest is the **v5 line**: edge-client `main`, which repinned hopr-lib to hoprnet
+# `master` in #151 on 2026-09-04. It is the only line that can build PIX — `pix-test` exists
+# nowhere on v4 — and the only one whose hoprd counterpart is `main`. The v4 counterpart is the
+# committed `Cargo.toml`; `scripts/integration/run.sh` swaps this file in when LINE=v5.
+#
+# run.sh rewrites this to EDGLI_REF and runs `cargo update -p edgli -p hopr-lib`. A branch rather
+# than a `rev` keeps the committed default from drifting behind what CI tests; the lock still
+# pins the exact commit for reproducibility. To test an unmerged edge-client change, override the
+# ref rather than committing a rev here.
+edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", default-features = false, features = [
+  "runtime-tokio",
+  "blokli",
+] }
+
+# Pulled in only to switch on hopr-lib's `telemetry` feature, which is what compiles
+# `mod telemetry` into hopr-transport-session. Without it every per-session counter is absent
+# rather than zero, and "the session received nothing" is indistinguishable from "the metric was
+# never built". Must name the same source and rev edgli resolves, or the lock carries two
+# hopr-libs and the entry runs a mixture of the two. run.sh does not trust the value below to
+# have kept up: it reads edge-client's own manifest at the resolved sha, mirrors that pin onto
+# this one, and fails the run if the lock still ends up with two copies.
+#
+# That is why this is a `rev` and not a branch: hoprnet publishes neither `hopr-lib` nor
+# `hopr-utils-session`, so every consumer pins a master rev by hand, and tracking a branch here
+# would drift off whatever the Exit binary was built from and silently split the graph. The rev
+# is edge-client's own pin, copied verbatim — and `hoprd` pins the same one, so the three sides
+# of a PIX run agree by construction. Update them together or not at all.
+#
+# To test an unmerged hoprnet change, override this alongside `edgli` rather than committing a
+# feature branch here.
+hopr-lib = { git = "https://github.com/hoprnet/hoprnet", rev = "85e698a726710e205e8f76f4df7ad52debd2ff86", default-features = false, features = [
+  "telemetry",
+] }
+
+# Same trick as `hopr-lib` above, for the other half of the PIX picture. edge-client enables
+# `hopr-lib/telemetry` but NOT `hopr-strategy/telemetry`, so without this every entry-side
+# `hopr_strategy_pix_*` counter is absent rather than zero — and "the entry never deposited" and
+# "the counter was never built" are the same reading. Same source and version edgli resolves, so
+# the features unify onto one copy rather than adding a second.
+#
+# "Same version" is the load-bearing half, and it moves with the `hopr-lib` rev above: 4.0.0 is
+# what edge-client resolves on that rev, and a different major here would link a second
+# `hopr-strategy` whose counters are registered in the same process but incremented by nobody. The
+# reading would be a full set of zeroes rather than an error — which is the exact conclusion
+# `tests/pix.rs` draws from a zero. 1.0.2 → 4.0.0 came with the hoprnet bump; keep the three lines
+# in step.
+#
+# Not behind the `pix` feature: an unconditional feature flag on a dependency the entry already
+# links is cheaper than a conditional one, and the counters cost nothing when PIX is off.
+hopr-strategy = { version = "4.0.0", default-features = false, features = [
+  "telemetry",
+] }
+
+anyhow = "1"
+futures = "0.3"
+tokio = { version = "1", features = ["full", "process"] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls",
+  "json",
+] }
+tempfile = "3"
+sha2 = "0.11"
+nix = { version = "0.31", features = ["signal"] }
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Only pulled in by the `prof` feature (executor-starvation profiling); see
+# tests/profiling.rs. Must be built with `--cfg tokio_unstable`.
+console-subscriber = { version = "0.5", optional = true }
+
+[features]
+# Executor-starvation profiling: enables the tokio-console layer used by
+# tests/profiling.rs. Build with `--profile tracer` and
+# `RUSTFLAGS="--cfg tokio_unstable --check-cfg cfg(tokio_unstable)"`.
+prof = ["dep:console-subscriber"]
+
+# Entry-side PIX: compiles `src/pix.rs`, the PIX half of `src/env.rs`, and `tests/pix.rs`.
+#
+# Off by default so the CI throughput build does not pull PIX in — it selects a deposit pool three
+# crates away and changes what `HoprPixSpec` resolves to, which is not something the 0-hop/1-hop
+# tests should carry silently.
+#
+# `pix-test` is edge-client's secp256k1 pool: the only implemented one, and visible on-chain. Its
+# sibling `pix-curvy` is the anonymous pool and is a stub whose methods panic on the first deposit,
+# so it is not an alternative here.
+pix = ["edgli/pix-test"]
+
+[dev-dependencies]
+test-log = { version = "0.2", features = ["trace"] }
+# Perfetto/Chrome trace layer for tests/profiling.rs (only referenced under `prof`).
+tracing-chrome = "0.7"
+
+# tokio-console build target for the `prof` profiling tests. hopr-lib forces
+# `tracing/release_max_level_debug`, compiling out TRACE callsites (incl. tokio's task
+# instrumentation) in release. That cap only fires under `cfg(not(debug_assertions))`, so
+# re-enabling debug-asserts makes it inert and STATIC_MAX_LEVEL falls through to TRACE —
+# tokio-console then sees the task spans. Optimizations stay on so timings are realistic:
+#   RUSTFLAGS="--cfg tokio_unstable --check-cfg cfg(tokio_unstable)" \
+#     cargo test --test profiling --profile tracer --features prof -- --ignored
+[profile.tracer]
+inherits = "release"
+debug-assertions = true
+
+# System-profiler (samply / cargo-flamegraph) build target — see docs/flamegraph.md.
+# Inherits release (optimised; HOPR's async future chains overflow the debug stack) but
+# keeps full debug symbols so the sampler resolves frames instead of showing `??`.
+[profile.flamegraph]
+inherits = "release"
+debug = true
