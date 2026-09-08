@@ -215,25 +215,24 @@ different `HOPRD_LINE` values rather than loosening the check.
 
 ### How the upstream repos call in
 
-| Repo                          | When                                                       | Behaviour                                                                               |
-| ----------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| hoprd                         | merge to `vars.MAINTENANCE_RELEASE_BRANCH` (`release/4.1`) | **Blocks.** Runs before `build-docker`, so a red gate means no image, no tag, no deploy |
-| edge-client                   | merge to `main`                                            | Fire-and-forget; failure reported by the Zulip message below                            |
-| blokli                        | merge to `release/0.13`                                    | Fire-and-forget; same                                                                   |
-| all three                     | PR labelled `run-integration`                              | Waits, so the verdict is a check on that PR                                             |
-| hopr-integration-tests itself | merge queue to `main`                                      | Blocks its own merges — see below                                                       |
+| Trigger                               | Where                      | Behaviour                                                 |
+| ------------------------------------- | -------------------------- | --------------------------------------------------------- |
+| nightly 02:00 UTC                     | this repo, `main`          | The v4 lines' only automatic coverage — tips of all three |
+| PR labelled `run-integration`         | hoprd, edge-client, blokli | Waits, so the verdict is a check on that PR               |
+| merge queue                           | this repo, `main`          | Blocks this repo's own merges                             |
+| `merge_group` on a `release/*` branch | hoprd, edge-client, blokli | **Cannot fire** — see below                               |
 
-Two mechanisms, deliberately:
+**A merge queue can only be attached to a repository's default branch.** All three
+upstream repos develop v4 on `release/*`, so none of them can gate merges into those
+branches. Their gate jobs keep the `merge_group` condition for the day that restriction
+lifts, but today only the label path fires there — which is why the nightly exists.
 
-- **Fire-and-forget** uses `repository_dispatch`. Right where there is nothing to
-  gate — edge-client has no image, and blokli's own image is not held back — since
-  blocking would only park a runner for the 30–40 minutes the test takes.
-- **Waiting** uses `workflow_dispatch` with a `marker` input. A caller cannot
-  otherwise identify its own run: `gh workflow run` returns no run id, the API does
-  not expose a run's dispatch inputs, and "newest run" is a race because three
-  repos dispatch here and the `integration` concurrency group makes runs queue
-  rather than start. So the caller passes a unique marker, `run-name` puts it in the
-  run title, and the caller polls for the run whose title carries it.
+The upstream gates use `repository_dispatch` to start the run and then **wait** on it,
+which needs a `marker`: a caller cannot otherwise identify its own run, since
+`repository_dispatch` returns nothing identifying, the API does not expose a run's
+dispatch inputs, and "newest run" is a race because three repos dispatch here and the
+`integration` concurrency group makes runs queue rather than start. The caller passes a
+unique marker, `run-name` puts it in the run title, and the caller polls for it.
 
 **hoprd's gate is scoped to the v4 line on purpose.** hopr-integration-tests only supports v4
 (its crate pins hoprnet `release/4.0`) and rejects a rev off that line, so pointing
@@ -278,6 +277,31 @@ status checks.
 
   The older `HOPRD_TEST_DISPATCH_TOKEN` PAT is no longer used and its name predates
   the rename; there is nothing to migrate, but do not re-add it.
+
+### Nightly is the v4 coverage
+
+A **merge queue can only be attached to a repository's default branch.** hoprd,
+edge-client and blokli all develop v4 on `release/*` branches, so none of them can
+gate merges into those branches — the `merge_group` condition in their `pr.yaml`
+gates can never fire for a release branch, and only their `run-integration` label
+path works on demand.
+
+The nightly `schedule` here fills that hole. It passes no inputs, so `run.sh` falls
+through to its defaults, which are exactly the v4 lines:
+
+| Project     | Nightly ref                   |
+| ----------- | ----------------------------- |
+| hoprd       | `release/4.1` (`HOPRD_LINE`)  |
+| edge-client | `release/4.1` (`EDGLI_REF`)   |
+| blokli      | `release/0.13` (`BLOKLI_REF`) |
+
+Each is resolved to its current head per run, so the nightly always tests the tips of
+the three v4 branches together. A red night posts to Zulip with the trigger shown as
+`nightly v4 line` plus the three resolved revisions.
+
+Scheduled runs only ever fire from the default branch, and they share the
+non-cancelling `integration` concurrency group, so a nightly queues behind an
+in-flight run rather than cancelling it.
 
 ### What the gate runs
 

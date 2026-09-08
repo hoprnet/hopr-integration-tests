@@ -10,12 +10,17 @@ It is the gate for the **hoprd v4 line** (`release/4.1`) against `edge-client`
 `release/4.1` and blokli `release/0.13`, and runs on a dedicated self-hosted Hetzner
 runner (label `hetzner`).
 
-It is wired into all three upstream repos: a hoprd merge to its v4 line **blocks**
-on it before the docker image is built or tagged, so a red gate means nothing gets
-promoted or deployed; edge-client (`release/4.1`) and blokli (`release/0.13`) fire it on
-merge and are told about failures via Zulip; and a PR in any of the three labelled
-`run-integration` runs it as a check on that PR. Details and the token/permission
-prerequisites are in [`runner/README.md`](runner/README.md).
+**A nightly run at 02:00 UTC is the automatic coverage for the v4 lines**, testing the
+current tips of all three together. It has to be a schedule rather than a merge gate: a
+merge queue can only be attached to a repository's default branch, and all three develop
+v4 on `release/*` branches, so none of them can gate merges into those branches.
+
+hoprd, edge-client and blokli each also carry a `run-integration` label that runs this
+suite against a PR on demand. Their `merge_group` condition is there for the day the
+default-branch restriction lifts; it cannot fire for a release branch today.
+
+Details and the token/permission prerequisites are in
+[`runner/README.md`](runner/README.md).
 
 - Test crate: [`integration/`](integration/)
 - CI workflow: [`.github/workflows/integration.yaml`](.github/workflows/integration.yaml)
