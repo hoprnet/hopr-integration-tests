@@ -32,6 +32,7 @@ pub mod session_metrics;
 // compile-time guards and unit tests are what catch a geometry edited without re-deriving what
 // depends on it. Those should run in the default `cargo test --lib`, not only under `--features pix`.
 pub mod shapes;
+pub mod udp_service;
 
 /// Payload size pumped through each session. Also sizes the strategy's expected
 /// packet count for channel funding (see [`env`]).

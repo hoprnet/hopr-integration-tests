@@ -469,7 +469,12 @@ mod tests {
     /// upstream's default. If a profile change breaks this, the derived value must rise with it.
     #[test]
     fn the_free_credit_covers_the_drain() {
-        assert!(FREE_CREDIT > DEFAULT_SURB_BUFFER);
+        const _: () = assert!(
+            FREE_CREDIT > DEFAULT_SURB_BUFFER,
+            "the drain is no longer covered by the credit, so max_served_without_progress must rise"
+        );
+        // The derivation, not the constant: with the credit covering the queue this must resolve to
+        // upstream's default rather than to the raised value the uncovered branch computes.
         assert_eq!(2048, max_served_without_progress());
     }
 

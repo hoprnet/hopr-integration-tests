@@ -556,7 +556,10 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
             let path = data_dir.join("pix.yaml");
             std::fs::write(&path, yaml).context("writing PIX settings")?;
             cmd.args(["--pix-config", path.to_str().unwrap()]);
-            tracing::info!(?path, "cluster nodes will be configured for PIX with a named geometry");
+            tracing::info!(
+                ?path,
+                "cluster nodes will be configured for PIX with a named geometry"
+            );
         } else {
             tracing::info!("cluster nodes will be configured for PIX at the demo geometry");
             cmd.arg("--enable-pix");

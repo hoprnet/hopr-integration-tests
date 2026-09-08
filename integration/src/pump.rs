@@ -159,9 +159,10 @@ pub struct PumpOpts {
 /// Only the writer reads this. Attribution, the stopping rule and every [`Transfer`] statistic are
 /// unchanged by it — they already handle silence, holes and out-of-phase arrivals, which is what a
 /// shaped stream produces anyway.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Shape {
     /// One chunk every `pace`, until the payload is spent. The behaviour before shapes existed.
+    #[default]
     Constant,
     /// `on` bytes offered at the pace, then `off` of silence, repeating.
     ///
@@ -177,12 +178,6 @@ pub enum Shape {
     /// advances a PIX cycle, which is the point — this is the shape that strands a deposit unless
     /// the Exit fills the cycle itself.
     Keepalive { every: Duration, bytes: usize },
-}
-
-impl Default for Shape {
-    fn default() -> Self {
-        Self::Constant
-    }
 }
 
 /// Result of one loopback round-trip.
