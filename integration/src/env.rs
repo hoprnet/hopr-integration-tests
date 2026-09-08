@@ -593,6 +593,22 @@ async fn boot_edgli(
                 require_observed_since_start: false,
                 ..Default::default()
             };
+            // Never close a channel over its peer's quality score.
+            //
+            // Eligibility above governs which peers are worth *opening* to; this governs closing,
+            // and on a local cluster the two disagree in a way that ends long scenarios. Probing
+            // needs traffic to score a peer, and a Session that is deliberately quiet — an idle
+            // PIX shape sends 32 bytes every 25 s — produces almost none, so the score decays
+            // below the 0.3 default and the strategy closes the channel underneath a Session that
+            // is working perfectly. Measured: channels opened at T+0 were closed at T+10m07s,
+            // after which every forward send failed with `cannot find 1 hop path` — 17 522 times
+            // in one run.
+            //
+            // Zeroed rather than lowered, for the reason `min_peer_quality_score` above is: the
+            // three relays in a local cluster are the only ones there are, so closing one on
+            // quality does not reroute around a bad peer, it removes the path. Scenarios that
+            // *want* a peer gone kill the process instead — see `tests/return_path.rs`.
+            lc.closure.close_below_quality_score = 0.0;
             lc.tick_interval = tuning.strategy_tick;
         }
     }
