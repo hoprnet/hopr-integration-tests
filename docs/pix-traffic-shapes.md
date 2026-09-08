@@ -115,7 +115,7 @@ should be corrected.**
 it is the only shape whose application traffic saturates the direction PIX bills, so it swept two
 cycles in the time the others took to sweep one. Fill has nothing to make up on it.
 
-## Three findings that are not about PIX
+## Two findings that are not about PIX, and one correction
 
 **The entry closed its own channels ten minutes in, twice, for two different reasons.**
 `close_below_quality_score` defaults to 0.3 and is separate from the eligibility threshold this
@@ -139,12 +139,17 @@ A download's reply volume is the service's choice, so the pump declared `Complet
 against a 491 s push; an upload's is zero, so it would have declared `NeverStarted` at 30 s. Both
 shapes now drive the Session directly.
 
-**Reading a Session whose peer has stopped sending burns CPU.** The download's drain originally ran
-out its full budget rather than stopping when the sweeps landed, and spent two hours reading a
-Session whose service had finished pushing — four CPU-hours in thirty wall-clock minutes, roughly
-seven cores. The scenarios now stop their traffic as soon as the cycles they were waiting for have
-completed, which is correct regardless; but a read loop on an idle Session costing that much is
-worth someone looking at upstream, since a real client does exactly that between transfers.
+**The asymmetric scenarios used to run 20 minutes past their own measurement.** `drain_for` and
+`offer_for` ran to their full budget rather than stopping when the sweeps landed, so the download
+kept reading for 20 minutes after the service had pushed its last byte. It passed either way — the
+cost was wall-clock, and it is worth stating as wall-clock: the download took **1922 s** before the
+stop flag and **715 s** after, for the same result.
+
+An earlier revision of this file claimed the same change fixed a CPU spin, on the strength of a
+process sampled at ~7.5 cores. That was a misdiagnosis and is withdrawn: the process sampled was a
+later scenario's binary, not the download's, which had already exited; and a test binary hosting
+the edgli Entry in-process alongside five `hoprd` nodes, anvil and blokli on one machine is
+expected to be busy. Nothing here measured what an idle Session costs.
 
 ## Fidelity limits
 
