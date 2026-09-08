@@ -107,9 +107,26 @@ async fn await_sweeps(
 /// return packet is one share. A margin on top because a cycle only completes once *its own*
 /// shares have all ridden back, and the SURBs already in flight when it commits carry the
 /// predecessor's.
-fn payload_for(cycles: u64) -> Vec<u8> {
+fn payload_for(phase: u8, cycles: u64) -> Vec<u8> {
     let chunks = (shapes::CYCLE_PACKETS * cycles) as usize * 12 / 10;
-    pump::tagged_payload(0, chunks * CHUNK)
+    pump::tagged_payload(phase, chunks * CHUNK)
+}
+
+/// Bytes a [`pump::Shape::Burst`] of `on` bytes every `off` offers over `run_for`.
+///
+/// A shaped payload has to be sized by *time*, not by cycles, and the difference is not small. A
+/// burst of 40 kB every 3 s is ~13 kB/s — which is what casual browsing actually looks like next
+/// to a 2.5 Mbps link — so a payload sized at two cycles' worth of packets would take nearly four
+/// hours to offer. The first run of this file did exactly that and stopped 4 % in.
+///
+/// That the application cannot finish a cycle at this rate is the *finding*, not a fixture
+/// problem: 13 kB/s is ~14 return packets/s against the ~114/s a cycle of this geometry needs
+/// inside its deadline. What completes it is fill, which is what the scenario then asserts.
+fn burst_payload_for(phase: u8, on: usize, off: Duration, run_for: Duration) -> Vec<u8> {
+    // One burst plus its gap, at the pace within the burst.
+    let per_burst = off + PACE * (on / CHUNK).max(1) as u32;
+    let bursts = (run_for.as_secs_f64() / per_burst.as_secs_f64()).ceil() as usize;
+    pump::tagged_payload(phase, bursts * on)
 }
 
 /// The spike: does a cluster at this geometry admit the Session and complete a cycle at all?
@@ -148,7 +165,7 @@ async fn the_profile_geometry_completes_a_cycle() -> anyhow::Result<()> {
     );
 
     let (mut rx, mut tx) = tokio::io::split(session);
-    let payload = payload_for(1);
+    let payload = payload_for(0, 1);
     tracing::info!(
         bytes = payload.len(),
         cycle_packets = shapes::CYCLE_PACKETS,
@@ -309,13 +326,20 @@ async fn an_idle_session_completes_its_cycle_on_exit_fill() -> anyhow::Result<()
     Ok(())
 }
 
-/// A browsing Session sustains its cycles across the gaps between bursts.
+/// A browsing Session completes its cycles, and it is fill rather than the browsing that does it.
 ///
 /// Casual browsing is a page load and then a pause: bursts of a few tens of kB separated by
-/// seconds of silence. The same bytes spread evenly would keep a cycle advancing steadily, so the
-/// duty cycle is the whole point — the gaps are where the Exit has to decide whether to make up
-/// the shortfall, and a cycle that only completes because the burst average happened to clear the
-/// deadline has not been tested for anything.
+/// seconds of silence. Measured against this geometry that is **~13 kB/s**, or about 14 return
+/// packets/s — an eighth of the ~114/s a cycle needs to finish inside its deadline. So a browsing
+/// client is much closer to an idle one than to a busy one, which is the finding rather than a
+/// fixture problem: on the first run of this file the payload was sized at two cycles' worth of
+/// packets and would have taken nearly four hours to offer.
+///
+/// What this adds over the idle shape is the *duty cycle*. Idle traffic is regular; browsing
+/// arrives in bursts with gaps, so the Exit's estimate of what the application is contributing
+/// swings, and a planner that reacted to the burst rate rather than the average would over-send
+/// during a gap and under-send during a burst. The assertion is the same — the cycle completes and
+/// its successor is funded — but the traffic underneath it is not.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires PIX-enabled hoprd/hoprd-localcluster binaries and a chain"]
 async fn a_browsing_session_sustains_its_cycles() -> anyhow::Result<()> {
@@ -335,22 +359,29 @@ async fn a_browsing_session_sustains_its_cycles() -> anyhow::Result<()> {
     let before = pix::sample_exit(&exit).await?;
 
     let (mut rx, mut tx) = tokio::io::split(session);
-    // 40 kB pages, 3 s apart: ~13 kB/s average, well under the ~270 kB/s a cycle wants, so the
-    // application covers roughly a twentieth of what the deadline needs and fill covers the rest.
-    let payload = payload_for(2);
+    let aim_point = shapes::MAX_RECOVERY_TIME.mul_f64(shapes::FILL_FINISH_FRACTION);
+    // 40 kB pages, 3 s apart, for as long as fill has to finish the cycle in. Sized by duration
+    // rather than by cycles — see `burst_payload_for`.
+    const PAGE: usize = 40 * 1024;
+    const GAP: Duration = Duration::from_secs(3);
+    let payload = burst_payload_for(0, PAGE, GAP, aim_point);
+    tracing::info!(
+        bytes = payload.len(),
+        ?aim_point,
+        "browsing at ~13 kB/s; the cycle needs ~20x that, so fill covers the difference"
+    );
+
     let transfer = pump::pump_halves(
         &mut rx,
         &mut tx,
         &payload,
         "browsing",
-        sweep_budget(2),
+        aim_point + Duration::from_secs(120),
         PumpOpts {
             pace: Some(PACE),
             chunk: Some(CHUNK),
-            shape: Some(pump::Shape::Burst {
-                on: 40 * 1024,
-                off: Duration::from_secs(3),
-            }),
+            phase: Some(0),
+            shape: Some(pump::Shape::Burst { on: PAGE, off: GAP }),
             idle_budget: Some(Duration::from_secs(60)),
             ..Default::default()
         },
@@ -362,8 +393,15 @@ async fn a_browsing_session_sustains_its_cycles() -> anyhow::Result<()> {
         outcome = ?transfer.outcome,
         "browsing traffic finished"
     );
+    anyhow::ensure!(
+        transfer.arrival_pct() > 50.0,
+        "the browsing traffic itself did not round-trip, so nothing below is about PIX: {:?} at \
+         {:.0}%",
+        transfer.outcome,
+        transfer.arrival_pct()
+    );
 
-    let delta = await_sweeps(&exit, &before, 2, sweep_budget(1)).await?;
+    let delta = await_sweeps(&exit, &before, 1, aim_point).await?;
     assert_eq!(
         0,
         delta.deposits_timed_out().unwrap_or(0),
@@ -371,8 +409,14 @@ async fn a_browsing_session_sustains_its_cycles() -> anyhow::Result<()> {
         delta.summary()
     );
     assert!(
-        delta.sweeps().unwrap_or(0) >= 2,
-        "a browsing Session completed fewer than two cycles, so it did not sustain them: {}",
+        delta.keys_recovered().unwrap_or(0) >= 1,
+        "a browsing Session did not complete a cycle within {aim_point:?}, so its deposit \
+         stranded: {}",
+        delta.summary()
+    );
+    assert!(
+        delta.deposits_confirmed().unwrap_or(0) >= 2,
+        "the browsing cycle completed but no successor was funded: {}",
         delta.summary()
     );
 
@@ -484,7 +528,7 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
 
     let (mut rx, mut tx) = tokio::io::split(session);
     let aim_point = shapes::MAX_RECOVERY_TIME.mul_f64(shapes::FILL_FINISH_FRACTION);
-    let payload = payload_for(1);
+    let payload = payload_for(0, 1);
     tracing::info!(
         bytes = payload.len(),
         "uploading into a sink; nothing will come back"
@@ -566,14 +610,21 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
     let before = pix::sample_exit(&exit).await?;
     let (mut rx, mut tx) = tokio::io::split(session);
 
-    // 1. Browsing: a quarter of a cycle in bursts, so the cycle is genuinely part-finished when
-    //    the application goes quiet and fill has a real remainder to plan against.
+    // 1. Browsing for three minutes. Sized by duration, not by cycles: at ~13 kB/s a quarter of a
+    //    cycle would take twenty minutes to offer, and the point of this phase is only that the
+    //    cycle is *part*-finished by the application when it stops — so fill has a real remainder
+    //    to plan against rather than a whole cycle.
     let browsing = pump::pump_halves(
         &mut rx,
         &mut tx,
-        &pump::tagged_payload(0, (shapes::CYCLE_PACKETS / 4) as usize * CHUNK),
+        &burst_payload_for(
+            0,
+            40 * 1024,
+            Duration::from_secs(3),
+            Duration::from_secs(180),
+        ),
         "mixed/browsing",
-        sweep_budget(1),
+        Duration::from_secs(300),
         PumpOpts {
             pace: Some(PACE),
             chunk: Some(CHUNK),
@@ -598,11 +649,12 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
     tracing::info!("mixed: going quiet for 120s");
     tokio::time::sleep(Duration::from_secs(120)).await;
 
-    // 3. Bulk: the rest of the cycle and another, at the full rate.
+    // 3. Bulk: a whole cycle at the full rate, which is what a client resuming a transfer looks
+    //    like — and what makes fill have to yield rather than keep sending on top of it.
     let bulk = pump::pump_halves(
         &mut rx,
         &mut tx,
-        &pump::tagged_payload(1, (shapes::CYCLE_PACKETS * 3 / 2) as usize * CHUNK),
+        &payload_for(1, 1),
         "mixed/bulk",
         sweep_budget(2),
         PumpOpts {
