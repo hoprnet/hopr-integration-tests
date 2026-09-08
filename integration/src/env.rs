@@ -573,8 +573,18 @@ async fn boot_edgli(
         );
     }
 
+    // The population floor is the target, so the close pass can never run: it stops as soon as
+    // `remaining_open <= min_open_channels`, and with the two equal there is nothing it may close.
+    //
+    // A floor of one let it close two of three channels ten minutes into a quiet Session, after
+    // which every forward send failed with `cannot find 1 hop path` — 16 866 times in one run,
+    // while the Session itself was healthy and had just completed a PIX cycle. Zeroing
+    // `close_below_quality_score` below removes the *quality* trigger but not the others, and no
+    // scenario in this crate relies on the strategy closing a channel: the one that needs a
+    // relayer gone kills its process instead. So the floor is the reliable guard, and the quality
+    // threshold stays as defence in depth.
     let sizing = IncentiveConfiguration {
-        min_open_channels: 1,
+        min_open_channels: target_channels + genesis_channels,
         target_open_channels: target_channels + genesis_channels,
         ..Default::default()
     };
