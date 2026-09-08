@@ -129,6 +129,66 @@ fn burst_payload_for(phase: u8, on: usize, off: Duration, run_for: Duration) -> 
     pump::tagged_payload(phase, bursts * on)
 }
 
+/// Offer `CHUNK`-sized writes at [`PACE`] for `run_for`, returning the bytes offered.
+///
+/// The asymmetric shapes cannot use [`pump::pump_halves`], and the reason is structural rather
+/// than a matter of taste: the pump's reader owns the stopping decision and decides against the
+/// *payload it sent*, because every other scenario in this repo targets the Exit's loopback and
+/// gets its own bytes back. Neither asymmetric shape has that relationship. A download's reply
+/// volume is the service's choice, so the pump declares `Complete` as soon as one datagram
+/// exceeds the request that asked for it — measured at 0.23 s against a 491 s push. An upload's
+/// reply volume is *zero*, so the pump declares `NeverStarted` after 30 s with the transfer
+/// barely begun.
+///
+/// So these two drive the Session directly: this writes for a duration, [`drain_for`] reads for
+/// one, and the scenario runs them against the sweep wait with `join!`.
+async fn offer_for(
+    tx: &mut tokio::io::WriteHalf<hoprd_integration_test::HoprSession>,
+    run_for: Duration,
+) -> anyhow::Result<u64> {
+    use tokio::io::AsyncWriteExt as _;
+    let deadline = std::time::Instant::now() + run_for;
+    let payload = vec![0xCDu8; CHUNK];
+    let mut offered = 0u64;
+    while std::time::Instant::now() < deadline {
+        tx.write_all(&payload).await?;
+        offered += CHUNK as u64;
+        tokio::time::sleep(PACE).await;
+    }
+    tx.flush().await?;
+    Ok(offered)
+}
+
+/// Read and discard for `run_for`, returning the bytes received.
+///
+/// Counterpart to [`offer_for`]; see there for why the pump cannot do this. Reads on a timeout so
+/// a quiet stretch does not end the drain — on a download the gaps are the service's pacing, not
+/// a stall.
+async fn drain_for(
+    rx: &mut tokio::io::ReadHalf<hoprd_integration_test::HoprSession>,
+    run_for: Duration,
+) -> u64 {
+    use tokio::io::AsyncReadExt as _;
+    let deadline = std::time::Instant::now() + run_for;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut received = 0u64;
+    while std::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(left.min(Duration::from_secs(5)), rx.read(&mut buf)).await {
+            // End of stream: the Exit stopped serving, and nothing more will arrive.
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => received += n as u64,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "drain: read failed");
+                break;
+            }
+            // A quiet window is not a stall here.
+            Err(_) => continue,
+        }
+    }
+    received
+}
+
 /// The spike: does a cluster at this geometry admit the Session and complete a cycle at all?
 ///
 /// Everything else in this file rests on that, and none of it had ever been run — `tests/pix.rs`
@@ -459,37 +519,39 @@ async fn a_download_session_sustains_its_cycles() -> anyhow::Result<()> {
 
     let (mut rx, mut tx) = tokio::io::split(session);
     // One datagram is the whole request; everything after it is the service's stream coming back.
-    let transfer = pump::pump_halves(
-        &mut rx,
-        &mut tx,
-        &pump::tagged_payload(0, 32),
-        "download",
-        sweep_budget(2),
-        PumpOpts {
-            // The reply stream is not an echo, so nothing arriving matches the phase tag that was
-            // sent. Untagged attribution counts every byte, which is what a download is.
-            phase: None,
-            idle_budget: Some(Duration::from_secs(60)),
-            ..Default::default()
-        },
-    )
-    .await?;
+    {
+        use tokio::io::AsyncWriteExt as _;
+        tx.write_all(b"start").await?;
+        tx.flush().await?;
+    }
+    tracing::info!(service = %service.addr(), "download requested; draining the reply stream");
+
+    // Drained and waited on together: the reply stream is what advances the cycles, so stopping to
+    // poll the Exit between them would be measuring a Session nobody is reading.
+    let budget = sweep_budget(2);
+    let (received, delta) = tokio::join!(
+        drain_for(&mut rx, budget),
+        await_sweeps(&exit, &before, 2, budget),
+    );
+    let delta = delta?;
     tracing::info!(
-        received_bytes = transfer.received_bytes,
+        received,
         pushed_by_service = service.sent(),
-        mbps = transfer.throughput_at(0.9).unwrap_or(0.0),
-        outcome = ?transfer.outcome,
         "download traffic finished"
     );
     anyhow::ensure!(
-        transfer.received_bytes > 0,
+        received > 0,
         "the download never started, so the Exit could not reach the UDP service at {} — check \
-         `use_target_allow_list` on the generated node config: {:?}",
-        service.addr(),
-        transfer.outcome
+         `use_target_allow_list` on the generated node config",
+        service.addr()
     );
 
-    let delta = await_sweeps(&exit, &before, 2, sweep_budget(1)).await?;
+    assert_eq!(
+        0,
+        delta.deposits_timed_out().unwrap_or(0),
+        "the Exit gave up on a deposit during a saturated download: {}",
+        delta.summary()
+    );
     assert!(
         delta.sweeps().unwrap_or(0) >= 2,
         "a saturated download completed fewer than two cycles, which is the shape PIX is best \
@@ -526,44 +588,27 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
     let exit = node_for(&env, exit_addr)?;
     let before = pix::sample_exit(&exit).await?;
 
-    let (mut rx, mut tx) = tokio::io::split(session);
+    let (_rx, mut tx) = tokio::io::split(session);
     let aim_point = shapes::MAX_RECOVERY_TIME.mul_f64(shapes::FILL_FINISH_FRACTION);
-    let payload = payload_for(0, 1);
-    tracing::info!(
-        bytes = payload.len(),
-        "uploading into a sink; nothing will come back"
-    );
+    tracing::info!(?aim_point, "uploading into a sink; nothing will come back");
 
-    let transfer = pump::pump_halves(
-        &mut rx,
-        &mut tx,
-        &payload,
-        "upload",
-        aim_point,
-        PumpOpts {
-            pace: Some(PACE),
-            chunk: Some(CHUNK),
-            // Nothing is expected back at all, so the read side must not end the pump early —
-            // `Idle` here is the shape working as intended, not a stalled Session.
-            idle_budget: Some(aim_point),
-            ..Default::default()
-        },
-    )
-    .await?;
+    // Offered and waited on together, for the length of the aim point. Nothing reads the return
+    // half at all — there is nothing to read, and that is the shape.
+    let (offered, delta) = tokio::join!(
+        offer_for(&mut tx, aim_point),
+        await_sweeps(&exit, &before, 1, aim_point),
+    );
+    let offered = offered?;
+    let delta = delta?;
     tracing::info!(
-        sent_bytes = transfer.sent_bytes,
+        offered,
         absorbed_by_service = service.received(),
-        received_bytes = transfer.received_bytes,
-        outcome = ?transfer.outcome,
         "upload traffic finished"
     );
     anyhow::ensure!(
         service.received() > 0,
-        "nothing reached the UDP service, so the upload never left the Session: {:?}",
-        transfer.outcome
+        "nothing reached the UDP service, so the upload never left the Session"
     );
-
-    let delta = await_sweeps(&exit, &before, 1, aim_point).await?;
     assert!(
         delta.keys_recovered().unwrap_or(0) >= 1,
         "an upload-only Session stranded its deposit — the return path carried too little to \
