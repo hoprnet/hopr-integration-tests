@@ -20,22 +20,49 @@ publish = false
 # still pins the exact commit for reproducibility.
 #
 # To test an unmerged edge-client change, override the ref rather than committing a rev here.
-edgli = { git = "https://github.com/hoprnet/edge-client", branch = "release/4.1", default-features = false, features = [
+#
+# Back on `main` since edge-client#151 merged: entry-side PIX is on `main`, so the detour onto
+# `lukas/pix` that `tests/pix.rs` needed is spent. The two pins still have to move together —
+# see the hopr-lib comment.
+edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", default-features = false, features = [
   "runtime-tokio",
   "blokli",
-  # Switches on `hopr-lib/telemetry`, which is what compiles `mod telemetry` into
-  # hopr-transport-session. Without it every per-session counter is absent rather
-  # than zero, and "the session received nothing" is indistinguishable from "the
-  # metric was never built".
-  #
-  # Requested through edgli's OWN feature rather than by depending on hopr-lib here
-  # and enabling it there. A direct dependency has to name the same source edgli
-  # names or cargo resolves two separate hopr-lib packages, and the feature then
-  # applies to ours while `edgli::hopr_lib` — which all of this code actually uses —
-  # gets the other one without it. That is exactly what broke on 2026-09-04:
-  # edge-client main moved its pin to a `rev` that had diverged from `release/4.0`,
-  # and `edgli::hopr_lib::collect_hopr_metrics` vanished because that copy was built
-  # without `telemetry`. Going through edgli makes the mismatch impossible.
+] }
+
+# Pulled in only to switch on hopr-lib's `telemetry` feature, which is what compiles
+# `mod telemetry` into hopr-transport-session. Without it every per-session counter is absent
+# rather than zero, and "the session received nothing" is indistinguishable from "the metric was
+# never built". Must name the same source and rev edgli resolves, or the lock carries two
+# hopr-libs and the entry runs a mixture of the two.
+#
+# That is why this is a `rev` and not a branch: hoprnet publishes neither `hopr-lib` nor
+# `hopr-utils-session`, so every consumer pins a master rev by hand, and tracking a branch here
+# would drift off whatever the Exit binary was built from and silently split the graph. The rev
+# is edge-client's own pin, copied verbatim — and `hoprd` pins the same one, so the three sides
+# of a PIX run agree by construction. Update them together or not at all.
+#
+# To test an unmerged hoprnet change, override this alongside `edgli` rather than committing a
+# feature branch here.
+hopr-lib = { git = "https://github.com/hoprnet/hoprnet", rev = "85e698a726710e205e8f76f4df7ad52debd2ff86", default-features = false, features = [
+  "telemetry",
+] }
+
+# Same trick as `hopr-lib` above, for the other half of the PIX picture. edge-client enables
+# `hopr-lib/telemetry` but NOT `hopr-strategy/telemetry`, so without this every entry-side
+# `hopr_strategy_pix_*` counter is absent rather than zero — and "the entry never deposited" and
+# "the counter was never built" are the same reading. Same source and version edgli resolves, so
+# the features unify onto one copy rather than adding a second.
+#
+# "Same version" is the load-bearing half, and it moves with the `hopr-lib` rev above: 4.0.0 is
+# what edge-client resolves on that rev, and a different major here would link a second
+# `hopr-strategy` whose counters are registered in the same process but incremented by nobody. The
+# reading would be a full set of zeroes rather than an error — which is the exact conclusion
+# `tests/pix.rs` draws from a zero. 1.0.2 → 4.0.0 came with the hoprnet bump; keep the three lines
+# in step.
+#
+# Not behind the `pix` feature: an unconditional feature flag on a dependency the entry already
+# links is cheaper than a conditional one, and the counters cost nothing when PIX is off.
+hopr-strategy = { version = "4.0.0", default-features = false, features = [
   "telemetry",
 ] }
 
@@ -63,6 +90,17 @@ console-subscriber = { version = "0.5", optional = true }
 # tests/profiling.rs. Build with `--profile tracer` and
 # `RUSTFLAGS="--cfg tokio_unstable --check-cfg cfg(tokio_unstable)"`.
 prof = ["dep:console-subscriber"]
+
+# Entry-side PIX: compiles `src/pix.rs`, the PIX half of `src/env.rs`, and `tests/pix.rs`.
+#
+# Off by default so the CI throughput build does not pull PIX in — it selects a deposit pool three
+# crates away and changes what `HoprPixSpec` resolves to, which is not something the 0-hop/1-hop
+# tests should carry silently.
+#
+# `pix-test` is edge-client's secp256k1 pool: the only implemented one, and visible on-chain. Its
+# sibling `pix-curvy` is the anonymous pool and is a stub whose methods panic on the first deposit,
+# so it is not an alternative here.
+pix = ["edgli/pix-test"]
 
 [dev-dependencies]
 test-log = { version = "0.2", features = ["trace"] }

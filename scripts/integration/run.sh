@@ -176,8 +176,18 @@ echo "building blokli chain from ${BLOKLI_REF} ..."
 nix_build "bloklid + deployer" -L --refresh "github:hoprnet/blokli/${BLOKLI_REF}#bloklid" --out-link "${REPO_ROOT}/result-bloklid"
 nix_build "anvil (foundry)" -L "nixpkgs#foundry" --out-link "${REPO_ROOT}/result-foundry"
 
-# ── Pin edgli to the resolved sha and refresh the lockfile ──
+# ── Pin edgli to the resolved sha, and hopr-lib to whatever that edgli pins ──
 echo "pinning edgli to ${EDGLI_SHA} ..."
+# Read through `gh api` for the reason resolve_sha gives: git-over-https is unusable in the dev
+# shell. Needed because our `hopr-lib` must name the rev edgli resolves, and only edge-client's
+# own manifest says which that is.
+EDGLI_MANIFEST="$(gh api "repos/hoprnet/edge-client/contents/Cargo.toml?ref=${EDGLI_SHA}" \
+  --jq '.content' 2>/dev/null | base64 -d)" || true
+[ -n "${EDGLI_MANIFEST}" ] || {
+  echo "could not read edge-client's Cargo.toml at ${EDGLI_SHA}" >&2
+  exit 1
+}
+export EDGLI_MANIFEST
 python3 - "$CRATE_CARGO" "$EDGLI_SHA" <<'PY'
 import re, sys
 
@@ -204,7 +214,7 @@ if n == 0:
 open(path, 'w').write(src[: stanza.start()] + pinned + src[stanza.end() :])
 print(f"  edgli pinned: {pinned.splitlines()[0]}")
 PY
-(cd "${REPO_ROOT}/integration" && cargo update -p edgli)
+(cd "${REPO_ROOT}/integration" && cargo update -p edgli -p hopr-lib)
 
 # ── Run every localcluster suite, fresh chain per scenario ──
 # Everything that a local cluster can drive. `rotsee` is excluded because it needs a
