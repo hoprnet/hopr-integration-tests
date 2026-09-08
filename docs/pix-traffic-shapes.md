@@ -57,18 +57,30 @@ the floor `validate_incoming_session_pix_config` enforces (`quota_range_max / 18
 Measured on a 3-node local cluster, 1 hop, binary chain. Every figure is from a run whose log is
 named beside it.
 
-All six pass. Counters are the Exit's `hopr_strategy_pix_*` delta over the scenario.
+All six pass. Counters are the Exit's `hopr_strategy_pix_*` delta over the scenario; **paid** is the
+rise in the Exit's *Safe balance*, read from the chain.
 
-| shape | traffic offered | recovered | swept | deposits | wall |
-| --- | --- | --- | --- | --- | --- |
-| **geometry spike** | 88 MB at 300 pkt/s, loopback | 1 | 1 | 2 | 590 s |
-| **idle** | 25 keep-alives of 32 B, one per 25 s | 1 | 1 | 2 | 791 s |
-| **browsing** | 40 kB bursts every 3 s (~13 kB/s), 540 s | 1 | 1 | 2 | 708 s |
-| **download** | service pushes 2 cycles at 300 pkt/s | 2 | 2 | 3 | 715 s |
-| **upload** | 300 pkt/s into a sink, nothing returns | 1 | 1 | 2 | 690 s |
-| **mixed** | browse 180 s → quiet 120 s → bulk 1 cycle | 2 | 2 | 3 | 1112 s |
+| shape | traffic offered | recovered | swept | deposits | paid (wxHOPR) | wall |
+| --- | --- | --- | --- | --- | --- | --- |
+| **geometry spike** | 88 MB at 300 pkt/s, loopback | 1 | 1 | 2 | 0.08503296 = **1×** | 593 s |
+| **idle** | 25 keep-alives of 32 B, one per 25 s | 1 | 1 | 2 | 0.08503296 = **1×** | 817 s |
+| **browsing** | 40 kB bursts every 3 s (~13 kB/s), 540 s | 1 | 1 | 2 | 0.08503296 = **1×** | 745 s |
+| **download** | service pushes 2 cycles at 300 pkt/s | 2 | 2 | 3 | 0.17006592 = **2×** | 753 s |
+| **upload** | 300 pkt/s into a sink, nothing returns | 1 | 1 | 2 | 0.08503296 = **1×** | 690 s |
+| **mixed** | browse 180 s → quiet 120 s → bulk 1 cycle | 2 | 2 | 3 | 0.17006592 = **2×** | 1113 s |
 
 Not one scenario recorded a deposit timeout, and none was closed by the supervisor.
+
+**Every scenario's Safe delta was an exact whole multiple of the per-SSA deposit** — `1×` or `2×`
+of 0.08503296 wxHOPR, matching the cycles its counters claimed, with no residue from relayed-ticket
+income. The assertion only enforces a floor (see `assert_exit_was_paid` for why), but exactness
+held in all six.
+
+This matters because the counters alone cannot establish it. `keys_recovered` and `sweeps` are the
+Exit's own bookkeeping, and there is a path where both increment and no money moves: a cycle that
+completes before its deposit is mined leaves the Exit recovering a key against a zero balance,
+logging "already swept", with the funds stranded at the stealth address. Until the balance check
+was added, all six scenarios would have reported success against an Exit that was never paid.
 
 Traffic that had to round-trip did: 100 % arrival on the spike, on the idle liveness echo
 (7 200/7 200 B) and on the mixed browsing phase; 99.9 % on the mixed bulk phase. The upload's
@@ -106,12 +118,17 @@ cycles in the time the others took to sweep one. Fill has nothing to make up on 
 
 ## Three findings that are not about PIX
 
-**The entry closed its own channels ten minutes in.** `close_below_quality_score` defaults to 0.3
-and is separate from the eligibility threshold this harness already zeroes. Probing needs traffic
-to score a peer; an idle shape offers 32 bytes every 25 s; the score decays below the threshold and
-the strategy closes the channel underneath a Session that is working perfectly. Measured: channels
-opened at T+0, closed at T+10m07s, then 17 522 consecutive `cannot find 1 hop path` failures. Any
-scenario longer than about ten minutes hits it. `env.rs` now pins it to 0.0.
+**The entry closed its own channels ten minutes in, twice, for two different reasons.**
+`close_below_quality_score` defaults to 0.3 and is separate from the eligibility threshold this
+harness already zeroes. Probing needs traffic to score a peer; an idle shape offers 32 bytes every
+25 s; the score decays and the strategy closes the channel underneath a Session that is working
+perfectly. Measured: channels opened at T+0, closed at T+10m07s, then 17 522 consecutive
+`cannot find 1 hop path` failures.
+
+Zeroing that threshold was not enough — a later run closed two of three channels at T+10m07s again.
+The close pass stops only when `remaining_open <= min_open_channels`, and the harness set that floor
+to 1 while opening 3. `env.rs` now sets the floor equal to the target, which forbids the close pass
+outright regardless of which trigger fires; the quality threshold stays as defence in depth.
 
 For a deployment this is worth knowing rather than alarming — a real network has more relays and
 more probing traffic — but an idle VPN client is exactly the case that produces neither, and the
