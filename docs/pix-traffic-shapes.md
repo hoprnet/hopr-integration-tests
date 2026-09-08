@@ -11,10 +11,16 @@ HOPRD_SRC=../hoprd-shapes just pix-shapes            # all of them, hours
 HOPRD_SRC=../hoprd-shapes just pix-shapes <scenario> # one, ~12-20 min
 ```
 
-`HOPRD_SRC` must be a hoprd carrying **hoprnet#8396** (Exit-side PIX fill) and the
-`--pix-config` seam. `just pix-shapes` refuses to run without the latter, because a
-`hoprd-localcluster` that ignores `--pix-config` silently runs the demo geometry and every
-assertion below would then be measuring a cycle 2 500x smaller than it claims.
+`HOPRD_SRC` must be a hoprd carrying **hoprnet#8396** (Exit-side PIX fill, landed on `master` as
+`57b5e679`) and the `--pix-config` seam. `just pix-shapes` refuses to run without the latter,
+because a `hoprd-localcluster` that ignores `--pix-config` silently runs the demo geometry and
+every assertion below would then be measuring a cycle 2 500x smaller than it claims.
+
+All three sides of a run must be on that one rev. `hoprd` names it directly; this crate names it
+too but reaches it through a `[patch]`, because `edgli` still pins the pre-fill 85e698a726 and two
+different revs would put two `hopr-lib`s in the lock. See the comment on that patch in
+`integration/Cargo.toml` — it also documents the worktree the patch resolves to, and what to
+delete once edgli follows.
 
 ## The profile
 
