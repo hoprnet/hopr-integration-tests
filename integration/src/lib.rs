@@ -20,6 +20,11 @@
 pub mod cluster;
 pub mod env;
 pub mod origination;
+// Ungated on purpose, though only `tests/pix.rs` drives it: the balance and counter readers are
+// plain parsers, and gating them would keep the subtlest logic in this crate — absent-vs-zero,
+// whole-multiple reconciliation — out of the default `cargo test --lib` that CI runs. Only the
+// parts naming edgli's PIX types are `#[cfg(feature = "pix")]`.
+pub mod pix;
 pub mod pump;
 pub mod relayers;
 pub mod session_metrics;
@@ -32,6 +37,12 @@ pub use env::IntegrationEnv;
 
 /// On-chain address type, re-exported so submodules share one definition.
 pub use edgli::hopr_lib::api::types::primitive::prelude::Address;
+
+/// wxHOPR balance type, re-exported for the same reason as [`Address`].
+///
+/// This path rather than `hopr_lib::HoprBalance`: the latter is a private re-export, so naming it
+/// compiles inside `hopr-lib` and not here.
+pub use edgli::hopr_lib::api::types::primitive::prelude::HoprBalance;
 
 /// The session type scenarios operate on, re-exported to spare callers the path through
 /// Edgli's re-export chain.

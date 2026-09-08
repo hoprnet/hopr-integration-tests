@@ -134,6 +134,16 @@ pub struct PumpOpts {
     /// into "how much came back in a fixed window", which is the question a survival scenario is
     /// actually asking.
     pub tail_grace: Option<Duration>,
+    /// Bytes offered between `pace` sleeps; `None` uses [`IO_CHUNK`].
+    ///
+    /// `pace` alone only fixes the *average* rate — the shape is `chunk` bytes at line speed
+    /// followed by silence. That is fine for a throughput scenario, where the average is the
+    /// measurement, and wrong for one pacing a *packet* rate. PIX delivers one SSA share per
+    /// return-path SURB the exit spends, so the reply rate is what advances a cycle; at the
+    /// ~1.3 kB/s a cycle needs, a 64 KiB chunk is nearly a minute of traffic delivered as one
+    /// burst and then nothing, which both distorts share pacing and lets a cycle outrun the
+    /// deposit paying for it.
+    pub chunk: Option<usize>,
 }
 
 /// Result of one loopback round-trip.
@@ -343,14 +353,16 @@ const IO_CHUNK: usize = 63 * SESSION_MTU;
 /// Per-chunk delay to cap the send rate at `HOPRD_PUMP_MBPS` MB/s. Blasting a large
 /// payload saturates the node's rayon packet pool on CPU-constrained CI runners
 /// (decode timeouts → heavy loss). Unset or ≤0 = unpaced.
-fn send_pace_per_chunk() -> Option<Duration> {
+///
+/// Takes the chunk actually being offered rather than assuming [`IO_CHUNK`]. The delay is per
+/// write, so deriving it from a different size than the writer uses scales the offered rate by
+/// their ratio — at `PumpOpts::chunk` of 512 that is 1/128 of the requested MB/s, silently.
+fn send_pace_per_chunk(chunk: usize) -> Option<Duration> {
     let mbps: f64 = std::env::var("HOPRD_PUMP_MBPS").ok()?.parse().ok()?;
     if mbps <= 0.0 {
         return None;
     }
-    Some(Duration::from_secs_f64(
-        IO_CHUNK as f64 / (mbps * 1_000_000.0),
-    ))
+    Some(Duration::from_secs_f64(chunk as f64 / (mbps * 1_000_000.0)))
 }
 /// If no bytes arrive for this long after the first byte, the return transfer is
 /// considered finished (UDP loopback gives no EOF; lost tail bytes never arrive).
@@ -535,7 +547,10 @@ pub async fn pump_halves(
 ) -> anyhow::Result<Transfer> {
     let expected = sha256_digest(payload);
     let total_bytes = payload.len();
-    let pace = opts.pace.or_else(send_pace_per_chunk);
+    // Zero would spin forever offering nothing, so an explicit 0 falls back rather than hanging.
+    // Resolved before the pace, which the environment expresses per chunk.
+    let chunk = opts.chunk.filter(|c| *c > 0).unwrap_or(IO_CHUNK);
+    let pace = opts.pace.or_else(|| send_pace_per_chunk(chunk));
 
     // Everything is stamped against the moment the pump started, not the first byte back. On a
     // recovering stream the interval between the two *is* the outage, and timing from the first
@@ -548,7 +563,7 @@ pub async fn pump_halves(
     let send = async {
         let mut offset = 0;
         while offset < payload.len() {
-            let end = (offset + IO_CHUNK).min(payload.len());
+            let end = (offset + chunk).min(payload.len());
             tx.write_all(&payload[offset..end]).await?;
             if let Some(d) = pace {
                 tokio::time::sleep(d).await;
