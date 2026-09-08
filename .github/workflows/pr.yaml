@@ -5,6 +5,13 @@ name: PR
 # `hetzner` box — the same machine the throughput gate uses, so a test result here
 # and one there come from the same hardware. The heavy end-to-end run lives in
 # integration.yaml. See runner/README.md.
+#
+# Both jobs below fan out over the two release lines. `integration/src` is shared
+# source compiled against two different dependency sets (`Cargo.toml` is v4,
+# `Cargo.v5.toml` is v5), so a change can compile on one and not the other — and PIX
+# only exists on v5, which is where `--features pix` gets checked at all. The end-to-end
+# run is gated on a label, so without this a v5-only break would first surface in the
+# merge queue.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -56,9 +63,13 @@ jobs:
             test
           requireScope: false
   lint:
-    name: Format + clippy
+    name: Format + clippy (${{ matrix.line }})
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        line: [v4, v5]
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
@@ -76,6 +87,16 @@ jobs:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
       # The crate builds in the hoprnet dev shell (it provides the rust toolchain
       # + the cached hopr-lib/edgli dependency tree).
+      # Cargo insists the manifest be named `Cargo.toml`, so the v5 set is copied over
+      # rather than passed with `--manifest-path`. Same swap run.sh does. A separate step
+      # rather than a branch inside the `bash -c` body below: that body is single-quoted so
+      # the inner shell expands it, which means any `${...}` in there is an SC2016 finding
+      # and actionlint fails the pre-commit hook.
+      - name: Select the v5 dependency set
+        if: matrix.line == 'v5'
+        run: |
+          cp integration/Cargo.v5.toml integration/Cargo.toml
+          cp integration/Cargo.v5.lock integration/Cargo.lock
       - name: Format + clippy
         run: |
           nix develop github:hoprnet/hoprnet --command bash -c '
@@ -84,13 +105,29 @@ jobs:
             cargo fmt --check
             cargo clippy -p hoprd-integration-test --all-targets -- -D warnings
           '
+      # PIX needs `edgli/pix-test`, which exists only on v5. On v4 the `pix` feature is
+      # declared but inert, and enabling it there does not compile.
+      - name: Clippy with PIX
+        if: matrix.line == 'v5'
+        run: |
+          nix develop github:hoprnet/hoprnet --command bash -c '
+            set -euo pipefail
+            cd integration
+            cargo clippy -p hoprd-integration-test --all-targets --features pix -- -D warnings
+          '
   unit:
-    name: Unit tests
+    name: Unit tests (${{ matrix.line }})
     # On hetzner because it runs tests, not because these 52 are slow. No
     # `harden-runner`: it installs an eBPF egress monitor and needs sudo, and only
     # supports GitHub-hosted runners.
     runs-on: [self-hosted, hetzner]
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      # The runner executes one job at a time, so these two run back to back.
+      max-parallel: 1
+      matrix:
+        line: [v4, v5]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -125,10 +162,30 @@ jobs:
           done
           echo "::error::nix is not installed on this runner — see runner/README.md." >&2
           exit 1
+      # Cargo insists the manifest be named `Cargo.toml`, so the v5 set is copied over
+      # rather than passed with `--manifest-path`. Same swap run.sh does. A separate step
+      # rather than a branch inside the `bash -c` body below: that body is single-quoted so
+      # the inner shell expands it, which means any `${...}` in there is an SC2016 finding
+      # and actionlint fails the pre-commit hook.
+      - name: Select the v5 dependency set
+        if: matrix.line == 'v5'
+        run: |
+          cp integration/Cargo.v5.toml integration/Cargo.toml
+          cp integration/Cargo.v5.lock integration/Cargo.lock
       - name: Unit tests
         run: |
           nix develop github:hoprnet/hoprnet --command bash -c '
             set -euo pipefail
             cd integration
             cargo test --lib
+          '
+      # `--features pix` adds the unit tests in src/pix.rs (the Prometheus exposition
+      # parser), which is the half a v4 run cannot reach.
+      - name: Unit tests with PIX
+        if: matrix.line == 'v5'
+        run: |
+          nix develop github:hoprnet/hoprnet --command bash -c '
+            set -euo pipefail
+            cd integration
+            cargo test --lib --features pix
           '

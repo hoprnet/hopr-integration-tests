@@ -538,8 +538,11 @@ async fn boot_edgli(
     let mut strat_cfg = default_strategy_cfg(&sizing)?;
     // An `if let` rather than the irrefutable `let` this used to be: `EdgeStrategyKind` is
     // `#[non_exhaustive]` since edge-client#151, so from a downstream crate the pattern is
-    // refutable even while `default_strategy_cfg` still yields only this one variant.
+    // refutable even while `default_strategy_cfg` still yields only this one variant. The
+    // `allow` is what makes this line compile on BOTH lines: v4 (edge-client release/4.1)
+    // predates #151, so there the same pattern is irrefutable and `-D warnings` rejects it.
     for kind in &mut strat_cfg.strategies {
+        #[allow(irrefutable_let_patterns)]
         if let EdgeStrategyKind::ChannelLifecycle(lc) = kind {
             lc.eligibility = EligibilityConfig {
                 min_peer_quality_score: 0.0,
