@@ -145,12 +145,15 @@ fn burst_payload_for(phase: u8, on: usize, off: Duration, run_for: Duration) -> 
 async fn offer_for(
     tx: &mut tokio::io::WriteHalf<hoprd_integration_test::HoprSession>,
     run_for: Duration,
+    stop: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<u64> {
+    use std::sync::atomic::Ordering;
+
     use tokio::io::AsyncWriteExt as _;
     let deadline = std::time::Instant::now() + run_for;
     let payload = vec![0xCDu8; CHUNK];
     let mut offered = 0u64;
-    while std::time::Instant::now() < deadline {
+    while std::time::Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
         tx.write_all(&payload).await?;
         offered += CHUNK as u64;
         tokio::time::sleep(PACE).await;
@@ -167,12 +170,15 @@ async fn offer_for(
 async fn drain_for(
     rx: &mut tokio::io::ReadHalf<hoprd_integration_test::HoprSession>,
     run_for: Duration,
+    stop: &std::sync::atomic::AtomicBool,
 ) -> u64 {
+    use std::sync::atomic::Ordering;
+
     use tokio::io::AsyncReadExt as _;
     let deadline = std::time::Instant::now() + run_for;
     let mut buf = vec![0u8; 64 * 1024];
     let mut received = 0u64;
-    while std::time::Instant::now() < deadline {
+    while std::time::Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         match tokio::time::timeout(left.min(Duration::from_secs(5)), rx.read(&mut buf)).await {
             // End of stream: the Exit stopped serving, and nothing more will arrive.
@@ -528,11 +534,18 @@ async fn a_download_session_sustains_its_cycles() -> anyhow::Result<()> {
 
     // Drained and waited on together: the reply stream is what advances the cycles, so stopping to
     // poll the Exit between them would be measuring a Session nobody is reading.
+    //
+    // The drain stops the moment the sweeps land rather than running out its budget. Draining a
+    // Session whose service has finished pushing costs an idle read loop and buys nothing, and one
+    // run left it doing that for two hours after the cycles it was waiting for had completed —
+    // burning four CPU-hours in thirty wall-clock minutes.
     let budget = sweep_budget(2);
-    let (received, delta) = tokio::join!(
-        drain_for(&mut rx, budget),
-        await_sweeps(&exit, &before, 2, budget),
-    );
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (received, delta) = tokio::join!(drain_for(&mut rx, budget, &stop), async {
+        let delta = await_sweeps(&exit, &before, 2, budget).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        delta
+    });
     let delta = delta?;
     tracing::info!(
         received,
@@ -593,11 +606,14 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
     tracing::info!(?aim_point, "uploading into a sink; nothing will come back");
 
     // Offered and waited on together, for the length of the aim point. Nothing reads the return
-    // half at all — there is nothing to read, and that is the shape.
-    let (offered, delta) = tokio::join!(
-        offer_for(&mut tx, aim_point),
-        await_sweeps(&exit, &before, 1, aim_point),
-    );
+    // half at all — there is nothing to read, and that is the shape. The upload stops as soon as
+    // the cycle completes, for the reason the download's drain does.
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (offered, delta) = tokio::join!(offer_for(&mut tx, aim_point, &stop), async {
+        let delta = await_sweeps(&exit, &before, 1, aim_point).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        delta
+    });
     let offered = offered?;
     let delta = delta?;
     tracing::info!(
