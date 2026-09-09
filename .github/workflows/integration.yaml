@@ -12,13 +12,22 @@ name: Integration throughput test
 #   * a hopr-integration-tests PR labelled `run-integration` (to run it before queueing).
 # Each triggering project supplies its own rev; the other two use the defaults in
 # scripts/integration/run.sh.
+#
+# One release line per run (see run.sh for the branch table). A dispatch picks its line;
+# runs that gate THIS repo fan out over both, since the test bodies are shared source.
 on:
   repository_dispatch:
     types: [integration]
   workflow_dispatch:
     inputs:
+      line:
+        description: "Release line to test"
+        required: false
+        type: choice
+        default: "v4"
+        options: ["v4", "v5"]
       project:
-        description: "Triggering project (hoprd | edge-client | blokli); empty = hoprd v4 line + edge-client main + blokli release/0.13"
+        description: "Triggering project (hoprd | edge-client | blokli); empty = every ref defaults to the head of its branch on the chosen line"
         required: false
         default: ""
       rev:
@@ -52,7 +61,7 @@ on:
 # Uniform indentation on purpose: `>-` only folds lines at the SAME indent as the
 # first one, so an indented continuation would leave real newlines in this string.
 run-name: >-
-  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration ({0} {1})', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly v4)' || 'Integration throughput test'))) }}
+  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration {0} ({1} {2})', github.event.client_payload.line || 'v4', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly v4)' || 'Integration throughput test'))) }}
 # PR events: one group per PR, cancel-in-progress (a new push supersedes the
 # previous run of that PR). Dispatch/manual/merge-queue: a single shared group that
 # never cancels, so those runs stack and execute one after another. Merge-queue runs
@@ -63,19 +72,29 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   integration:
-    name: Integration throughput
+    name: Integration throughput (${{ matrix.line }})
     # PR runs only when the `run-integration` label is present; dispatch/manual always run.
     if: >-
       github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-integration')
-    # Self-hosted Hetzner box (provisioned by gitops/ansible, label `hetzner`).
-    # A dedicated machine rather than a hosted VM: the onion encoder is CPU-bound
-    # and the throughput thresholds only mean anything on a stable core count.
+    # Dedicated self-hosted machine rather than a hosted VM: the onion encoder is
+    # CPU-bound and the throughput thresholds only mean anything on a stable core count.
     runs-on: [self-hosted, hetzner]
-    # ~62 min expected: ~44 min of tests across 8 scenarios (each with its own fresh
-    # chain) plus 15-20 min of build when Cachix misses. 90 was cutting it close once
-    # return_path and exit_origination joined the run.
+    # Both lines for the triggers that gate this repo, one dispatched line otherwise.
+    # `fail-fast: false` so a v5 break still reports the v4 verdict. NOTE the job name
+    # carries the line, so required checks must name "Integration throughput (v4|v5)".
+    strategy:
+      fail-fast: false
+      matrix:
+        line: >-
+          ${{ fromJSON((github.event_name == 'merge_group' || github.event_name == 'pull_request')
+          && '["v4","v5"]'
+          || format('["{0}"]', inputs.line || github.event.client_payload.line || 'v4')) }}
+    # Per LINE, not per run: ~20 min of tests (3 scenarios on v4, 5 on v5, fresh chain
+    # each) plus 15-20 min of build on a Cachix miss. Each line is its own job.
     timeout-minutes: 150
     env:
+      # Which branch + dependency set run.sh resolves; the rest override within it.
+      LINE: ${{ matrix.line }}
       PROJECT: ${{ inputs.project || github.event.client_payload.project }}
       OVERRIDE_REV: ${{ inputs.rev || github.event.client_payload.rev }}
       # `workflow_dispatch` delivers its arguments under `inputs.*` while
@@ -84,12 +103,10 @@ jobs:
       # dispatch silently arrives with the field empty. Same shape as
       # gnosis_vpn-infrastructure's restart-hoprd.yaml.
       #
-      # Defaults for the non-triggering projects (blokli always tracks the head
-      # of its `release/0.13` branch, re-resolved per run).
-      # hoprd is split into v4 / v5: `main` is v5, and this test targets v4 (the
-      # crate pins hoprnet release/4.0). HOPRD_LINE is the v4 branch the binaries
-      # come from and the line a dispatched hoprd rev must belong to.
-      HOPRD_LINE: ${{ vars.HOPRD_LINE || 'release/4.1' }}
+      # All empty by default so each follows LINE, re-resolved per run. HOPRD_LINE is
+      # also the line a dispatched rev must be contained in — that is what rejects a v5
+      # sha sent at v4. A repo variable pins it for BOTH lines, rarely what you want.
+      HOPRD_LINE: ${{ vars.HOPRD_LINE }}
       HOPRD_REF: ${{ vars.HOPRD_REF }}
       EDGLI_REF: ${{ vars.EDGLI_REF }}
       BLOKLI_REF: ${{ vars.BLOKLI_REF }}
@@ -143,7 +160,7 @@ jobs:
           # copies pile up on a persistent runner. Reap them before, not after, so a
           # failed run's evidence survives until it has been uploaded and read.
           find /tmp -maxdepth 3 -type d -name 'hoprd-it-*' -exec rm -rf {} + 2>/dev/null || true
-          rm -f result-hoprd result-localcluster result-bloklid result-foundry || true
+          rm -f result-hoprd result-hoprd-pix result-localcluster result-bloklid result-foundry || true
       # Same reason as pr.yaml: the checkout git-cleans the workspace, so a target
       # dir inside it is rebuilt from scratch on every run of a persistent box.
       - name: Point cargo at a persistent target dir
@@ -235,10 +252,10 @@ jobs:
           # that can carry a marker and so be waited on), so switching on the event
           # would have labelled every hoprd merge gate a "manual run".
           if [ "${EVENT}" = "schedule" ]; then
-            # Nightly v4: no rev is dispatched, run.sh resolves the branch heads and
-            # reports them in RESOLVED_* below.
+            # Nightly carries no inputs, so LINE falls through to its v4 default.
             echo "TRIGGER=nightly v4 line"
           elif [ "${EVENT}" = "merge_group" ]; then
+            # Fans out over both lines; ${LINE} says which one this job is.
             # This repo's own merge queue: the candidate is this PR merged into main.
             echo "TRIGGER=hopr-integration-tests merge queue ([\`${MQ_SHA:0:8}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${MQ_SHA}))"
           elif [ "${EVENT}" = "pull_request" ]; then
@@ -291,7 +308,7 @@ jobs:
           # job died before run.sh got as far as resolving them (a runner/setup problem
           # rather than a stack problem), which is itself the useful signal.
           content: |
-            **Integration throughput test FAILED** — ${{ env.TRIGGER }}
+            **Integration throughput test FAILED** (${{ env.RESOLVED_LINE || matrix.line }}) — ${{ env.TRIGGER }}
             * hoprd `${{ env.RESOLVED_HOPRD || 'unresolved' }}`
             * edge-client `${{ env.RESOLVED_EDGLI || 'unresolved' }}`
             * blokli `${{ env.RESOLVED_BLOKLI || 'unresolved' }}`
@@ -312,3 +329,24 @@ jobs:
           if [ -n "${free_gb}" ] && [ "${free_gb}" -lt 50 ]; then
             nix-collect-garbage --delete-older-than 7d || true
           fi
+  # Fan-in job: the one context worth requiring, stable across matrix changes.
+  gate:
+    name: Integration throughput
+    needs: integration
+    if: always()
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULT: ${{ needs.integration.result }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          echo "integration matrix result: ${RESULT}"
+          # `skipped` is the unlabelled-PR case; a merge group must never pass that way.
+          if [ "${RESULT}" = success ]; then exit 0; fi
+          if [ "${RESULT}" = skipped ] && [ "${EVENT}" != merge_group ]; then
+            echo "suite did not run for this ${EVENT} (no run-integration label)"
+            exit 0
+          fi
+          echo "::error::integration result is '${RESULT}'"
+          exit 1

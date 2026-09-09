@@ -36,6 +36,49 @@ fn edge_p2p_port() -> u16 {
     P2P_PORT_BASE + cluster_size() as u16
 }
 
+/// Strategies appended to the channel-lifecycle one `default_strategy_cfg` yields.
+///
+/// A struct rather than an extra parameter per strategy, so that adding a feature-gated one does
+/// not put a `#[cfg]` on every call site of [`boot_edgli`]: the struct is always nameable and only
+/// its fields vary.
+#[derive(Default)]
+struct ExtraStrategies {
+    /// Entry-side PIX settlement. `None` leaves the node unable to pay, which is a legitimate
+    /// configuration — it just cannot hold a PIX Session open.
+    #[cfg(feature = "pix")]
+    pix: Option<edgli::PixEntryConfig>,
+}
+
+impl ExtraStrategies {
+    /// Append whatever was requested to the strategy list.
+    fn apply(self, cfg: &mut edgli::strategy::MultiStrategyConfig) {
+        #[cfg(feature = "pix")]
+        if let Some(pix) = self.pix {
+            tracing::info!(
+                price_per_byte = %pix.strategy.price_per_byte,
+                max_ssa_allocation = %pix.strategy.max_ssa_allocation,
+                "entry will run the PIX deposit strategy"
+            );
+            cfg.strategies.push(EdgeStrategyKind::Pix(pix));
+        }
+        // With every optional strategy compiled out there is nothing to append, and the argument
+        // would read as unused.
+        #[cfg(not(feature = "pix"))]
+        let _ = cfg;
+    }
+}
+
+/// Response buffer a PIX Session provisions, in bytes. See [`IntegrationEnv::open_pix_session`] —
+/// this is a share-delivery pipeline depth, not a throughput knob, and small is the point.
+#[cfg(feature = "pix")]
+const PIX_RESPONSE_BUFFER_BYTES: u64 = 16_000;
+/// Ceiling on artificial SURB generation for a PIX Session, in bits per second.
+///
+/// Generous on purpose: with a buffer that small the balancer has to refill promptly, and this
+/// caps the rate rather than the depth.
+#[cfg(feature = "pix")]
+const PIX_MAX_SURB_UPSTREAM_BITS: u64 = 20_000_000;
+
 const PEER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(120);
 const LOCAL_CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(120);
 const EXIT_PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -117,6 +160,46 @@ impl IntegrationEnv {
             &extra,
             &NetTuning::local(),
             cluster_size(),
+            ExtraStrategies::default(),
+        )
+        .await?;
+
+        let (dest_zero_hop, dest_one_hop) = select_session_targets(&edgli).await?;
+
+        Ok(Self {
+            edgli,
+            _reactor: reactor,
+            targets: Targets::Local {
+                dest_zero_hop,
+                dest_one_hop,
+            },
+            _cluster: Some(cluster),
+        })
+    }
+
+    /// As [`Self::setup`], but with the cluster configured for PIX and the entry running the PIX
+    /// deposit strategy, budgeted at `budget` wxHOPR of deposits.
+    ///
+    /// `budget` is the parameter that matters, and it is a *budget* rather than a balance: deposits
+    /// are paid by the entry's Safe, which also holds its channel stakes, so a scenario cannot
+    /// arrange for it to run dry without also deciding what the stakes leave behind. See
+    /// [`crate::pix::entry_config`] for how a scenario picks it, and [`crate::pix`] for why
+    /// nothing here funds the entry any more.
+    #[cfg(feature = "pix")]
+    pub async fn setup_pix(budget: crate::HoprBalance) -> anyhow::Result<Self> {
+        cluster::request_pix();
+        let cluster = cluster::bring_up().await?;
+        let summary = cluster.summary.clone();
+        let extra = summary.extras[0].clone();
+
+        let (edgli, reactor) = boot_edgli(
+            &summary.blokli_url,
+            &extra,
+            &NetTuning::local(),
+            cluster_size(),
+            ExtraStrategies {
+                pix: Some(crate::pix::entry_config(budget)?),
+            },
         )
         .await?;
 
@@ -148,6 +231,7 @@ impl IntegrationEnv {
             &rotsee.extra,
             &NetTuning::local(),
             ROTSEE_TARGET_CHANNELS,
+            ExtraStrategies::default(),
         )
         .await?;
 
@@ -283,6 +367,82 @@ impl IntegrationEnv {
         Ok((session, dest))
     }
 
+    /// Open a PIX Session: unreliable, opted into PIX, and tuned so SSA shares actually flow.
+    ///
+    /// Two departures from [`Self::open_unreliable_session_paths`], both required rather than
+    /// preferred.
+    ///
+    /// **PIX is switched on through `Edgli::with_pix`**, which adds the `UsePIX` capability *and*
+    /// fills the announced quota from this node's own `protocol.pix`. One call rather than two
+    /// fields because either alone is a defect the node can only report at open time.
+    ///
+    /// **The SURB buffer is tiny** — 16 kB against the throughput tests' 10 MB — and this is the
+    /// least obvious knob in the whole scenario. A PIX share is baked into a SURB when the SURB is
+    /// *minted*, and the exit spends its buffer roughly in order, so the buffer is a pipeline delay
+    /// between share generation and share delivery. At 10 MB the exit works through SURBs minted
+    /// during SSA #1 long before it touches one carrying an SSA #2 share, so cycles stop completing
+    /// — which reads as a broken strategy rather than a mis-set buffer. 16 kB is ~16 SURBs, so a
+    /// new SSA's shares start landing within seconds of its commitment.
+    ///
+    /// Measured, not reasoned: the same scenario run at 10 MB recovered and swept **1** cycle where
+    /// 16 kB recovered and swept **6**, and failed on the deposit-confirmation assertion.
+    ///
+    /// Both hop counts must be at least 1. The share encryption key is derived from the first
+    /// relayer's acknowledgement, so a zero-hop path has nothing to derive it from and the Session
+    /// is refused outright.
+    #[cfg(feature = "pix")]
+    pub async fn open_pix_session(
+        &self,
+        forward_hops: usize,
+        return_hops: usize,
+    ) -> anyhow::Result<(HoprSession, Address)> {
+        anyhow::ensure!(
+            forward_hops >= 1 && return_hops >= 1,
+            "PIX needs at least one relay on each path (got {forward_hops} forward, \
+             {return_hops} return): the share encryption key derives from the first relayer's \
+             acknowledgement, so a zero-hop path is refused"
+        );
+        let dest = self.dest_for(forward_hops)?;
+        let base = HoprSessionClientConfig {
+            forward_path: HopRouting::try_from(forward_hops)?,
+            return_path: HopRouting::try_from(return_hops)?,
+            capabilities: SessionCapability::Segmentation | SessionCapability::NoDelay,
+            always_max_out_surbs: true,
+            surb_management: Some(SurbBalancerConfig {
+                target_surb_buffer_size: PIX_RESPONSE_BUFFER_BYTES / SESSION_MTU as u64,
+                max_surbs_per_sec: PIX_MAX_SURB_UPSTREAM_BITS / (8 * SURB_SIZE as u64),
+                ..SurbBalancerConfig::default()
+            }),
+            ..Default::default()
+        };
+        let (session, _) = self
+            .edgli
+            .connect_to(dest, SessionTarget::ExitNode(0), self.edgli.with_pix(base)?)
+            .await?;
+        Ok((session, dest))
+    }
+
+    /// Unallocated wxHOPR in the entry's Safe — the float PIX deposits are paid from.
+    ///
+    /// The Safe and not the node's own account: since hopr-types 4.0.0 a deposit settles through
+    /// the Safe module, so that is the balance that moves. `describe_current_capacity_allocations`
+    /// reports it as the `safe` allocation, which is the figure an operator running PIX is told to
+    /// watch — and "unallocated" is what makes it the right one, since wxHOPR already staked into a
+    /// channel is not available to a deposit.
+    ///
+    /// It is not a PIX-only figure. The channel-lifecycle strategy stakes and tops up from the same
+    /// Safe, so read a *decrease* here as an upper bound on PIX spend rather than as a measurement
+    /// of it; `pix::PixCounters::deposits` is what counts deposits.
+    #[cfg(feature = "pix")]
+    pub async fn entry_safe_balance(&self) -> anyhow::Result<crate::HoprBalance> {
+        Ok(self
+            .edgli
+            .describe_current_capacity_allocations()
+            .await?
+            .safe
+            .stake)
+    }
+
     /// Session tuned to expose tokio executor starvation for the profiling harness:
     /// rate control OFF and a small SURB pool, so a non-yielding writer that holds a
     /// worker thread visibly starves the SURB balancer (throughput collapses). See
@@ -323,6 +483,7 @@ async fn boot_edgli(
     extra: &ExtraInfo,
     tuning: &NetTuning,
     target_channels: usize,
+    extra_strategies: ExtraStrategies,
 ) -> anyhow::Result<(Edgli, futures::future::AbortHandle)> {
     let hopr_keys: HoprKeys = IdentityRetrievalModes::FromFile {
         password: &extra.password,
@@ -375,15 +536,21 @@ async fn boot_edgli(
     // `channel_capacity` is left at its default deliberately -- raising it also raises the safe
     // gate below which the node opens *zero* channels, which is not what this scenario measures.
     let mut strat_cfg = default_strategy_cfg(&sizing)?;
+    // A line difference, not a capability one: `EdgeStrategyKind` is `#[non_exhaustive]` since
+    // edge-client#151, so this pattern is refutable on v5 and irrefutable on v4. The allow is
+    // therefore scoped to v4 rather than applied blindly.
     for kind in &mut strat_cfg.strategies {
-        let EdgeStrategyKind::ChannelLifecycle(lc) = kind;
-        lc.eligibility = EligibilityConfig {
-            min_peer_quality_score: 0.0,
-            require_observed_since_start: false,
-            ..Default::default()
-        };
-        lc.tick_interval = tuning.strategy_tick;
+        #[cfg_attr(not(feature = "v5"), allow(irrefutable_let_patterns))]
+        if let EdgeStrategyKind::ChannelLifecycle(lc) = kind {
+            lc.eligibility = EligibilityConfig {
+                min_peer_quality_score: 0.0,
+                require_observed_since_start: false,
+                ..Default::default()
+            };
+            lc.tick_interval = tuning.strategy_tick;
+        }
     }
+    extra_strategies.apply(&mut strat_cfg);
     let reactor = edgli.run_reactor_from_cfg(strat_cfg)?;
 
     // Require one channel *beyond* any pre-existing genesis channels, so the gate proves the
@@ -396,6 +563,13 @@ async fn boot_edgli(
     Ok((edgli, reactor))
 }
 
+/// Connector tuning every chain-touching path here needs.
+///
+/// Left at the default it submits the transaction, waits for a confirmation blokli has not indexed
+/// yet, and returns "operation timed out at the client" while the transfer is in fact mined.
+///
+/// Private again since the PIX float stopped needing its own funding transaction — it used to be
+/// `pub(crate)` for the side connector that made it.
 fn connector_cfg() -> BlockchainConnectorConfig {
     BlockchainConnectorConfig {
         // Default tx-confirmation budget is too tight for blokli's SSE indexing on Anvil.
@@ -429,12 +603,17 @@ fn edgli_config(
             },
             path_planner: tuning.path_planner,
             packet: HoprPacketPipelineConfig {
-                // Stated rather than defaulted: the library default is FIFO, which replies with the
-                // oldest SURBs first and so keeps using a return path for as long as its backlog
-                // lasts. hoprd already pins LIFO, and a cluster where the two ends disagree
-                // measures neither one.
+                // Follows the Exit's build rather than the library default: hoprd's `From
+                // <UserHoprLibConfig>` pins LIFO, and a cluster whose two ends disagree measures
+                // neither. A PIX build pins FIFO instead (hoprd#91) — a share reaches the Exit
+                // only when its SURB is spent, so newest-first leaves the oldest unspent until
+                // the per-pseudonym ring buffer overwrites them.
                 surb_store: SurbStoreConfig {
-                    pop_order: SurbPopOrder::Lifo,
+                    pop_order: if cfg!(feature = "pix") {
+                        SurbPopOrder::Fifo
+                    } else {
+                        SurbPopOrder::Lifo
+                    },
                     ..Default::default()
                 },
                 ..Default::default()
@@ -444,6 +623,10 @@ fn edgli_config(
                 delay_range: Duration::from_millis(1),
                 ..Default::default()
             },
+            // edgli derives the quota it announces from these dimensions and nothing else, and the
+            // Exit refuses any Session whose quota falls outside its `quota_range`.
+            #[cfg(feature = "pix")]
+            pix: crate::pix::dimensions(),
             ..Default::default()
         },
         safe_module: SafeModule {

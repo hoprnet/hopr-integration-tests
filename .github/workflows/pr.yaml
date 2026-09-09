@@ -2,9 +2,12 @@ name: PR
 # Validate PR metadata and check the integration crate. Split by what each step
 # actually needs: `fmt`/`clippy` are pure compile-time checks and run on a hosted
 # depot runner, while anything that EXECUTES a test runs on the self-hosted
-# `hetzner` box — the same machine the throughput gate uses, so a test result here
+# self-hosted runner — the same machine the throughput gate uses, so a test result here
 # and one there come from the same hardware. The heavy end-to-end run lives in
 # integration.yaml. See runner/README.md.
+#
+# Both jobs fan out over the two release lines: shared source, two dependency sets
+# (`Cargo.toml` = v4, `Cargo.v5.toml` = v5), and v5 is where `--features pix` is checked.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -56,9 +59,13 @@ jobs:
             test
           requireScope: false
   lint:
-    name: Format + clippy
+    name: Format + clippy (${{ matrix.line }})
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        line: [v4, v5]
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
@@ -76,21 +83,37 @@ jobs:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
       # The crate builds in the hoprnet dev shell (it provides the rust toolchain
       # + the cached hopr-lib/edgli dependency tree).
+      # Same swap run.sh does. Its own step rather than a branch inside the single-quoted
+      # `bash -c` body below, where any `${...}` is an SC2016 finding that fails actionlint.
+      - name: Select the v5 dependency set
+        if: matrix.line == 'v5'
+        run: |
+          cp integration/Cargo.v5.toml integration/Cargo.toml
+          cp integration/Cargo.v5.lock integration/Cargo.lock
+      # `--all-features` means "everything this line declares": on v4 that is `prof`, on v5 it
+      # also picks up `v5` and `pix`. Revisit if a mutually exclusive feature is ever added —
+      # edgli's `pix-curvy` is one, so do not forward it alongside `pix-test`.
       - name: Format + clippy
         run: |
           nix develop github:hoprnet/hoprnet --command bash -c '
             set -euo pipefail
             cd integration
             cargo fmt --check
-            cargo clippy -p hoprd-integration-test --all-targets -- -D warnings
+            cargo clippy -p hoprd-integration-test --all-targets --all-features -- -D warnings
           '
   unit:
-    name: Unit tests
-    # On hetzner because it runs tests, not because these 52 are slow. No
-    # `harden-runner`: it installs an eBPF egress monitor and needs sudo, and only
-    # supports GitHub-hosted runners.
+    name: Unit tests (${{ matrix.line }})
+    # Self-hosted because it runs tests, not because these are slow. No `harden-runner`:
+    # it needs sudo for an eBPF egress monitor and only supports GitHub-hosted runners.
     runs-on: [self-hosted, hetzner]
     timeout-minutes: 30
+    strategy:
+      # A red line cancels the other: the first failure is the one to read.
+      fail-fast: true
+      # The runner executes one job at a time anyway.
+      max-parallel: 1
+      matrix:
+        line: [v4, v5]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -125,10 +148,45 @@ jobs:
           done
           echo "::error::nix is not installed on this runner — see runner/README.md." >&2
           exit 1
+      # Same swap run.sh does. Its own step rather than a branch inside the single-quoted
+      # `bash -c` body below, where any `${...}` is an SC2016 finding that fails actionlint.
+      - name: Select the v5 dependency set
+        if: matrix.line == 'v5'
+        run: |
+          cp integration/Cargo.v5.toml integration/Cargo.toml
+          cp integration/Cargo.v5.lock integration/Cargo.lock
+      # 67 tests on v4, 69 on v5 — the extra two are the src/pix.rs Prometheus parser.
       - name: Unit tests
         run: |
           nix develop github:hoprnet/hoprnet --command bash -c '
             set -euo pipefail
             cd integration
-            cargo test --lib
+            cargo test --lib --all-features
           '
+  # Fan-in jobs. The matrix names each job per line, so the bare contexts the ruleset
+  # requires would never report and every queue entry would hang until its timeout.
+  lint-gate:
+    name: Format + clippy
+    needs: lint
+    if: always()
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULT: ${{ needs.lint.result }}
+        run: |
+          echo "lint matrix result: ${RESULT}"
+          [ "${RESULT}" = success ] || { echo "::error::lint result is '${RESULT}'"; exit 1; }
+  unit-gate:
+    name: Unit tests
+    needs: unit
+    if: always()
+    # Hosted: must not queue behind the matrix on the self-hosted runner.
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULT: ${{ needs.unit.result }}
+        run: |
+          echo "unit matrix result: ${RESULT}"
+          [ "${RESULT}" = success ] || { echo "::error::unit result is '${RESULT}'"; exit 1; }

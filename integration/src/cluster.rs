@@ -105,6 +105,30 @@ where
     });
 }
 
+static REQUESTED_PIX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Ask for the cluster to be started with PIX enabled, before the first [`bring_up`].
+///
+/// Passes `--enable-pix`, which writes three things into every generated node config: the
+/// Entry-side generator dimensions, the Exit-side admission policy (a widened quota window and the
+/// two deadlines its Session supervisor enforces), and a `Pix` settlement strategy stanza. Without
+/// it the Exit has no PIX strategy at all and simply relays a PIX Session for free.
+///
+/// This needs a `hoprd-localcluster` **and** a `hoprd` with a deposit pool selected at compile
+/// time — see `tests/pix.rs`. A `hoprd` built without one parses
+/// the generated stanza and refuses to start, which is the loud failure; a binary built with the
+/// *other* pool starts normally and never deposits, which is not.
+///
+/// First call in a test binary wins.
+pub fn request_pix() -> bool {
+    *REQUESTED_PIX.get_or_init(|| true)
+}
+
+/// Whether [`request_pix`] was called.
+pub fn pix_enabled() -> bool {
+    REQUESTED_PIX.get().copied().unwrap_or(false)
+}
+
 pub const API_PORT_BASE: u16 = 13000;
 pub const P2P_PORT_BASE: u16 = 19000;
 pub const API_HOST: &str = "127.0.0.1";
@@ -531,6 +555,10 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         "--funding-amount",
         &channel_funding_amount(),
     ]);
+    if pix_enabled() {
+        tracing::info!("cluster nodes will be configured for PIX");
+        cmd.arg("--enable-pix");
+    }
     // Written inside the data dir so it lives exactly as long as the cluster does.
     if let Some(yaml) = REQUESTED_LATENCY.get() {
         let path = data_dir.join("latency.yaml");

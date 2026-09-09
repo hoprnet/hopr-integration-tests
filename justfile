@@ -13,8 +13,9 @@
 #   just cluster-up             # terminal 1: bring up a persistent cluster
 #   just attach                 # terminal 2: run scenarios against it
 #
-# CI-equivalent (build from the hoprd v4 line / blokli release/0.13 via run.sh):
-#   just ci
+# CI-equivalent (resolve refs for a whole release line, build, run every suite):
+#   just ci                     # v4 line
+#   just ci-v5                  # v5 line, PIX suite included
 
 set shell := ["bash", "-uc"]
 
@@ -29,24 +30,30 @@ hoprnet := env_var_or_default("HOPRNET_SHELL", "github:hoprnet/hoprnet")
 # Prefer the binary chain (build-chain / integration-binchain) locally.
 chain_image := env_var_or_default("BLOKLID_ANVIL_IMAGE", "europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil:latest-rhine")
 
-# Blokli ref for the image-free binary chain: the `release/0.13` branch, the line
-# the Jura (v4) network runs. A moving branch, so it needs no bumping per patch
-# release — `build-chain` passes `--refresh` to pick a moved head up (override:
-# `just blokli_ref=… build-chain`, or set BLOKLI_REF).
-blokli_ref := env_var_or_default("BLOKLI_REF", "release/0.13")
+# Release line every ref below derives from: v4 (default) or v5. Mirrors LINE in
+# scripts/integration/run.sh, whose header carries the branch table. The lines are not mixable.
+line := env_var_or_default("LINE", "v4")
 
-# hoprd branch the binaries are built from. hoprd is split into v4 / v5: `main` is
-# v5, and this test targets v4 because the integration crate pins hoprnet
-# `release/4.0`. Keep in sync with HOPRD_LINE in scripts/integration/run.sh.
-# Override: `just hoprd_ref=… build`, or set HOPRD_REF.
-hoprd_ref := env_var_or_default("HOPRD_REF", "release/4.1")
+# Blokli ref for the image-free binary chain. v0.14.0 is the first release whose contract
+# addresses carry `service_registry`, which the v5 chain API requires: against v0.13.0 or earlier
+# `hoprd-localcluster` exits during bootstrap with "contract addresses not a valid JSON: missing
+# field `service_registry`". Override: `just blokli_ref=… build-chain`, or set BLOKLI_REF.
+blokli_ref := env_var_or_default("BLOKLI_REF", if line == "v5" { "v0.14.0" } else { "release/0.13" })
+
+# hoprd branch the binaries are built from (override: `just hoprd_ref=… build`, or HOPRD_REF).
+hoprd_ref := env_var_or_default("HOPRD_REF", if line == "v5" { "main" } else { "release/4.1" })
+
+# hoprd checkout to build the PIX binaries from. hoprd's flake does expose
+# `binary-hoprd-pix-test`, but for x86_64-linux only — which is what CI uses and what a darwin
+# workstation cannot build — so `just pix` compiles hoprd from this tree instead.
+hoprd_src := env_var_or_default("HOPRD_SRC", "../hoprd")
 
 data_dir := "/tmp/hopr-it"
 
 _default:
     @just --list
 
-# Build local-arch hoprd + hoprd-localcluster binaries from the hoprd v4 line
+# Build local-arch hoprd + hoprd-localcluster binaries from the selected line's hoprd branch
 # (nix, Cachix-cached). CI builds the same branch, or the rev from a merge
 # dispatch (see `just ci` / scripts/integration/run.sh).
 build:
@@ -112,6 +119,40 @@ exit-origination: build build-chain
     set -euo pipefail
     export SCENARIOS=exit_should_keep_originating_when_a_return_path_becomes_unresolvable
     export TEST_TARGET=exit_origination
+# End-to-end PIX with edgli as the paying entry (binary chain; manual, NOT run in CI).
+# Builds hoprd from HOPRD_SRC (default ../hoprd) because the nix flake has no PIX binary.
+# See integration/tests/pix.rs. Optional args = test-name filters.
+pix *scenarios: build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ '{{line}}' = v5 ] || { echo "PIX is v5-only — run: LINE=v5 just pix" >&2; exit 2; }
+    src="$(cd '{{hoprd_src}}' && pwd)"
+    echo "building PIX-enabled hoprd + hoprd-localcluster from ${src}"
+    # Release rather than debug: debug builds slow packet processing and cryptography enough to
+    # distort the SSA cycle pacing the scenarios rest on. Only hoprd needs the feature named —
+    # hoprd-localcluster already depends on the same pool unconditionally.
+    (cd "${src}" && nix develop -c cargo build --release -p hoprd --features strategy-pix-test)
+    (cd "${src}" && nix develop -c cargo build --release -p hoprd-localcluster)
+    export HOPRD_BIN="${src}/target/release/hoprd"
+    export HOPRD_LOCALCLUSTER_BIN="${src}/target/release/hoprd-localcluster"
+
+    # The deposit pool is a *build-time* choice, and a binary carrying the other one bootstraps
+    # normally and then simply never deposits — several minutes into a run. `POOL` in
+    # hoprd::strategy is a &str compiled in for exactly this check.
+    grep -qa 'non-anonymous-secp256k1' "${HOPRD_BIN}" || {
+      echo "${HOPRD_BIN} was not built with the secp256k1 deposit pool. Rebuild it:" >&2
+      echo "    cargo build --release -p hoprd --features strategy-pix-test" >&2
+      echo "(The pools are mutually exclusive and the binary carries exactly one.)" >&2
+      exit 1
+    }
+
+    # Named explicitly rather than left to the default filter: run-binchain.sh gives each scenario
+    # a fresh chain, and the two here want different entry deposit budgets.
+    SCENARIOS='{{scenarios}}'
+    [ -n "${SCENARIOS}" ] || SCENARIOS='edgli_entry_deposits_should_be_swept_into_the_exit_safe a_session_should_close_when_the_entry_can_no_longer_deposit'
+    export SCENARIOS TEST_TARGET=pix CARGO_FEATURES='--features pix'
+    # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
 
 # Run a single test against a fresh env (e.g. `just scenario zero_hop`).
@@ -176,9 +217,14 @@ lint:
     nix develop {{hoprnet}} -c cargo fmt --manifest-path integration/Cargo.toml --check
     nix develop {{hoprnet}} -c cargo clippy --manifest-path integration/Cargo.toml -p hoprd-integration-test --all-targets -- -D warnings
 
-# CI-equivalent: resolve refs (hoprd v4 line / edgli main / blokli 0.13, or overrides), build, run.
+# CI-equivalent: resolve every ref on the v4 line (or overrides), build, run every suite.
 ci:
     nix develop {{hoprnet}} -c bash scripts/integration/run.sh
+
+# Same, on the v5 line: hoprd/edge-client `main`, blokli v0.14.0, PIX suite included.
+# run.sh swaps `integration/Cargo.v5.toml` in for the run and restores it on exit.
+ci-v5:
+    LINE=v5 nix develop {{hoprnet}} -c bash scripts/integration/run.sh
 
 # Remove the chain container, stray processes, and temp dirs.
 clean:

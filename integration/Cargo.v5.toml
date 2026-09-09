@@ -7,16 +7,27 @@ license = "GPL-3.0-only"
 publish = false
 
 [dependencies]
-# The **v4** dependency set (`Cargo.v5.toml` is v5; run.sh swaps it in for LINE=v5 and rewrites
-# the ref). `telemetry` goes through edgli, not a direct hopr-lib dep of ours: without it the
-# per-session counters are absent rather than zero, and a second hopr-lib splits the registry.
-edgli = { git = "https://github.com/hoprnet/edge-client", branch = "release/4.1", default-features = false, features = [
+# The **v5** dependency set: edge-client `main`, which repinned hopr-lib to hoprnet `master` in
+# #151. The only line that can build PIX. `Cargo.toml` is the v4 set; run.sh swaps this in for
+# LINE=v5 and rewrites the ref below to EDGLI_REF.
+edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", default-features = false, features = [
   "runtime-tokio",
   "blokli",
+] }
+
+# Here only for hopr-lib's `telemetry`. MUST name the rev edgli resolves or the lock carries two
+# hopr-libs; run.sh mirrors edge-client's pin over this and fails if two copies survive. A `rev`
+# not a branch: hoprnet publishes neither crate, so consumers pin a master rev by hand.
+hopr-lib = { git = "https://github.com/hoprnet/hoprnet", rev = "85e698a726710e205e8f76f4df7ad52debd2ff86", default-features = false, features = [
   "telemetry",
 ] }
 
-
+# The other half: edge-client enables `hopr-lib/telemetry` but not `hopr-strategy/telemetry`, so
+# without this every `hopr_strategy_pix_*` counter is absent rather than zero. Version must match
+# what edgli resolves (4.0.0) or a second copy links in and reads all zeroes.
+hopr-strategy = { version = "4.0.0", default-features = false, features = [
+  "telemetry",
+] }
 
 anyhow = "1"
 futures = "0.3"
@@ -43,6 +54,24 @@ console-subscriber = { version = "0.5", optional = true }
 # `RUSTFLAGS="--cfg tokio_unstable --check-cfg cfg(tokio_unstable)"`.
 prof = ["dep:console-subscriber"]
 
+# Entry-side PIX: compiles `src/pix.rs`, the PIX half of `src/env.rs`, and `tests/pix.rs`.
+#
+# Off by default so the CI throughput build does not pull PIX in — it selects a deposit pool three
+# crates away and changes what `HoprPixSpec` resolves to, which is not something the 0-hop/1-hop
+# tests should carry silently.
+#
+# `pix-test` is edge-client's secp256k1 pool: the only implemented one, and visible on-chain. Its
+# sibling `pix-curvy` is the anonymous pool and is a stub whose methods panic on the first deposit,
+# so it is not an alternative here.
+# The release line, not a capability: `v5` marks the whole stack (hoprd main, hoprnet master,
+# edge-client main, blokli 0.14) and gates code that differs because the APIs differ. On by
+# default here — this manifest IS the v5 line.
+default = ["v5"]
+v5 = []
+
+# Entry-side PIX: one feature OF the v5 stack, not a synonym for it. Implies `v5` because
+# `edgli/pix-test` exists nowhere else.
+pix = ["v5", "edgli/pix-test"]
 
 [dev-dependencies]
 test-log = { version = "0.2", features = ["trace"] }
