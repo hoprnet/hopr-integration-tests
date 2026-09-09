@@ -230,10 +230,13 @@ run_suite() { # target, then scenario names
 }
 
 echo "running integration tests (binary chain) ..."
-# EXPERIMENT BRANCH — do not merge. Runs ONE held-out scenario and nothing else, to
-# test whether it still fails on the runner with no other scenario before it. It
-# fails on the runner and passes locally both in isolation and in the full
-# 8-scenario sequence, so this isolates the runner from the sequence.
-run_suite return_path a_symmetric_session_should_survive_relayer_loss
+run_suite integration zero_hop one_hop
+run_suite return_path \
+  return_paths_should_spread_across_distinct_relayers \
+  session_should_survive_return_relayer_loss \
+  session_should_survive_forward_relayer_loss \
+  session_should_survive_common_mode_return_outage \
+  a_symmetric_session_should_survive_relayer_loss
+run_suite exit_origination exit_should_keep_originating_when_a_return_path_becomes_unresolvable
 
 exit "${suite_rc}"
