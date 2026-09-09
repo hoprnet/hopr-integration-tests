@@ -43,10 +43,6 @@ console-subscriber = { version = "0.5", optional = true }
 # `RUSTFLAGS="--cfg tokio_unstable --check-cfg cfg(tokio_unstable)"`.
 prof = ["dep:console-subscriber"]
 
-# Entry-side PIX: v5 only, inert here. Declared only so `#[cfg(feature = "pix")]` stays a known
-# cfg — without the key, `-D warnings` fails on `unexpected_cfgs`. Enabling it does not compile:
-# `edgli/pix-test` exists only on v5. Run PIX with LINE=v5.
-pix = []
 
 [dev-dependencies]
 test-log = { version = "0.2", features = ["trace"] }
@@ -70,3 +66,11 @@ debug-assertions = true
 [profile.flamegraph]
 inherits = "release"
 debug = true
+
+# `v5` and `pix` are not declared on this line, so name them as expected cfgs or `-D warnings`
+# fails on `unexpected_cfgs`. Better than declaring dummy features: `--features pix` now fails
+# with "does not have feature" instead of compiling PIX code against a v4 edgli.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(feature, values("v5", "pix"))',
+] }

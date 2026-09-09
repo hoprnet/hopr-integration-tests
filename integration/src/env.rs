@@ -536,11 +536,11 @@ async fn boot_edgli(
     // `channel_capacity` is left at its default deliberately -- raising it also raises the safe
     // gate below which the node opens *zero* channels, which is not what this scenario measures.
     let mut strat_cfg = default_strategy_cfg(&sizing)?;
-    // `if let` because `EdgeStrategyKind` is `#[non_exhaustive]` since edge-client#151, so the
-    // pattern is refutable downstream; the `allow` is what keeps it compiling on v4, which
-    // predates #151 and would otherwise fail `-D warnings` on an irrefutable pattern.
+    // A line difference, not a capability one: `EdgeStrategyKind` is `#[non_exhaustive]` since
+    // edge-client#151, so this pattern is refutable on v5 and irrefutable on v4. The allow is
+    // therefore scoped to v4 rather than applied blindly.
     for kind in &mut strat_cfg.strategies {
-        #[allow(irrefutable_let_patterns)]
+        #[cfg_attr(not(feature = "v5"), allow(irrefutable_let_patterns))]
         if let EdgeStrategyKind::ChannelLifecycle(lc) = kind {
             lc.eligibility = EligibilityConfig {
                 min_peer_quality_score: 0.0,
@@ -603,25 +603,12 @@ fn edgli_config(
             },
             path_planner: tuning.path_planner,
             packet: HoprPacketPipelineConfig {
-                // Stated rather than defaulted, and it follows the Exit's build. The library
-                // default is FIFO, which replies with the oldest SURBs first and so keeps using a
-                // return path for as long as its backlog lasts; hoprd's default build pins LIFO,
-                // and a cluster whose two ends disagree measures neither one.
-                //
-                // A PIX build of hoprd pins FIFO instead (hoprd#91), and not as an optimisation: a
-                // PIX share reaches the Exit's reconstructor only when its SURB is *spent*, and
-                // the per-pseudonym ring buffer evicts from the oldest end — so popping
-                // newest-first leaves the oldest SURBs unspent until they are overwritten, and
-                // every overwrite is a share that can never be delivered. hoprd measured that as
-                // a total, silent stall: one confirmed deposit and then nothing, through 300 s of
-                // clean traffic with no error logged on any node.
-                //
-                // Here the Exit is the side popping SURBs to reply, so this end's order is very
-                // likely inert in the PIX scenarios. It tracks the Exit anyway, rather than
-                // stating a rationale that is false for the binary `just pix` builds.
+                // Follows the Exit's build rather than the library default: hoprd's `From
+                // <UserHoprLibConfig>` pins LIFO, and a cluster whose two ends disagree measures
+                // neither. A PIX build pins FIFO instead (hoprd#91) — a share reaches the Exit
+                // only when its SURB is spent, so newest-first leaves the oldest unspent until
+                // the per-pseudonym ring buffer overwrites them.
                 surb_store: SurbStoreConfig {
-                    // `cfg!` rather than two `#[cfg]`'d fields: one expression, and both arms
-                    // typecheck in either build.
                     pop_order: if cfg!(feature = "pix") {
                         SurbPopOrder::Fifo
                     } else {
@@ -636,12 +623,8 @@ fn edgli_config(
                 delay_range: Duration::from_millis(1),
                 ..Default::default()
             },
-            // Stated rather than defaulted, and load-bearing. edgli derives the quota it announces
-            // from these dimensions and nothing else, and the Exit refuses any Session whose quota
-            // falls outside its `quota_range`. The library defaults price a ~560 MB quota against
-            // the 1 MiB window `--enable-pix` configures, so leaving them would have every PIX
-            // Session rejected at open — before a byte moves, and for a reason that reads as a
-            // session timeout from here.
+            // edgli derives the quota it announces from these dimensions and nothing else, and the
+            // Exit refuses any Session whose quota falls outside its `quota_range`.
             #[cfg(feature = "pix")]
             pix: crate::pix::dimensions(),
             ..Default::default()

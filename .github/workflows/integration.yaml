@@ -76,9 +76,8 @@ jobs:
     # PR runs only when the `run-integration` label is present; dispatch/manual always run.
     if: >-
       github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-integration')
-    # Self-hosted Hetzner box (provisioned by gitops/ansible, label `hetzner`).
-    # A dedicated machine rather than a hosted VM: the onion encoder is CPU-bound
-    # and the throughput thresholds only mean anything on a stable core count.
+    # Dedicated self-hosted machine rather than a hosted VM: the onion encoder is
+    # CPU-bound and the throughput thresholds only mean anything on a stable core count.
     runs-on: [self-hosted, hetzner]
     # Both lines for the triggers that gate this repo, one dispatched line otherwise.
     # `fail-fast: false` so a v5 break still reports the v4 verdict. NOTE the job name
@@ -330,3 +329,24 @@ jobs:
           if [ -n "${free_gb}" ] && [ "${free_gb}" -lt 50 ]; then
             nix-collect-garbage --delete-older-than 7d || true
           fi
+  # Fan-in job: the one context worth requiring, stable across matrix changes.
+  gate:
+    name: Integration throughput
+    needs: integration
+    if: always()
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULT: ${{ needs.integration.result }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          echo "integration matrix result: ${RESULT}"
+          # `skipped` is the unlabelled-PR case; a merge group must never pass that way.
+          if [ "${RESULT}" = success ]; then exit 0; fi
+          if [ "${RESULT}" = skipped ] && [ "${EVENT}" != merge_group ]; then
+            echo "suite did not run for this ${EVENT} (no run-integration label)"
+            exit 0
+          fi
+          echo "::error::integration result is '${RESULT}'"
+          exit 1

@@ -63,7 +63,15 @@ prof = ["dep:console-subscriber"]
 # `pix-test` is edge-client's secp256k1 pool: the only implemented one, and visible on-chain. Its
 # sibling `pix-curvy` is the anonymous pool and is a stub whose methods panic on the first deposit,
 # so it is not an alternative here.
-pix = ["edgli/pix-test"]
+# The release line, not a capability: `v5` marks the whole stack (hoprd main, hoprnet master,
+# edge-client main, blokli 0.14) and gates code that differs because the APIs differ. On by
+# default here — this manifest IS the v5 line.
+default = ["v5"]
+v5 = []
+
+# Entry-side PIX: one feature OF the v5 stack, not a synonym for it. Implies `v5` because
+# `edgli/pix-test` exists nowhere else.
+pix = ["v5", "edgli/pix-test"]
 
 [dev-dependencies]
 test-log = { version = "0.2", features = ["trace"] }
@@ -87,3 +95,11 @@ debug-assertions = true
 [profile.flamegraph]
 inherits = "release"
 debug = true
+
+# `v5` and `pix` are not declared on this line, so name them as expected cfgs or `-D warnings`
+# fails on `unexpected_cfgs`. Better than declaring dummy features: `--features pix` now fails
+# with "does not have feature" instead of compiling PIX code against a v4 edgli.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(feature, values("v5", "pix"))',
+] }
