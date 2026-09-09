@@ -96,7 +96,7 @@ use std::time::Duration;
 
 use hoprd_integration_test::{
     HoprSession, IntegrationEnv,
-    cluster::{NodeInfo, request_cluster_size, request_latency_profile},
+    cluster::{NodeInfo, request_cluster_size, request_latency_profile, request_node_env},
     pump::{
         PumpOpts, PumpOutcome, Transfer, drain_until_quiet, pace_for_rate, pump_halves,
         tagged_payload,
@@ -426,6 +426,10 @@ async fn setup_env_with_hops(
 ) -> anyhow::Result<(IntegrationEnv, HoprSession, Vec<NodeInfo>)> {
     let size = request_cluster_size(NODES);
     request_latency_profile(LATENCY_PROFILE);
+    request_node_env([(
+        "RUST_LOG".to_string(),
+        "info,hopr_transport::path=debug".to_string(),
+    )]);
     anyhow::ensure!(
         size >= 3,
         "return-path scenarios need ≥3 nodes to have >1 relayer candidate, got {size}"
