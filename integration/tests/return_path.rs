@@ -657,8 +657,6 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
             phase: Some(SURVIVAL_PHASE),
             idle_budget: Some(SURVIVAL_IDLE_BUDGET),
             tail_grace: Some(SURVIVAL_TAIL_GRACE),
-            // Default chunking: this scenario paces a byte rate, where the 64 KiB granularity is
-            // what the offered-load figures are computed against.
             ..PumpOpts::default()
         },
     )
