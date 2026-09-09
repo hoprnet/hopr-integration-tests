@@ -95,7 +95,7 @@ jobs:
       # per-node hoprd_<i>.log files are gone before the upload step runs — which is
       # exactly what left run 34098266229 undiagnosable.
       HOPRD_KEEP_ARTIFACTS: 1
-      RUST_LOG: warn,hoprd_integration_test=info
+      RUST_LOG: warn,hoprd_integration_test=info,integration=info,return_path=info,exit_origination=info,pix=info
       # Without this libtest captures a PASSING test's output, so a green run would
       # show no measurements at all — the one thing worth reading. Safe to enable
       # only because RUST_LOG above is narrow.

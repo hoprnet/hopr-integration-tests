@@ -604,6 +604,7 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         victim = %busiest,
         share_pct = spread.max_share() * 100.0,
         direction = topology.direction,
+        spread = %spread.summary(),
         "killing the busiest relayer for the direction under test"
     );
     victim.kill()?;

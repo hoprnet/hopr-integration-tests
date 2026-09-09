@@ -367,6 +367,8 @@ pub const NO_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the reader re-evaluates whether to keep waiting.
 const READ_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+
 /// The writer's completion as the reader sees it.
 ///
 /// `None` at the call site means the offer is still in flight, or that the caller set no grace —
@@ -585,6 +587,9 @@ pub async fn pump_halves(
     // over a payload measured in megabytes.
     let mut scan_at = 0usize;
     let mut mine = 0usize;
+    let mut last_report_at = pump_started;
+    let mut last_report_bytes = 0usize;
+    let mut first_live_logged = false;
     let mut foreign = 0usize;
     // Records belonging to this phase, in arrival order, so integrity is checked against what
     // this phase actually sent rather than against a stream carrying another phase's backlog.
@@ -611,6 +616,24 @@ pub async fn pump_halves(
                 ),
                 None => (received.len(), now.saturating_duration_since(last_at)),
             };
+            if !first_live_logged && live_bytes > 0 {
+                first_live_logged = true;
+                tracing::info!(
+                    "{label}: first byte after {:.1?}",
+                    now.saturating_duration_since(pump_started)
+                );
+            }
+            if now.saturating_duration_since(last_report_at) >= PROGRESS_INTERVAL {
+                let dt = now.saturating_duration_since(last_report_at);
+                let delta = live_bytes.saturating_sub(last_report_bytes);
+                tracing::info!(
+                    "{label}: {live_bytes}/{total_bytes} B ({:.1}%) +{delta} B in {dt:.1?} ({:.0} KiB/s)",
+                    100.0 * live_bytes as f64 / total_bytes as f64,
+                    delta as f64 / 1024.0 / dt.as_secs_f64().max(0.001),
+                );
+                last_report_at = now;
+                last_report_bytes = live_bytes;
+            }
             let tail = opts.tail_grace.and_then(|grace| {
                 match offer_completed_ms.load(std::sync::atomic::Ordering::Relaxed) {
                     OFFER_IN_FLIGHT => None,
