@@ -231,14 +231,12 @@ run_suite() { # target, then scenario names
 
 echo "running integration tests (binary chain) ..."
 run_suite integration zero_hop one_hop
-# Held out as flaky: `spread` asserts a ratio on a random draw, and the two survival
-# scenarios below miss their recovery deadline on some machines but not others.
-#   return_paths_should_spread_across_distinct_relayers
-#   session_should_survive_common_mode_return_outage
-#   a_symmetric_session_should_survive_relayer_loss
 run_suite return_path \
+  return_paths_should_spread_across_distinct_relayers \
   session_should_survive_return_relayer_loss \
-  session_should_survive_forward_relayer_loss
+  session_should_survive_forward_relayer_loss \
+  session_should_survive_common_mode_return_outage \
+  a_symmetric_session_should_survive_relayer_loss
 run_suite exit_origination exit_should_keep_originating_when_a_return_path_becomes_unresolvable
 
 exit "${suite_rc}"

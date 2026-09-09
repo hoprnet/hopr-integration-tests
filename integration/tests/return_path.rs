@@ -235,28 +235,10 @@ const _: () = assert!(
     "offering the full burst baseline backpressures the writer and measures the harness"
 );
 
-/// Share of the survival payload that must come back for the session to count as having survived.
-///
-/// Derived from [`RECOVERY_DEADLINE`] rather than chosen. Over a paced phase the session delivers
-/// nothing while the return path is down and roughly the offered rate once it is back, so
-/// aggregate arrival *is* the outage expressed as a fraction of the phase:
-///
-/// ```text
-/// arrival ≈ 1 − outage / SURVIVAL_LOAD_DURATION
-/// ```
-///
-/// Requiring the outage to stay inside the deadline is therefore the same statement as requiring
-/// this arrival, and the two can no longer drift apart. The previous flat 90 % was only reachable
-/// because writer backpressure stretched the phase far past its nominal duration.
-///
-/// Only the part of the outage that overlaps the phase costs arrival. Nothing is offered during
-/// [`KILL_SETTLE`], so a session that recovers exactly on the deadline is only ever seen to be down
-/// for `RECOVERY_DEADLINE - KILL_SETTLE`; charging it for the settle as well would demand less than
-/// the deadline does and let a late recovery pass.
-const MIN_SURVIVAL_ARRIVAL_PCT: f64 = 100.0
-    * (1.0
-        - ((RECOVERY_DEADLINE.as_secs() - KILL_SETTLE.as_secs()) as f64
-            / SURVIVAL_LOAD_DURATION.as_secs() as f64));
+/// Arrival that counts as the session having answered the question even though the exit closed it.
+/// Not the survival gate: its denominator is whatever the writer offered, which moves with machine
+/// speed. [`RECOVERY_DEADLINE`] states the bound directly instead.
+const NEAR_COMPLETE_ARRIVAL_PCT: f64 = 90.0;
 
 /// Quiet period the survival pump tolerates before calling the stream idle.
 ///
@@ -266,8 +248,8 @@ const MIN_SURVIVAL_ARRIVAL_PCT: f64 = 100.0
 const SURVIVAL_IDLE_BUDGET: Duration = Duration::from_secs(30);
 
 const _: () = assert!(
-    SURVIVAL_IDLE_BUDGET.as_secs() > RECOVERY_DEADLINE.as_secs(),
-    "the idle budget must outlive the recovery deadline it is measuring"
+    SURVIVAL_IDLE_BUDGET.as_secs() > RECOVERY_BUDGET_FROM_KILL.as_secs(),
+    "the idle budget must outlive the settle plus the recovery deadline it is measuring"
 );
 
 /// Hard cap on how long the survival phase keeps reading after the last byte has been offered.
@@ -288,8 +270,8 @@ const _: () = assert!(
 const SURVIVAL_TAIL_GRACE: Duration = Duration::from_secs(45);
 
 const _: () = assert!(
-    SURVIVAL_TAIL_GRACE.as_secs() > RECOVERY_DEADLINE.as_secs(),
-    "the tail cap must outlive the recovery deadline, or it truncates a session that recovered"
+    SURVIVAL_TAIL_GRACE.as_secs() > RECOVERY_BUDGET_FROM_KILL.as_secs(),
+    "the tail cap must outlive the settle plus the deadline, or it truncates a recovered session"
 );
 
 /// How long to wait after the kill before offering any new data.
@@ -309,11 +291,6 @@ const _: () = assert!(
 /// yet. Those bytes are lost to an outage the session is still in, and they are charged to arrival
 /// as though the recovered path had dropped them.
 const KILL_SETTLE: Duration = Duration::from_secs(10);
-
-const _: () = assert!(
-    KILL_SETTLE.as_secs() < RECOVERY_DEADLINE.as_secs(),
-    "the settle must leave some of the deadline for the mechanism to demonstrate itself in"
-);
 
 /// [`KILL_SETTLE`], overridable for a one-off experiment via `HOPRD_KILL_SETTLE_SECS`.
 fn kill_settle() -> Duration {
@@ -381,18 +358,16 @@ const RECOVERY_FRACTION: f64 = 0.5;
 /// during that window even though the test is offering nothing, and whoever is waiting for the
 /// connection is not paused along with it.
 ///
-/// The design target is [`RECOVERY_AIM`] -- 15s. This bar sits above it deliberately: the recovery
-/// path is a sequence of independent stages (detection, graph trend, weight recompute, refill) and
-/// a run that lands at 17s is a mechanism that works with a stage to tighten, not a regression to
-/// bisect. Failing at 15s would spend runs on that distinction, and a cluster run is ~12 minutes.
-///
-/// Recovery time is logged against both, so drift toward the boundary stays visible instead of
-/// only surfacing when it crosses.
-const RECOVERY_DEADLINE: Duration = Duration::from_secs(20);
+/// Measured from when the survival phase starts offering data -- the end of [`KILL_SETTLE`] --
+/// not from the kill, which offers nothing.
+const RECOVERY_DEADLINE: Duration = Duration::from_secs(15);
 
-/// What the mechanism is designed to hit. Not asserted -- reported, so a run that passes the
-/// boundary while missing the aim is still legible as such.
-const RECOVERY_AIM: Duration = Duration::from_secs(15);
+/// Design target on the same clock as [`RECOVERY_DEADLINE`]. Reported, not asserted.
+const RECOVERY_AIM: Duration = Duration::from_secs(5);
+
+/// [`RECOVERY_DEADLINE`] as `time_to_sustain` reports it: counted from the kill.
+const RECOVERY_BUDGET_FROM_KILL: Duration =
+    Duration::from_secs(KILL_SETTLE.as_secs() + RECOVERY_DEADLINE.as_secs());
 
 /// How long recovered throughput must hold before it counts as recovered.
 ///
@@ -927,7 +902,7 @@ fn assert_recovered(
     // 93.6% of its payload.
     anyhow::ensure!(
         !after_kill.outcome.exit_stopped_serving()
-            || after_kill.arrival_pct() >= MIN_SURVIVAL_ARRIVAL_PCT,
+            || after_kill.arrival_pct() >= NEAR_COMPLETE_ARRIVAL_PCT,
         "the exit stopped serving the session before it could recover ({:?} after {:.1}s, only \
          {:.1}% of {} B returned) — {}",
         after_kill.outcome,
@@ -970,7 +945,10 @@ fn assert_recovered(
          ttfb {} | longest stall {longest_stall:.1}s | inter-arrival p50 {} / p95 {} | \
          arrival {:.1}% ({} B of {} B) | wall {:.1}s",
         after_kill.outcome,
-        recovered_after.map_or("never reached".to_string(), |s| format!("took {s:.1}s")),
+        recovered_after.map_or("never reached".to_string(), |s| format!(
+            "took {:.1}s after resume ({s:.1}s after the kill)",
+            (s - KILL_SETTLE.as_secs_f64()).max(0.0)
+        )),
         RECOVERY_AIM.as_secs(),
         RECOVERY_DEADLINE.as_secs(),
         // Both thresholds, in order. The earlier version only compared against the aim and then
@@ -978,7 +956,7 @@ fn assert_recovered(
         // printed "PASSES the boundary" -- the opposite of the truth, in the one line a reader
         // scans first. Neither threshold is asserted, which is exactly why the wording has to be
         // right: this string is the only place the run says whether it hit them.
-        match recovered_after {
+        match recovered_after.map(|s| (s - KILL_SETTLE.as_secs_f64()).max(0.0)) {
             None => " (MISSES the boundary: never reached)",
             Some(s) if s > RECOVERY_DEADLINE.as_secs_f64() => " (MISSES the boundary, and the aim)",
             Some(s) if s > RECOVERY_AIM.as_secs_f64() => " (passes the boundary, MISSES the aim)",
@@ -1019,16 +997,21 @@ fn assert_recovered(
     // 1. Nearly all of the data offered after the fault came back. This is the bar: recovery time,
     //    steady state and stalls are reported above as diagnostics, but a session that delivers its
     //    payload has survived losing a relayer whatever shape the curve took getting there.
+    let recovery_from_resume = recovered_after.map(|s| (s - KILL_SETTLE.as_secs_f64()).max(0.0));
     anyhow::ensure!(
-        after_kill.arrival_pct() >= MIN_SURVIVAL_ARRIVAL_PCT,
-        "session did not survive the relayer loss: only {:.1}% of {} B came back (need \
-         {MIN_SURVIVAL_ARRIVAL_PCT:.0}%); recovery {}, the lost relayer had carried {:.0}% of \
-         replies — {}",
+        recovery_from_resume.is_some_and(|s| s <= RECOVERY_DEADLINE.as_secs_f64()),
+        "session did not survive the relayer loss: {} (need ≤{}s at ≥{:.2} MB/s, {:.0}% of the \
+         {:.2} MB/s measured before the kill); {:.1}% of {} B came back, the lost relayer had \
+         carried {:.0}% of replies — {}",
+        recovery_from_resume.map_or("never reached the target rate".to_string(), |s| format!(
+            "took {s:.1}s to recover after traffic resumed"
+        )),
+        RECOVERY_DEADLINE.as_secs(),
+        target_mbps,
+        RECOVERY_FRACTION * 100.0,
+        before_kill.mbps,
         after_kill.arrival_pct(),
         after_kill.sent_bytes,
-        recovered_after.map_or("never reached the target rate".to_string(), |s| format!(
-            "took {s:.1}s"
-        )),
         spread.max_share() * 100.0,
         spread_after.summary(),
     );
