@@ -105,6 +105,26 @@ where
     });
 }
 
+static REQUESTED_EDGLI_MAX_OPENERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Ask for a reduced reply-opener cache on edgli, before the first [`bring_up`].
+///
+/// edgli keeps one reply opener per SURB it mints; the cache is capped per pseudonym
+/// (`SurbStoreConfig::max_openers_per_pseudonym`, default 100 000). A sustained upload with
+/// `always_max_out_surbs` mints SURBs faster than an echoing exit consumes them, so the cache
+/// eventually overflows — at the production cap that takes minutes, which is the ~291 s the
+/// 2026-09 upload incident reported. Shrinking the cap brings the overflow forward to seconds so a
+/// scenario can exercise it in CI time. First call in a test binary wins; returns the value in
+/// effect (floored at the config minimum of 1000).
+pub fn request_edgli_max_openers(n: usize) -> usize {
+    *REQUESTED_EDGLI_MAX_OPENERS.get_or_init(|| n.max(1000))
+}
+
+/// The reduced reply-opener cap requested via [`request_edgli_max_openers`], if any.
+pub fn edgli_max_openers() -> Option<usize> {
+    REQUESTED_EDGLI_MAX_OPENERS.get().copied()
+}
+
 pub const API_PORT_BASE: u16 = 13000;
 pub const P2P_PORT_BASE: u16 = 19000;
 pub const API_HOST: &str = "127.0.0.1";

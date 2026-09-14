@@ -435,6 +435,10 @@ fn edgli_config(
                 // measures neither one.
                 surb_store: SurbStoreConfig {
                     pop_order: SurbPopOrder::Lifo,
+                    // A scenario may shrink the reply-opener cache to bring its overflow into a
+                    // CI-length window; otherwise the library default (100 000) stands.
+                    max_openers_per_pseudonym: cluster::edgli_max_openers()
+                        .unwrap_or(SurbStoreConfig::default().max_openers_per_pseudonym),
                     ..Default::default()
                 },
                 ..Default::default()
