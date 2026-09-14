@@ -23,9 +23,10 @@
 //! The exit-side pop order (`SurbPopOrder`, LIFO in production) does not save this: LIFO replies
 //! with the freshest SURB, whose opener is the most likely to have just been evicted. That is a
 //! different failure from the return-path *staleness* LIFO was introduced to fix (see
-//! `return_path.rs`). The mechanism is proven deterministically, in isolation, by the hoprnet
-//! `protocols/hopr/src/surb_store.rs` unit tests
-//! (`a_sustained_upload_breaks_the_return_path_after_the_opener_cache_overflows`); this test is the
+//! `return_path.rs`). The mechanism (and its fix) is proven deterministically, in isolation, by the
+//! hoprnet `protocols/hopr/src/surb_store.rs` unit tests
+//! (`a_sustained_upload_keeps_the_return_path_alive_at_the_deployed_config` and the retention probe
+//! `a_sustained_upload_keeps_the_newest_reply_openers_and_sheds_the_stalest`); this test is the
 //! end-to-end counterpart over real `hoprd` nodes.
 //!
 //! # Reading a result
@@ -50,15 +51,15 @@ use std::time::Duration;
 
 use hoprd_integration_test::{
     IntegrationEnv,
-    cluster::request_edgli_max_openers,
+    cluster::{EDGLI_MAX_OPENERS_FLOOR, request_edgli_max_openers},
     pump::{PumpOpts, pace_for_rate, pump_halves},
 };
 use rand::RngExt as _;
 
-/// Reply-opener cap for the run. The config floor (1000) is the smallest overflow window: at load
-/// the cache fills within about a second, so the rest of the upload measures the return path with
-/// the cache already overflowed — the state the incident hit after minutes at the production cap.
-const SHRUNK_MAX_OPENERS: usize = 1000;
+/// Reply-opener cap for the run: the smallest cache edgli will install, so its overflow lands
+/// within about a second under load and the rest of the upload measures the return path with the
+/// cache already overflowed — the state the incident hit after minutes at the production cap.
+const SHRUNK_MAX_OPENERS: usize = EDGLI_MAX_OPENERS_FLOOR;
 
 /// A sustained upload rate (MB/s), not a burst — the failure is about a stream held open long
 /// enough to overflow the opener cache, not about peak throughput.

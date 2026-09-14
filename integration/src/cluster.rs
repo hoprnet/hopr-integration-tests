@@ -105,6 +105,11 @@ where
     });
 }
 
+/// Smallest reply-opener cache edgli will honor per pseudonym. Mirrors hoprnet's private
+/// `MINIMUM_OPENERS_PER_PSEUDONYM` — the floor `insert_reply_opener` silently applies — so a
+/// scenario and this knob agree on the smallest cache actually installed.
+pub const EDGLI_MAX_OPENERS_FLOOR: usize = 1000;
+
 static REQUESTED_EDGLI_MAX_OPENERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
 /// Ask for a reduced reply-opener cache on edgli, before the first [`bring_up`].
@@ -114,10 +119,10 @@ static REQUESTED_EDGLI_MAX_OPENERS: std::sync::OnceLock<usize> = std::sync::Once
 /// `always_max_out_surbs` mints SURBs faster than an echoing exit consumes them, so the cache
 /// eventually overflows — at the production cap that takes minutes, which is the ~291 s the
 /// 2026-09 upload incident reported. Shrinking the cap brings the overflow forward to seconds so a
-/// scenario can exercise it in CI time. First call in a test binary wins; returns the value in
-/// effect (floored at the config minimum of 1000).
-pub fn request_edgli_max_openers(n: usize) -> usize {
-    *REQUESTED_EDGLI_MAX_OPENERS.get_or_init(|| n.max(1000))
+/// scenario can exercise it in CI time. First call in a test binary wins; the request is floored at
+/// [`EDGLI_MAX_OPENERS_FLOOR`].
+pub fn request_edgli_max_openers(n: usize) {
+    REQUESTED_EDGLI_MAX_OPENERS.get_or_init(|| n.max(EDGLI_MAX_OPENERS_FLOOR));
 }
 
 /// The reduced reply-opener cap requested via [`request_edgli_max_openers`], if any.
