@@ -240,5 +240,10 @@ run_suite return_path \
   session_should_survive_return_relayer_loss \
   session_should_survive_forward_relayer_loss
 run_suite exit_origination exit_should_keep_originating_when_a_return_path_becomes_unresolvable
+# Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore FAILS
+# against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there. Wiring it in now
+# would turn the nightly red every run. Enable once that fix is in release/4.0 — at which point the
+# test flips to passing and becomes a genuine regression guard.
+#   run_suite upload_survival sustained_upload_keeps_the_return_path_alive
 
 exit "${suite_rc}"
