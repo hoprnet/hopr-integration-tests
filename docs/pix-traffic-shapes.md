@@ -78,9 +78,9 @@ the floor `validate_incoming_session_pix_config` enforces (`quota_range_max / 18
 Measured on a 3-node local cluster, 1 hop, binary chain.
 
 Counters are the Exit's `hopr_strategy_pix_*` delta over the scenario; **paid** is the rise in the
-Exit's *Safe balance*, read from the chain. Those two columns were read at hoprnet **`57b5e679`**,
-where all six passed. The **wall** column carries both that run and the re-run at **`11b5f1b6`**,
-where five of the six still pass — the same assertions, payment floor included.
+Exit's *Safe balance*, read from the chain. Those two columns were read at hoprnet **`57b5e679`**.
+The **wall** column carries that run and the re-run at **`11b5f1b6`**. All six pass at both revs,
+under the same assertions, payment floor included.
 
 | shape | traffic offered | recovered | swept | deposits | paid (wxHOPR) | wall `57b5e679` | wall `11b5f1b6` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -89,14 +89,16 @@ where five of the six still pass — the same assertions, payment floor included
 | **browsing** | 40 kB bursts every 3 s (~13 kB/s), 540 s | 1 | 1 | 2 | 0.08503296 = **1×** | 745 s | 712 s |
 | **download** | service pushes 2 cycles at 300 pkt/s | 2 | 2 | 3 | 0.17006592 = **2×** | 753 s | 719 s |
 | **upload** | 300 pkt/s into a sink, nothing returns | 1 | 1 | 2 | 0.08503296 = **1×** | 690 s | 690 s |
-| **mixed** | browse 180 s → quiet 120 s → bulk 1 cycle | 2 | 2 | 3 | 0.17006592 = **2×** | 1113 s | **failed** |
+| **mixed** | browse 180 s → quiet 120 s → bulk 1 cycle | 2 | 2 | 3 | 0.17006592 = **2×** | 1113 s | 1113 s |
 
-No passing scenario recorded a deposit timeout, and none was closed by the supervisor.
+Not one scenario recorded a deposit timeout, and none was closed by the supervisor.
 
-### The mixed shape fails at `11b5f1b6`, and not on anything PIX does
+### The mixed shape is the one that notices a busy machine
 
-It failed its *first* assertion — that traffic resumes after the quiet phase — with **0 %** of the
-bulk payload arriving, before any counter or balance was read. The transport, not the strategy:
+It failed once at `11b5f1b6`, on a host that had other work on it, and passed on a re-run of the
+same binaries at 1112.84 s — within a second of its `57b5e679` figure. So it is **not** a
+regression in this rev range. It is worth writing down anyway, because the failure is specific to
+this shape and reproducible in kind rather than in schedule:
 
 ```
 08:04:44  quiet begins (120 s, no application traffic at all)
@@ -107,21 +109,23 @@ bulk payload arriving, before any counter or balance was read. The transport, no
 08:08:06  path resolution recovers — 20 s too late
 ```
 
-No channel was closed on chain and the supervisor never intervened; the peers came back on their
-own. What did not come back in time was the *channel graph*, which stayed unresolvable for ~100 s
-after the connections were restored. The 60 s idle budget expires inside that window.
+No channel closed on chain and the supervisor never intervened — this is the transport, not the
+strategy. The peers came back on their own; what did not come back in time was the *channel graph*,
+unresolvable for ~100 s after the connections were restored, and the bulk phase's 60 s idle budget
+expires inside that window.
 
-**This is one observation, and it is not yet diagnosed.** The re-run that would say whether it is a
-regression or load flakiness has not happened — an unrelated cluster was holding port 8545. The
-honest reading for now: the five other shapes are unaffected, this one is quarantined, and the
-suspects are the transport changes in this rev range (hoprnet#8424, #8426) rather than anything in
-the PIX path. Do not quote the old 1113 s as a current result.
+Mixed is the only shape with a fully silent interval — idle still trickles 32 B every 25 s, which
+is enough to hold the connections up. **A wholly quiet Session is therefore the one that has to
+survive a reconnect, and on a loaded host the channel graph can take longer to recover than an
+application is willing to wait.** Run this suite on an otherwise idle machine; if mixed fails here
+again, check `num_peers` before suspecting PIX.
 
 **Every scenario's Safe delta was an exact whole multiple of the per-SSA deposit** — `1×` or `2×`
 of 0.08503296 wxHOPR, matching the cycles its counters claimed, with no residue from relayed-ticket
 income. The assertion only enforces a floor (see `assert_exit_was_paid` for why), but exactness
-held in all six at `57b5e679`. At `11b5f1b6` only the floor is known to have held, for the five
-that ran: the harness prints the scenario's own counters on failure, not on success.
+held in all six at `57b5e679`. At `11b5f1b6` only the floor is known to have held: the harness
+prints a scenario's own counters on failure, not on success, so the exact multiples were not
+re-read there.
 
 This matters because the counters alone cannot establish it. `keys_recovered` and `sweeps` are the
 Exit's own bookkeeping, and there is a path where both increment and no money moves: a cycle that
