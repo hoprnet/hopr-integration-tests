@@ -687,11 +687,28 @@ async fn wait_status_running(
 
 // ── Readiness polling (plain reqwest against the node REST APIs) ───────────────
 
+static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+/// The one HTTP client every request to a node's REST API goes through.
+///
+/// A clone rather than a fresh build. `reqwest::Client` *is* the connection pool -- cloning shares
+/// it, and building one discards whatever the last caller had established. This used to build per
+/// call, which was invisible while the callers were occasional: four of the five hold the result
+/// across a polling loop, so only [`scrape_metrics`] paid it, a handful of times per scenario.
+///
+/// `pix_exit::Sampler` is what makes it visible. It scrapes on a 2 s cadence for the length of a
+/// scenario -- hundreds of requests, every one of them opening a connection, and the shape it
+/// matters most to is the one already measured failing when the host is busy. A pooled client is
+/// the difference between watching the Exit and adding to what it has to survive.
 fn node_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .unwrap()
+    HTTP_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("a default reqwest client with a timeout must build")
+        })
+        .clone()
 }
 
 fn auth_header() -> String {

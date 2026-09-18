@@ -33,6 +33,13 @@ use std::{
     time::Duration,
 };
 
+/// The byte [`Mode::Push`] fills every datagram with.
+///
+/// Public so a reader can check what it received against it. A constant rather than a sequence, so
+/// the check it supports is corruption and not ordering — a reader that wants to prove ordering
+/// needs this to become a counter, and `tests/pix_shapes.rs::drain_for` says so where it matters.
+pub const PUSH_FILL: u8 = 0xAB;
+
 /// What the service does with what it receives.
 #[derive(Debug, Clone, Copy)]
 pub enum Mode {
@@ -136,7 +143,7 @@ pub async fn spawn(mode: Mode) -> anyhow::Result<UdpService> {
                     let socket = socket.clone();
                     let sent = sent.clone();
                     tokio::spawn(async move {
-                        let payload = vec![0xABu8; datagram];
+                        let payload = vec![PUSH_FILL; datagram];
                         let period = Duration::from_micros(1_000_000 / rate.max(1));
                         let mut ticker = tokio::time::interval(period);
                         // Hold the long-run average rather than drifting when a send is slow: the

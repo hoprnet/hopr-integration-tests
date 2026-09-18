@@ -54,6 +54,7 @@ does not provide, so they live in their **own** test targets — CI only runs
 | ------------------------- | ------------------------------------------------ | ------------ |
 | `tests/return_path.rs`    | a 5-node cluster (more CPU than the throughput tests) | `just return-path` |
 | `tests/pix.rs`            | `--features pix` + a PIX-enabled `hoprd` built from source | `just pix` |
+| `tests/pix_shapes.rs`     | the above, plus a `hoprd-localcluster` carrying `--pix-config` | `just pix-shapes` |
 | `tests/rotsee.rs`         | a funded Gnosis identity + exit node (`EDGLI_ROTSEE_*`) | `just rotsee` |
 | `tests/profiling.rs`      | `--features prof` + `--profile tracer` + `tokio_unstable` | `just profile` |
 
@@ -278,9 +279,12 @@ run here). It builds in the hoprnet dev shell on a hosted `depot` runner. Locall
 `just lint` + `just unit`.
 
 Both run on the **default** feature set, so the PIX-only parts of `src/pix.rs` and the whole of
-`tests/pix.rs` are neither compiled nor linted there. The parsers and the balance reconciliation
-are deliberately left ungated so `cargo test --lib` still covers them; for the rest, add
-`--features pix` when touching PIX code.
+`tests/pix.rs` and `tests/pix_shapes.rs` are neither compiled nor linted there. The parsers, the
+balance reconciliation, the shape profile's arithmetic and the whole of `src/pix_exit.rs` are
+deliberately left ungated so `cargo test --lib` still covers them — `pix_exit` most of all, since
+its subtlety is in the parsing (cumulative histogram buckets, a numeric `le`, absent-versus-zero on
+a label that only exists once the Exit's gate has failed). For the rest, add `--features pix` when
+touching PIX code.
 
 `integration.yaml` runs on `repository_dispatch[integration]` (fired by `hoprd` /
 `edge-client` on merge), on manual `workflow_dispatch`, and on a hoprd-test PR
