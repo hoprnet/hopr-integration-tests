@@ -16,10 +16,14 @@ publish = false
 #
 # To test an unmerged edge-client change, override the ref rather than committing a rev here.
 #
-# Back on `main` since edge-client#151 merged: entry-side PIX is on `main`, so the detour onto
-# `lukas/pix` that `tests/pix.rs` needed is spent. The two pins still have to move together —
-# see the hopr-lib comment.
-edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", default-features = false, features = [
+# TEMPORARILY off `main`, onto edge-client#175. hoprnet#8430 dropped `pix_ssa_quota` from
+# `HoprSessionClientConfig`; `main` still fills it in `Edgli::with_pix`, so it does not compile
+# against the rev below — and it does not notice, because its own lock holds `hopr-lib` eight
+# commits behind the `master` branch its manifest names, and that lock is ignored from here.
+#
+# Revert this to `branch = "main"` when #175 merges. Nothing else has to move with it: the rev
+# below is already the one that PR adopts.
+edgli = { git = "https://github.com/hoprnet/edge-client", branch = "lukas/follow-ssa-quota-removal", default-features = false, features = [
   "runtime-tokio",
   "blokli",
 ] }
@@ -27,22 +31,28 @@ edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", defau
 # Pulled in only to switch on hopr-lib's `telemetry` feature, which is what compiles
 # `mod telemetry` into hopr-transport-session. Without it every per-session counter is absent
 # rather than zero, and "the session received nothing" is indistinguishable from "the metric was
-# never built". Must name the same source and rev edgli resolves, or the lock carries two
-# hopr-libs and the entry runs a mixture of the two.
+# never built". Must name the same source edgli resolves, or the lock carries two hopr-libs and
+# the entry runs a mixture of the two.
 #
-# That is why this is a `rev` and not a branch: hoprnet publishes neither `hopr-lib` nor
-# `hopr-utils-session`, so every consumer pins a master rev by hand, and tracking a branch here
-# would drift off whatever the Exit binary was built from and silently split the graph. The rev
-# is edge-client's own pin, copied verbatim — and `hoprd` pins the same one, so the three sides
-# of a PIX run agree by construction. Update them together or not at all.
+# "Same source" means the same git *reference*, not merely the same commit. edge-client#170 moved
+# its own pin from a `rev` to `branch = "master"`, and naming a `rev` here that resolves to the
+# identical commit still splits the graph — measured, on this manifest:
+#
+#   git+https://github.com/hoprnet/hoprnet?branch=master#11b5f1b6...
+#   git+https://github.com/hoprnet/hoprnet?rev=11b5f1b6...#11b5f1b6...
+#
+# Two lock entries, two builds of `hopr-lib`, one of them carrying the counters and the other
+# carrying the entry. So this tracks `master` because edgli does, and the exact commit lives in
+# `Cargo.lock` instead — pinned with `cargo update -p hopr-lib --precise <sha>`, which is
+# reproducible for anyone who builds from the committed lock and is what CI resolves.
+#
+# The cost of the branch is that a bare `cargo update` walks this to hoprnet's tip, which is not
+# necessarily the rev the Exit binary was built from. Check it against `hoprd`'s own `Cargo.toml`
+# when you touch the lock; `just pix-shapes` cannot, because the Exit is a binary by then.
 #
 # To test an unmerged hoprnet change, override this alongside `edgli` rather than committing a
 # feature branch here.
-#
-# Carries the Exit-side PIX fill (hoprnet#8396) that `tests/pix_shapes.rs` measures. edge-client
-# picked the same rev up in #160, so the three sides agree again by the ordinary mechanism and the
-# `[patch]` that held them together while it did not is gone.
-hopr-lib = { git = "https://github.com/hoprnet/hoprnet", rev = "57b5e6792391ef6d10c0029bcea274ee188be1cf", default-features = false, features = [
+hopr-lib = { git = "https://github.com/hoprnet/hoprnet", branch = "master", default-features = false, features = [
   "telemetry",
 ] }
 

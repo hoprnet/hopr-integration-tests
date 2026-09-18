@@ -382,9 +382,11 @@ impl IntegrationEnv {
     /// Two departures from [`Self::open_unreliable_session_paths`], both required rather than
     /// preferred.
     ///
-    /// **PIX is switched on through `Edgli::with_pix`**, which adds the `UsePIX` capability *and*
-    /// fills the announced quota from this node's own `protocol.pix`. One call rather than two
-    /// fields because either alone is a defect the node can only report at open time.
+    /// **PIX is switched on through `Edgli::with_pix`**, which adds the `UsePIX` capability. That
+    /// capability is the whole switch since hoprnet#8430: the announced dimensions come from the
+    /// node's own installed share generator, so there is no second field to get out of step with
+    /// `protocol.pix`. The call still validates that config, and still fails here rather than at
+    /// open time if it is one the node would reject.
     ///
     /// **The SURB buffer is tiny** — 16 kB against the throughput tests' 10 MB — and this is the
     /// least obvious knob in the whole scenario. A PIX share is baked into a SURB when the SURB is
@@ -542,7 +544,11 @@ async fn boot_edgli(
     let edgli = Edgli::new(
         edgli_config(&extra.safe_address, &extra.module_address, tuning),
         hopr_keys,
-        BlokliEndpoint::from_optional_url(Some(blokli_url))?,
+        // `new` rather than the old `from_optional_url`: edge-client#169 dropped the production
+        // default, so there is no longer an `Option` to fall back through and the URL is parsed
+        // here. Every caller of this function already has one — the local cluster reports it,
+        // Rotsee takes it from the environment — so nothing is lost by it being required.
+        BlokliEndpoint::new(blokli_url.parse()?),
         Some(tuning.connector),
         tuning.probe_local,
         |s: EdgliInitState| tracing::info!(?s, "edgli init"),
