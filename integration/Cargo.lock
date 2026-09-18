@@ -2957,7 +2957,7 @@ dependencies = [
 [[package]]
 name = "edgli"
 version = "5.0.0"
-source = "git+https://github.com/hoprnet/edge-client?branch=lukas%2Ffollow-ssa-quota-removal#d40ad0370149dae10d3d7b3945e5cde94e6687ea"
+source = "git+https://github.com/hoprnet/edge-client?branch=main#0278f30286e7f2204d23fee74b965d208c283354"
 dependencies = [
  "anyhow",
  "async-signal",

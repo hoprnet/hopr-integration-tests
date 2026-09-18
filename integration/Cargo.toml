@@ -16,14 +16,12 @@ publish = false
 #
 # To test an unmerged edge-client change, override the ref rather than committing a rev here.
 #
-# TEMPORARILY off `main`, onto edge-client#175. hoprnet#8430 dropped `pix_ssa_quota` from
-# `HoprSessionClientConfig`; `main` still fills it in `Edgli::with_pix`, so it does not compile
-# against the rev below — and it does not notice, because its own lock holds `hopr-lib` eight
-# commits behind the `master` branch its manifest names, and that lock is ignored from here.
-#
-# Revert this to `branch = "main"` when #175 merges. Nothing else has to move with it: the rev
-# below is already the one that PR adopts.
-edgli = { git = "https://github.com/hoprnet/edge-client", branch = "lukas/follow-ssa-quota-removal", default-features = false, features = [
+# Back on `main` as of edge-client#175, which followed hoprnet#8430 (`pix_ssa_quota` gone from
+# `HoprSessionClientConfig`). Before it merged, `main` did not compile against the rev below — and
+# did not notice, because edgli's own lock holds `hopr-lib` behind the `master` branch its manifest
+# names, and a dependency's lock is ignored from here. Worth remembering the next time edgli's CI
+# is green and this is not.
+edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", default-features = false, features = [
   "runtime-tokio",
   "blokli",
 ] }
