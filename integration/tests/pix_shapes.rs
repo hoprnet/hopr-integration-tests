@@ -275,6 +275,27 @@ fn assert_the_gate_served_the_surplus(gate: &ExitTelemetry, trace: &Trace) {
     );
 }
 
+/// Assert that whatever came back came back *intact*.
+///
+/// The repo's idiom, from `tests/integration.rs`, `tests/rotsee.rs` and `tests/return_path.rs`:
+/// "if it all arrived, it must be byte-exact". The disjunction is load-bearing rather than a
+/// weakening — the idle and browsing payloads are sized by *duration*, so a phase that offered more
+/// than its window could carry legitimately ends short, and `sha_ok` is false for a reason that is
+/// not corruption. What it does exclude is the case that matters: a transfer that completed and
+/// whose bytes are not the bytes that were sent.
+///
+/// `attributed_bytes` rather than `received_bytes`, because a phased pump's raw stream interleaves
+/// another phase's records and its `sha_ok` is computed over its own; for an unphased pump the two
+/// are equal, so one form covers both.
+fn assert_intact(transfer: &pump::Transfer, label: &str) {
+    assert!(
+        transfer.attributed_bytes < transfer.sent_bytes || transfer.sha_ok,
+        "{label}: all {} bytes came back but they are not the bytes that were sent — PIX cycles \
+         rotating under this shape corrupted or reordered the stream",
+        transfer.attributed_bytes
+    );
+}
+
 /// Bytes of payload that offer `cycles` whole cycles of return traffic.
 ///
 /// The Exit's loopback echoes every byte, so one chunk offered is one return packet — and one
@@ -341,11 +362,17 @@ async fn offer_for(
 /// Counterpart to [`offer_for`]; see there for why the pump cannot do this. Reads on a timeout so
 /// a quiet stretch does not end the drain — on a download the gaps are the service's pacing, not
 /// a stall.
+/// Every byte is checked against `fill`, which is the only integrity this shape admits.
+/// `udp_service`'s `Mode::Push` sends a constant fill rather than a sequence, so this catches
+/// corruption but says nothing about reordering or duplication — the drain also stops early on the
+/// sweep flag, so there is no expected length to check either. Switching `Push` to a counter
+/// pattern would buy the ordering half; until then this is what can honestly be asserted.
 async fn drain_for(
     rx: &mut tokio::io::ReadHalf<hoprd_integration_test::HoprSession>,
     run_for: Duration,
     stop: &std::sync::atomic::AtomicBool,
-) -> u64 {
+    fill: u8,
+) -> anyhow::Result<u64> {
     use std::sync::atomic::Ordering;
 
     use tokio::io::AsyncReadExt as _;
@@ -357,7 +384,18 @@ async fn drain_for(
         match tokio::time::timeout(left.min(Duration::from_secs(5)), rx.read(&mut buf)).await {
             // End of stream: the Exit stopped serving, and nothing more will arrive.
             Ok(Ok(0)) => break,
-            Ok(Ok(n)) => received += n as u64,
+            Ok(Ok(n)) => {
+                if let Some(at) = buf[..n].iter().position(|b| *b != fill) {
+                    anyhow::bail!(
+                        "the download stream is corrupt {} bytes in: expected {fill:#04x}, read \
+                         {:#04x}. The service pushes a constant fill, so any other byte is damage \
+                         done between it and the reader.",
+                        received + at as u64,
+                        buf[at]
+                    );
+                }
+                received += n as u64;
+            }
             Ok(Err(error)) => {
                 tracing::warn!(%error, "drain: read failed");
                 break;
@@ -366,7 +404,7 @@ async fn drain_for(
             Err(_) => continue,
         }
     }
-    received
+    Ok(received)
 }
 
 /// The spike: does a cluster at this geometry admit the Session and complete a cycle at all?
@@ -440,6 +478,7 @@ async fn the_profile_geometry_completes_a_cycle() -> anyhow::Result<()> {
         "not one byte came back, so the Session never carried traffic: {:?}",
         transfer.outcome
     );
+    assert_intact(&transfer, "spike");
 
     let delta = await_sweeps(&exit, &before, 1, sweep_budget(1)).await?;
     let trace = sampler.finish().await;
@@ -576,6 +615,7 @@ async fn an_idle_session_completes_its_cycle_on_exit_fill() -> anyhow::Result<()
          back",
         echo.arrival_pct()
     );
+    assert_intact(&echo, "idle liveness echo");
 
     assert_the_gate_served_the_surplus(&gate, &trace);
     assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 1).await?;
@@ -662,6 +702,7 @@ async fn a_browsing_session_sustains_its_cycles() -> anyhow::Result<()> {
         transfer.outcome,
         transfer.arrival_pct()
     );
+    assert_intact(&transfer, "browsing");
 
     let delta = await_sweeps(&exit, &before, 1, aim_point).await?;
     let trace = sampler.finish().await;
@@ -746,11 +787,17 @@ async fn a_download_session_sustains_its_cycles() -> anyhow::Result<()> {
     // burning four CPU-hours in thirty wall-clock minutes.
     let budget = sweep_budget(2);
     let stop = std::sync::atomic::AtomicBool::new(false);
-    let (received, delta) = tokio::join!(drain_for(&mut rx, budget, &stop), async {
-        let delta = await_sweeps(&exit, &before, 2, budget).await;
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        delta
-    });
+    let (received, delta) = tokio::join!(
+        drain_for(&mut rx, budget, &stop, udp_service::PUSH_FILL),
+        async {
+            let delta = await_sweeps(&exit, &before, 2, budget).await;
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            delta
+        }
+    );
+    // The drain's error is the integrity failure, so it propagates ahead of the counters: a corrupt
+    // stream makes every reading below meaningless rather than merely disappointing.
+    let received = received?;
     let delta = delta?;
     let trace = sampler.finish().await;
     let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
@@ -925,6 +972,7 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
         arrival_pct = browsing.arrival_pct(),
         "mixed: browsing phase done"
     );
+    assert_intact(&browsing, "mixed/browsing");
     let leftover = pump::drain_until_quiet(&mut rx, Duration::from_secs(5), "mixed/drain").await;
     tracing::info!(leftover, "mixed: settled before going quiet");
 
@@ -961,6 +1009,7 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
          transition: {:.0}% came back",
         bulk.arrival_pct()
     );
+    assert_intact(&bulk, "mixed/bulk");
 
     let delta = await_sweeps(&exit, &before, 2, sweep_budget(1)).await?;
     let trace = sampler.finish().await;
