@@ -29,6 +29,7 @@ use hoprd_integration_test::{
     IntegrationEnv,
     cluster::{self, NodeInfo},
     pix::{self, PixCounters},
+    pix_exit::{self, ExitTelemetry, Trace},
     pump::{self, PumpOpts},
     shapes, udp_service,
 };
@@ -161,6 +162,119 @@ async fn assert_exit_was_paid(
     Ok(())
 }
 
+/// Assert the Exit served a conforming surplus-only run without its egress gate parking.
+///
+/// Every other assertion in this file is about *outcomes* — a cycle recovered, a deposit swept, a
+/// Safe credited. This one is about the mechanism those outcomes depend on, and it exists because
+/// the outcomes cannot distinguish its failure from anything else's: a gate that parks part-way
+/// through a surplus run stops the very SURB spending that was draining it, and what a scenario
+/// sees is `sweeps` failing to move before the budget expires — indistinguishable from a starved
+/// buffer, an unmined deposit, or a busy host.
+///
+/// # What each part rules out
+///
+/// The four checks are not four views of one thing. Taken alone each has a way of passing
+/// vacuously, and they are chosen to close each other's gaps:
+///
+/// * The gate never parked for `share_lag`. Direct, exact, and the whole point — but it is also
+///   what an Exit that served no surplus at all would report.
+/// * Surplus shares were accepted, more than the gate tolerates without progress. Rules that out,
+///   but not surplus arriving in scattered fragments the gate never had to serve *through*.
+/// * The longest contiguous surplus-only run clears the same bar. That is the run the emission
+///   window actually produces — upstream emits one per window, so a cycle of 1024 polynomials
+///   contains four — and it needs the trace, because a before/after pair cannot see contiguity.
+/// * A recovered cycle's accepted-share fraction sits above 1.0. Independent of the trace's
+///   sampling entirely: the Exit itself recorded, at finalization, that it accepted more shares
+///   than the cycle's useful target. A sampling cadence too coarse to catch the run cannot make
+///   this one pass.
+///
+/// The bar is [`shapes::max_served_without_progress`] rather than a literal 2048, so it follows the
+/// configuration the cluster was actually given — including a sweep that moved it.
+fn assert_the_gate_served_the_surplus(gate: &ExitTelemetry, trace: &Trace) {
+    let ceiling = shapes::max_served_without_progress();
+    tracing::info!(
+        gate = %gate.summary(),
+        trace = %trace.summary(),
+        ceiling,
+        "the Exit's egress gate over the scenario"
+    );
+
+    assert!(
+        gate.observable(),
+        "the Exit exposes no hopr_pix_* series at all, so none of what follows was measured — \
+         either it was built without `hopr-transport-session/telemetry` or it predates \
+         hoprnet#8411. These are not zeroes."
+    );
+
+    assert_eq!(
+        0,
+        gate.gate_blocks("share_lag").unwrap_or(0),
+        "the Exit's egress gate parked on share lag, which at this geometry it should never need \
+         to: the free credit (parts x surplus) covers the SURB queue several times over, so the \
+         drain after a recovery is credited as liveness. A block here is the false stall the \
+         surplus run exists to catch. {}",
+        gate.summary()
+    );
+    assert!(
+        !trace.saw_share_lag_block(),
+        "the gate parked on share lag at some point mid-scenario and had resumed by the end, so \
+         the before/after counters look clean: {}",
+        trace.summary()
+    );
+
+    let surplus = gate.shares("surplus").unwrap_or(0);
+    assert!(
+        surplus >= ceiling,
+        "the Exit accepted only {surplus} surplus shares against a gate ceiling of {ceiling}, so \
+         the scenario never reached a surplus run long enough to test the gate at all — the \
+         assertion above passed vacuously. {}",
+        gate.summary()
+    );
+
+    let run = trace.longest_surplus_only_run();
+    assert!(
+        run >= ceiling,
+        "the longest *contiguous* surplus-only run was {run} shares against a ceiling of \
+         {ceiling}. {surplus} surplus shares were accepted in total, so they arrived in fragments \
+         rather than as the uninterrupted run a window emits — which is not the case the gate has \
+         to serve through. If the trace is sparse or the run is broken by a handful of useful \
+         shares, see `pix_exit::SURPLUS_RUN_USEFUL_TOLERANCE`. {}",
+        trace.summary()
+    );
+
+    match gate.accepted_fraction("recovered") {
+        Some(hist) => assert!(
+            hist.above(1.0).unwrap_or(0) >= 1,
+            "no recovered cycle recorded an accepted-share fraction above 1.0, so the Exit \
+             finalized its cycles without taking the Entry's surplus — {} cycle(s) observed, mean \
+             fraction {:?}. A conforming cycle at this geometry lands at (64+16)/64 = 1.25.",
+            hist.count(),
+            hist.mean()
+        ),
+        None => panic!(
+            "no cycle finalized with outcome=recovered during the scenario, so there is no \
+             per-cycle coverage to read: {}",
+            gate.summary()
+        ),
+    }
+
+    // Logged, not asserted: hoprnet#8378 is still open, and `hopr_pix_cycle_egress_packets`'
+    // buckets (.., 65536, 262144, ..) cannot resolve this geometry's 81 920-packet quota. The
+    // counts are here from the start so the assertion is one line when the invariant lands.
+    tracing::info!(
+        egress_funded = ?gate.egress("funded"),
+        egress_predeposit = ?gate.egress("predeposit"),
+        cycles_requested = ?gate.cycles("requested"),
+        cycles_recovered = ?gate.cycles("recovered"),
+        cycles_failed = ?gate.cycles("failed"),
+        cycle_egress_mean = ?gate.cycle_egress("recovered").and_then(|h| h.mean()),
+        cycle_egress_count = ?gate.cycle_egress("recovered").map(|h| h.count()),
+        useful_fraction_mean = ?gate.useful_fraction("recovered").and_then(|h| h.mean()),
+        quota_packets = shapes::CYCLE_PACKETS,
+        "per-cycle egress accounting (hoprnet#8378 will make these assertable)"
+    );
+}
+
 /// Bytes of payload that offer `cycles` whole cycles of return traffic.
 ///
 /// The Exit's loopback echoes every byte, so one chunk offered is one return packet — and one
@@ -291,6 +405,9 @@ async fn the_profile_geometry_completes_a_cycle() -> anyhow::Result<()> {
          `hopr-strategy/telemetry`, so nothing here can be measured"
     );
 
+    let gate_before = pix_exit::sample(&exit).await?;
+    let sampler = pix_exit::Sampler::start(&exit);
+
     let (mut rx, mut tx) = tokio::io::split(session);
     let payload = payload_for(0, 1);
     tracing::info!(
@@ -325,6 +442,8 @@ async fn the_profile_geometry_completes_a_cycle() -> anyhow::Result<()> {
     );
 
     let delta = await_sweeps(&exit, &before, 1, sweep_budget(1)).await?;
+    let trace = sampler.finish().await;
+    let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
     assert_eq!(
         0,
         delta.deposits_timed_out().unwrap_or(0),
@@ -338,6 +457,7 @@ async fn the_profile_geometry_completes_a_cycle() -> anyhow::Result<()> {
         delta.summary()
     );
 
+    assert_the_gate_served_the_surplus(&gate, &trace);
     assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 1).await?;
 
     tracing::info!(summary = %delta.summary(), "profile geometry spike PASSED");
@@ -380,6 +500,9 @@ async fn an_idle_session_completes_its_cycle_on_exit_fill() -> anyhow::Result<()
     let before = pix::sample_exit(&exit).await?;
     let paid_before = pix::node_balances(&exit).await?;
 
+    let gate_before = pix_exit::sample(&exit).await?;
+    let sampler = pix_exit::Sampler::start(&exit);
+
     // The aim point fill plans against. A cycle that has not completed by then has not been filled;
     // one that completes long after it was filled by something else.
     let aim_point = shapes::MAX_RECOVERY_TIME.mul_f64(shapes::FILL_FINISH_FRACTION);
@@ -417,6 +540,8 @@ async fn an_idle_session_completes_its_cycle_on_exit_fill() -> anyhow::Result<()
     tracing::info!(outcome = ?idle.outcome, arrival_pct = idle.arrival_pct(), "keep-alive phase finished");
 
     let delta = await_sweeps(&exit, &before, 1, aim_point).await?;
+    let trace = sampler.finish().await;
+    let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
     assert!(
         delta.keys_recovered().unwrap_or(0) >= 1,
         "an idle cycle was not completed within {aim_point:?}, so the deposit stranded — which is \
@@ -452,6 +577,7 @@ async fn an_idle_session_completes_its_cycle_on_exit_fill() -> anyhow::Result<()
         echo.arrival_pct()
     );
 
+    assert_the_gate_served_the_surplus(&gate, &trace);
     assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 1).await?;
 
     tracing::info!(summary = %delta.summary(), "idle shape PASSED");
@@ -490,6 +616,9 @@ async fn a_browsing_session_sustains_its_cycles() -> anyhow::Result<()> {
     let exit = node_for(&env, exit_addr)?;
     let before = pix::sample_exit(&exit).await?;
     let paid_before = pix::node_balances(&exit).await?;
+
+    let gate_before = pix_exit::sample(&exit).await?;
+    let sampler = pix_exit::Sampler::start(&exit);
 
     let (mut rx, mut tx) = tokio::io::split(session);
     let aim_point = shapes::MAX_RECOVERY_TIME.mul_f64(shapes::FILL_FINISH_FRACTION);
@@ -535,6 +664,8 @@ async fn a_browsing_session_sustains_its_cycles() -> anyhow::Result<()> {
     );
 
     let delta = await_sweeps(&exit, &before, 1, aim_point).await?;
+    let trace = sampler.finish().await;
+    let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
     assert_eq!(
         0,
         delta.deposits_timed_out().unwrap_or(0),
@@ -553,6 +684,7 @@ async fn a_browsing_session_sustains_its_cycles() -> anyhow::Result<()> {
         delta.summary()
     );
 
+    assert_the_gate_served_the_surplus(&gate, &trace);
     assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 1).await?;
 
     tracing::info!(summary = %delta.summary(), "browsing shape PASSED");
@@ -593,6 +725,9 @@ async fn a_download_session_sustains_its_cycles() -> anyhow::Result<()> {
     let before = pix::sample_exit(&exit).await?;
     let paid_before = pix::node_balances(&exit).await?;
 
+    let gate_before = pix_exit::sample(&exit).await?;
+    let sampler = pix_exit::Sampler::start(&exit);
+
     let (mut rx, mut tx) = tokio::io::split(session);
     // One datagram is the whole request; everything after it is the service's stream coming back.
     {
@@ -617,6 +752,8 @@ async fn a_download_session_sustains_its_cycles() -> anyhow::Result<()> {
         delta
     });
     let delta = delta?;
+    let trace = sampler.finish().await;
+    let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
     tracing::info!(
         received,
         pushed_by_service = service.sent(),
@@ -642,6 +779,7 @@ async fn a_download_session_sustains_its_cycles() -> anyhow::Result<()> {
         delta.summary()
     );
 
+    assert_the_gate_served_the_surplus(&gate, &trace);
     assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 2).await?;
 
     tracing::info!(summary = %delta.summary(), "download shape PASSED");
@@ -674,6 +812,9 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
     let before = pix::sample_exit(&exit).await?;
     let paid_before = pix::node_balances(&exit).await?;
 
+    let gate_before = pix_exit::sample(&exit).await?;
+    let sampler = pix_exit::Sampler::start(&exit);
+
     let (_rx, mut tx) = tokio::io::split(session);
     let aim_point = shapes::MAX_RECOVERY_TIME.mul_f64(shapes::FILL_FINISH_FRACTION);
     tracing::info!(?aim_point, "uploading into a sink; nothing will come back");
@@ -689,6 +830,8 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
     });
     let offered = offered?;
     let delta = delta?;
+    let trace = sampler.finish().await;
+    let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
     tracing::info!(
         offered,
         absorbed_by_service = service.received(),
@@ -710,6 +853,7 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
         delta.summary()
     );
 
+    assert_the_gate_served_the_surplus(&gate, &trace);
     assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 1).await?;
 
     tracing::info!(summary = %delta.summary(), "upload shape PASSED");
@@ -745,6 +889,8 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
     let exit = node_for(&env, exit_addr)?;
     let before = pix::sample_exit(&exit).await?;
     let paid_before = pix::node_balances(&exit).await?;
+    let gate_before = pix_exit::sample(&exit).await?;
+    let sampler = pix_exit::Sampler::start(&exit);
     let (mut rx, mut tx) = tokio::io::split(session);
 
     // 1. Browsing for three minutes. Sized by duration, not by cycles: at ~13 kB/s a quarter of a
@@ -817,6 +963,8 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
     );
 
     let delta = await_sweeps(&exit, &before, 2, sweep_budget(1)).await?;
+    let trace = sampler.finish().await;
+    let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
     assert_eq!(
         0,
         delta.deposits_timed_out().unwrap_or(0),
@@ -830,6 +978,7 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
         delta.summary()
     );
 
+    assert_the_gate_served_the_surplus(&gate, &trace);
     assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 2).await?;
 
     tracing::info!(summary = %delta.summary(), "mixed shape PASSED");

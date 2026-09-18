@@ -53,7 +53,7 @@
 //! `_total` is appended only when a name does not already end in it, and a unit suffix only when the
 //! instrument declares a unit — `hopr-types`' wrappers never do. So every name renders as declared.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use crate::{cluster::NodeInfo, pix::label_value};
 
@@ -321,6 +321,195 @@ impl ExitTelemetry {
 /// same body. `hoprd` strips only `hopr_session_*` from that endpoint, so this family survives it.
 pub async fn sample(node: &NodeInfo) -> anyhow::Result<ExitTelemetry> {
     Ok(parse(&crate::cluster::scrape_metrics(node).await?))
+}
+
+// ── Sampling a whole scenario ────────────────────────────────────────────────
+
+/// Seconds between samples, before `HOPRD_PIX_TRACE_POLL` overrides it.
+///
+/// Sized against the run it exists to see. A surplus-only run is
+/// `SHARE_EMISSION_WINDOW x surplus` shares — 4096 at this repo's geometry — and at the ~232
+/// packets/s a 1-hop cluster achieves that is ~18 s, so 2 s puts roughly eight samples inside it.
+/// A cycle finished by Exit fill runs slower still (~120 packets/s, ~34 s), so the tight case is
+/// the saturated one.
+const DEFAULT_TRACE_POLL: Duration = Duration::from_secs(2);
+
+/// Useful shares a step may carry and still count as surplus-only.
+///
+/// **Zero — deliberately strict.** In a window's surplus section every share the Entry sends is
+/// surplus by construction, so the honest first measurement is to demand exactly that and see
+/// whether it holds. It may not: a useful share lost earlier in the window leaves a polynomial one
+/// short, and the first surplus share that fills the gap is counted useful instead. At the 99.9-100 %
+/// arrival these scenarios measure that is a handful per 4096.
+///
+/// If the first full pass shows runs breaking up, raise this to a documented *ratio* of the step's
+/// surplus — `useful * 32 <= surplus`, i.e. 3 % — rather than lowering the 2048 bar the assertion
+/// exists to clear. Record in `docs/pix-traffic-shapes.md` which form the measurement justified.
+const SURPLUS_RUN_USEFUL_TOLERANCE: u64 = 0;
+
+fn trace_poll() -> Duration {
+    std::env::var("HOPRD_PIX_TRACE_POLL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_TRACE_POLL)
+}
+
+/// The few series a trace follows over time, rather than a whole [`ExitTelemetry`] per tick.
+///
+/// A scenario is ten to twenty minutes at a 2 s cadence, so this is hundreds of entries; keeping
+/// whole readings would hold every histogram bucket of every series for no reason. Everything the
+/// per-cycle assertions need is a before/after pair, not a series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sample {
+    at: Duration,
+    useful: u64,
+    surplus: u64,
+    share_lag_blocks: u64,
+    egress_funded: u64,
+    egress_predeposit: u64,
+}
+
+impl Sample {
+    /// `None` collapses to zero here, and correctly: a failed scrape is never pushed as a sample,
+    /// so an absent series at this point means it has not been incremented yet.
+    fn of(at: Duration, t: &ExitTelemetry) -> Self {
+        Self {
+            at,
+            useful: t.shares("useful").unwrap_or(0),
+            surplus: t.shares("surplus").unwrap_or(0),
+            share_lag_blocks: t.gate_blocks("share_lag").unwrap_or(0),
+            egress_funded: t.egress("funded").unwrap_or(0),
+            egress_predeposit: t.egress("predeposit").unwrap_or(0),
+        }
+    }
+}
+
+/// What the Exit's share counters did over a scenario, sampled.
+#[derive(Debug, Clone, Default)]
+pub struct Trace {
+    samples: Vec<Sample>,
+}
+
+impl Trace {
+    /// Samples taken. Zero means every scrape failed, which is not the same as a quiet Exit.
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// The longest **contiguous** run of accepted surplus shares during which no useful share
+    /// arrived, in shares.
+    ///
+    /// This is the quantity that distinguishes "the cycle accepted 4096 surplus shares somewhere"
+    /// from "it accepted them as the uninterrupted run the emission window actually produces" —
+    /// and the run is what the egress gate has to serve through without mistaking it for silence.
+    /// Upstream emits one per window (`protocols/pix/src/generator.rs`: a window emits its entire
+    /// surplus before the next starts), so a cycle of 1024 polynomials contains four.
+    ///
+    /// Strictness is [`SURPLUS_RUN_USEFUL_TOLERANCE`]'s; see there before relaxing it.
+    pub fn longest_surplus_only_run(&self) -> u64 {
+        let mut longest = 0;
+        let mut current = 0;
+        for pair in self.samples.windows(2) {
+            let (before, after) = (pair[0], pair[1]);
+            let useful = after.useful.saturating_sub(before.useful);
+            let surplus = after.surplus.saturating_sub(before.surplus);
+            if useful > SURPLUS_RUN_USEFUL_TOLERANCE {
+                current = 0;
+                continue;
+            }
+            current += surplus;
+            longest = longest.max(current);
+        }
+        longest
+    }
+
+    /// Whether the gate's `share_lag` counter moved at any point, which a before/after pair would
+    /// miss if it had also resumed.
+    pub fn saw_share_lag_block(&self) -> bool {
+        self.samples
+            .windows(2)
+            .any(|p| p[1].share_lag_blocks > p[0].share_lag_blocks)
+    }
+
+    /// One line for the run log.
+    pub fn summary(&self) -> String {
+        let Some((first, last)) = self.samples.first().zip(self.samples.last()) else {
+            return "no PIX telemetry samples were taken".to_string();
+        };
+        format!(
+            "samples={} over {}s useful=+{} surplus=+{} longest_surplus_run={} \
+             egress=+{}/funded +{}/predeposit share_lag_episodes=+{}",
+            self.samples.len(),
+            last.at.saturating_sub(first.at).as_secs(),
+            last.useful.saturating_sub(first.useful),
+            last.surplus.saturating_sub(first.surplus),
+            self.longest_surplus_only_run(),
+            last.egress_funded.saturating_sub(first.egress_funded),
+            last.egress_predeposit
+                .saturating_sub(first.egress_predeposit),
+            last.share_lag_blocks.saturating_sub(first.share_lag_blocks),
+        )
+    }
+}
+
+/// A background task sampling one Exit's PIX aggregates until it is told to stop.
+///
+/// Spawned rather than run under a `join!` with the traffic, because the run it has to see spans
+/// both the traffic phase and the wait for sweeps that follows it — and folding it into either
+/// would mean restructuring scenarios that work.
+///
+/// It is deliberately cheap. `cluster::scrape_metrics` goes through one pooled client, a failed
+/// scrape logs and is skipped rather than ending the trace, and nothing here can fail a scenario:
+/// the shape this matters most to is the one already measured dropping its p2p connections when the
+/// host is busy, and a harness that watches the Exit must not become what the Exit has to survive.
+pub struct Sampler {
+    handle: tokio::task::JoinHandle<Trace>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Sampler {
+    /// Begin sampling `exit`.
+    pub fn start(exit: &NodeInfo) -> Self {
+        let exit = exit.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let poll = trace_poll();
+        let handle = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let mut samples = Vec::new();
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                match sample(&exit).await {
+                    Ok(reading) => samples.push(Sample::of(started.elapsed(), &reading)),
+                    Err(error) => {
+                        tracing::warn!(%error, "PIX telemetry scrape failed; the trace skips this tick")
+                    }
+                }
+                tokio::time::sleep(poll).await;
+            }
+            Trace { samples }
+        });
+        Self { handle, stop }
+    }
+
+    /// Stop sampling and collect the trace.
+    ///
+    /// Returns an empty trace rather than erroring if the task was cancelled or panicked: a trace
+    /// is diagnostic, and the assertion that reads it is what names the consequence.
+    pub async fn finish(self) -> Trace {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        match self.handle.await {
+            Ok(trace) => trace,
+            Err(error) => {
+                tracing::warn!(%error, "the PIX telemetry sampler did not finish cleanly");
+                Trace::default()
+            }
+        }
+    }
 }
 
 /// The canonical key for one series: `family{label="value",…}`, labels sorted by name.
@@ -629,5 +818,92 @@ hopr_pix_cycle_accepted_share_fraction_bucket{outcome=\"recovered\",le=\"+Inf\"}
             parse("").summary().contains("not zeroes"),
             "an unmeasured Exit must say so"
         );
+    }
+
+    // ── The run detector ─────────────────────────────────────────────────────
+
+    /// A trace from `(useful, surplus)` cumulative readings, one per tick.
+    fn trace_of(readings: &[(u64, u64)]) -> Trace {
+        Trace {
+            samples: readings
+                .iter()
+                .enumerate()
+                .map(|(i, &(useful, surplus))| Sample {
+                    at: Duration::from_secs(i as u64 * 2),
+                    useful,
+                    surplus,
+                    share_lag_blocks: 0,
+                    egress_funded: 0,
+                    egress_predeposit: 0,
+                })
+                .collect(),
+        }
+    }
+
+    /// The shape a window's surplus section actually produces: useful flat, surplus climbing.
+    #[test]
+    fn a_surplus_only_run_should_be_measured_across_its_steps() {
+        let t = trace_of(&[
+            (16_384, 0),
+            (16_384, 1_100),
+            (16_384, 2_300),
+            (16_384, 3_400),
+            (16_384, 4_096),
+        ]);
+        assert_eq!(4_096, t.longest_surplus_only_run());
+    }
+
+    /// A useful share ends the run, and the longest of the runs either side is what counts.
+    ///
+    /// This is the assertion's real defence: 4096 surplus shares scattered across a cycle in
+    /// 500-share fragments must not read as the contiguous run the gate had to serve through.
+    #[test]
+    fn a_useful_share_should_end_the_run() {
+        let t = trace_of(&[
+            (16_000, 0),
+            (16_000, 500),   // run of 500
+            (16_100, 700),   // useful moved -- run ends
+            (16_100, 2_500), // new run
+            (16_100, 4_600), // ...still going
+            (16_384, 4_700), // useful again
+        ]);
+        assert_eq!(
+            4_600 - 700,
+            t.longest_surplus_only_run(),
+            "the second run is the longer one"
+        );
+    }
+
+    /// A cycle carried entirely by useful shares has no surplus run at all, which is what makes
+    /// the >= 2048 assertion meaningful rather than automatic.
+    #[test]
+    fn a_trace_with_no_surplus_should_measure_no_run() {
+        let t = trace_of(&[(0, 0), (4_000, 0), (8_000, 0)]);
+        assert_eq!(0, t.longest_surplus_only_run());
+    }
+
+    /// An Exit nobody could scrape is not an Exit that stayed quiet.
+    #[test]
+    fn an_empty_trace_should_be_visibly_empty() {
+        let t = Trace::default();
+        assert!(t.is_empty());
+        assert_eq!(0, t.longest_surplus_only_run());
+        assert!(
+            t.summary().contains("no PIX telemetry samples"),
+            "{}",
+            t.summary()
+        );
+    }
+
+    /// A gate that parked and resumed inside the window leaves both endpoints equal only if the
+    /// counter were reset, which it is not — but reading the trace is what catches an episode that
+    /// a coarser before/after pair would have to infer.
+    #[test]
+    fn a_block_episode_should_be_visible_in_the_trace() {
+        let mut t = trace_of(&[(0, 0), (0, 2_048), (0, 4_096)]);
+        t.samples[1].share_lag_blocks = 1;
+        t.samples[2].share_lag_blocks = 1;
+        assert!(t.saw_share_lag_block());
+        assert!(!trace_of(&[(0, 0), (0, 2_048)]).saw_share_lag_block());
     }
 }
