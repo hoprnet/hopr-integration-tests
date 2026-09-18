@@ -11,15 +11,37 @@ HOPRD_SRC=../hoprd-shapes just pix-shapes            # all of them, hours
 HOPRD_SRC=../hoprd-shapes just pix-shapes <scenario> # one, ~12-20 min
 ```
 
-`HOPRD_SRC` must be a hoprd carrying **hoprnet#8396** (Exit-side PIX fill, landed on `master` as
-`57b5e679`) and the `--pix-config` seam. `just pix-shapes` refuses to run without the latter,
-because a `hoprd-localcluster` that ignores `--pix-config` silently runs the demo geometry and
-every assertion below would then be measuring a cycle 2 500x smaller than it claims.
+`HOPRD_SRC` must be a hoprd carrying the `--pix-config` seam. `just pix-shapes` refuses to run
+without it, because a `hoprd-localcluster` that ignores `--pix-config` silently runs the demo
+geometry and every assertion below would then be measuring a cycle 2 500x smaller than it claims.
+Exit-side PIX fill (hoprnet#8396) is no longer a condition worth stating: it has been on hoprd
+`main` since hoprd#166.
 
-All three sides of a run must be on that one rev, and since edge-client#160 all three name it
-directly: `hoprd` in its own `Cargo.toml`, `edgli` in its, and this crate in `integration/Cargo.toml`.
-A skew is not subtle but it is silent from here — two revs put two `hopr-lib`s in the lock, with the
-entry running one and its metrics registered in the other, so every counter reads zero.
+All three sides of a run must still be on one hoprnet rev — **`11b5f1b6`** as of this writing.
+A skew is not subtle but it is silent from here: two sources put two `hopr-lib`s in the lock, the
+entry runs one and registers its metrics in the other, and every counter reads zero.
+
+**Agreeing on the commit is not enough — the git *reference* has to match too.** edge-client#170
+moved its own pin from a `rev` to `branch = "master"`, and naming a `rev` here that resolves to the
+identical commit still splits the graph. Measured on this manifest:
+
+```
+git+https://github.com/hoprnet/hoprnet?branch=master#11b5f1b6...
+git+https://github.com/hoprnet/hoprnet?rev=11b5f1b6...#11b5f1b6...
+```
+
+Two entries, same commit. So `integration/Cargo.toml` tracks `master` because edgli does, and the
+exact commit lives in `Cargo.lock` — set with `cargo update -p hopr-lib --precise <sha>`, which is
+reproducible for anyone building from the committed lock. The cost is that a bare `cargo update`
+walks to hoprnet's tip, which is not necessarily what the Exit binary was built from; check it
+against `hoprd`'s `Cargo.toml` when you touch the lock.
+
+**A dependency's own lock is ignored by its consumers, which is how a green CI hides a break.**
+hoprnet#8430 dropped `pix_ssa_quota` from `HoprSessionClientConfig`; edgli `main` still filled it,
+and did not notice, because edgli's lock held `hopr-lib` several commits behind the very branch its
+manifest names. From here the branch resolves to its tip and the build simply fails. Fixed in
+edge-client#175. Expect this shape of failure again: edgli's CI being green says nothing about
+whether it builds at `master`'s tip.
 
 ## The profile
 
@@ -53,27 +75,53 @@ the floor `validate_incoming_session_pix_config` enforces (`quota_range_max / 18
 
 ## Results
 
-Measured on a 3-node local cluster, 1 hop, binary chain. Every figure is from a run whose log is
-named beside it.
+Measured on a 3-node local cluster, 1 hop, binary chain.
 
-All six pass. Counters are the Exit's `hopr_strategy_pix_*` delta over the scenario; **paid** is the
-rise in the Exit's *Safe balance*, read from the chain.
+Counters are the Exit's `hopr_strategy_pix_*` delta over the scenario; **paid** is the rise in the
+Exit's *Safe balance*, read from the chain. Those two columns were read at hoprnet **`57b5e679`**,
+where all six passed. The **wall** column carries both that run and the re-run at **`11b5f1b6`**,
+where five of the six still pass — the same assertions, payment floor included.
 
-| shape | traffic offered | recovered | swept | deposits | paid (wxHOPR) | wall |
-| --- | --- | --- | --- | --- | --- | --- |
-| **geometry spike** | 88 MB at 300 pkt/s, loopback | 1 | 1 | 2 | 0.08503296 = **1×** | 593 s |
-| **idle** | 25 keep-alives of 32 B, one per 25 s | 1 | 1 | 2 | 0.08503296 = **1×** | 817 s |
-| **browsing** | 40 kB bursts every 3 s (~13 kB/s), 540 s | 1 | 1 | 2 | 0.08503296 = **1×** | 745 s |
-| **download** | service pushes 2 cycles at 300 pkt/s | 2 | 2 | 3 | 0.17006592 = **2×** | 753 s |
-| **upload** | 300 pkt/s into a sink, nothing returns | 1 | 1 | 2 | 0.08503296 = **1×** | 690 s |
-| **mixed** | browse 180 s → quiet 120 s → bulk 1 cycle | 2 | 2 | 3 | 0.17006592 = **2×** | 1113 s |
+| shape | traffic offered | recovered | swept | deposits | paid (wxHOPR) | wall `57b5e679` | wall `11b5f1b6` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **geometry spike** | 88 MB at 300 pkt/s, loopback | 1 | 1 | 2 | 0.08503296 = **1×** | 593 s | 595 s |
+| **idle** | 25 keep-alives of 32 B, one per 25 s | 1 | 1 | 2 | 0.08503296 = **1×** | 817 s | 795 s |
+| **browsing** | 40 kB bursts every 3 s (~13 kB/s), 540 s | 1 | 1 | 2 | 0.08503296 = **1×** | 745 s | 712 s |
+| **download** | service pushes 2 cycles at 300 pkt/s | 2 | 2 | 3 | 0.17006592 = **2×** | 753 s | 719 s |
+| **upload** | 300 pkt/s into a sink, nothing returns | 1 | 1 | 2 | 0.08503296 = **1×** | 690 s | 690 s |
+| **mixed** | browse 180 s → quiet 120 s → bulk 1 cycle | 2 | 2 | 3 | 0.17006592 = **2×** | 1113 s | **failed** |
 
-Not one scenario recorded a deposit timeout, and none was closed by the supervisor.
+No passing scenario recorded a deposit timeout, and none was closed by the supervisor.
+
+### The mixed shape fails at `11b5f1b6`, and not on anything PIX does
+
+It failed its *first* assertion — that traffic resumes after the quiet phase — with **0 %** of the
+bulk payload arriving, before any counter or balance was read. The transport, not the strategy:
+
+```
+08:04:44  quiet begins (120 s, no application traffic at all)
+08:04:54  every p2p connection drops:  num_peers 2 → 1 → 0
+08:04:58  "cannot find 1 hop path ... in the channel graph" begins
+08:06:26  peers reconnect (2), 08:06:59 (3)
+08:07:46  bulk gives up: 0/88473600 B, ttfb never, 60 s idle budget spent
+08:08:06  path resolution recovers — 20 s too late
+```
+
+No channel was closed on chain and the supervisor never intervened; the peers came back on their
+own. What did not come back in time was the *channel graph*, which stayed unresolvable for ~100 s
+after the connections were restored. The 60 s idle budget expires inside that window.
+
+**This is one observation, and it is not yet diagnosed.** The re-run that would say whether it is a
+regression or load flakiness has not happened — an unrelated cluster was holding port 8545. The
+honest reading for now: the five other shapes are unaffected, this one is quarantined, and the
+suspects are the transport changes in this rev range (hoprnet#8424, #8426) rather than anything in
+the PIX path. Do not quote the old 1113 s as a current result.
 
 **Every scenario's Safe delta was an exact whole multiple of the per-SSA deposit** — `1×` or `2×`
 of 0.08503296 wxHOPR, matching the cycles its counters claimed, with no residue from relayed-ticket
 income. The assertion only enforces a floor (see `assert_exit_was_paid` for why), but exactness
-held in all six.
+held in all six at `57b5e679`. At `11b5f1b6` only the floor is known to have held, for the five
+that ran: the harness prints the scenario's own counters on failure, not on success.
 
 This matters because the counters alone cannot establish it. `keys_recovered` and `sweeps` are the
 Exit's own bookkeeping, and there is a path where both increment and no money moves: a cycle that
