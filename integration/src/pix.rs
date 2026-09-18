@@ -1,5 +1,12 @@
 //! PIX accounting for the edgli entry: dimensions, pricing, and the counters both ends expose.
 //!
+//! **Two families, two modules.** This one reads `hopr_strategy_pix_*` — the *settlement*
+//! bookkeeping, which answers whether the exchange happened and whether the Exit was paid.
+//! [`crate::pix_exit`] reads `hopr_pix_*`, the Exit's supervisor and egress-gate aggregates, which
+//! answer why a Session stopped making progress. Both are parsed out of the same `/metrics` body
+//! and neither can substitute for the other: a swept cycle says nothing about whether the gate
+//! parked on the way, and a quiet gate says nothing about whether money moved.
+//!
 //! PIX pays the Exit for the traffic it delivers. The Entry deposits wxHOPR to a per-Session
 //! stealth address; the Exit reconstructs that address's key from the SSA shares carried by the
 //! return-path SURBs it spent, and sweeps the deposit into its Safe. Everything here is the Entry
