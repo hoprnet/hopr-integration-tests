@@ -427,8 +427,9 @@ const OUTCOME_LABEL: &str = "outcome";
 /// acquiring one stays harmless.
 ///
 /// Splits on `,`, so a label whose *value* contained one would be misread. None of the
-/// `hopr_strategy_pix_*` labels do — they are enum-like outcome names.
-fn label_value<'a>(labels: &'a str, name: &str) -> Option<&'a str> {
+/// `hopr_strategy_pix_*` labels do — they are enum-like outcome names, and neither do the
+/// `hopr_pix_*` ones [`crate::pix_exit`] reads through this.
+pub(crate) fn label_value<'a>(labels: &'a str, name: &str) -> Option<&'a str> {
     labels.split(',').find_map(|pair| {
         let (key, value) = pair.split_once('=')?;
         (key.trim() == name).then_some(value.trim().trim_matches('"'))

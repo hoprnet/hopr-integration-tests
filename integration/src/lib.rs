@@ -25,6 +25,11 @@ pub mod origination;
 // whole-multiple reconciliation — out of the default `cargo test --lib` that CI runs. Only the
 // parts naming edgli's PIX types are `#[cfg(feature = "pix")]`.
 pub mod pix;
+// Ungated for the same reason `pix` is, and with more at stake: this is the reader that tells a
+// parked egress gate apart from a starved one, and its subtlety is all in the parsing — cumulative
+// histogram buckets, a numeric `le`, and absent-versus-zero on a label that only exists once the
+// gate has failed. Those tests belong in the default `cargo test --lib`.
+pub mod pix_exit;
 pub mod pump;
 pub mod relayers;
 pub mod session_metrics;
