@@ -119,6 +119,8 @@ exit-origination: build build-chain
     set -euo pipefail
     export SCENARIOS=exit_should_keep_originating_when_a_return_path_becomes_unresolvable
     export TEST_TARGET=exit_origination
+    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
+
 # End-to-end PIX with edgli as the paying entry (binary chain; manual, NOT run in CI).
 # Builds hoprd from HOPRD_SRC (default ../hoprd) because the nix flake has no PIX binary.
 # See integration/tests/pix.rs. Optional args = test-name filters.

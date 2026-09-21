@@ -68,7 +68,7 @@ impl ExtraStrategies {
     }
 }
 
-/// Response buffer a PIX Session provisions, in bytes. See [`IntegrationEnv::open_pix_session`] —
+/// Response buffer a PIX Session provisions, in bytes. See `IntegrationEnv::open_pix_session` —
 /// this is a share-delivery pipeline depth, not a throughput knob, and small is the point.
 #[cfg(feature = "pix")]
 const PIX_RESPONSE_BUFFER_BYTES: u64 = 16_000;
@@ -304,6 +304,12 @@ impl IntegrationEnv {
         forward_hops: usize,
         return_hops: usize,
     ) -> anyhow::Result<(HoprSession, Address)> {
+        // A cluster brought up for PIX wants the PIX Session config, and a scenario should not
+        // have to know that: `setup_pix` already said so once.
+        #[cfg(feature = "pix")]
+        if cluster::pix_enabled() {
+            return self.open_pix_session(forward_hops, return_hops).await;
+        }
         self.open_unreliable_session_paths_with(forward_hops, return_hops, true)
             .await
     }
@@ -369,6 +375,9 @@ impl IntegrationEnv {
 
     /// Open a PIX Session: unreliable, opted into PIX, and tuned so SSA shares actually flow.
     ///
+    /// Reached through [`Self::open_unreliable_session_paths`] on a cluster brought up by
+    /// [`Self::setup_pix`], not called directly.
+    ///
     /// Two departures from [`Self::open_unreliable_session_paths`], both required rather than
     /// preferred.
     ///
@@ -391,7 +400,7 @@ impl IntegrationEnv {
     /// relayer's acknowledgement, so a zero-hop path has nothing to derive it from and the Session
     /// is refused outright.
     #[cfg(feature = "pix")]
-    pub async fn open_pix_session(
+    async fn open_pix_session(
         &self,
         forward_hops: usize,
         return_hops: usize,

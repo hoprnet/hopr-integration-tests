@@ -251,7 +251,7 @@ async fn edgli_entry_deposits_should_be_swept_into_the_exit_safe() -> anyhow::Re
     );
 
     let env = IntegrationEnv::setup_pix(budget).await?;
-    let (session, exit_addr) = env.open_pix_session(HOPS, HOPS).await?;
+    let (session, exit_addr) = env.open_unreliable_session_paths(HOPS, HOPS).await?;
     let exit = node_for(&env, exit_addr)?;
     tracing::info!(exit = %exit_addr, elapsed = ?t0.elapsed(), "PIX session open");
 
@@ -506,7 +506,7 @@ async fn a_session_should_close_when_the_entry_can_no_longer_deposit() -> anyhow
     );
 
     let env = IntegrationEnv::setup_pix(budget).await?;
-    let (session, exit_addr) = env.open_pix_session(HOPS, HOPS).await?;
+    let (session, exit_addr) = env.open_unreliable_session_paths(HOPS, HOPS).await?;
     let exit = node_for(&env, exit_addr)?;
 
     let exit_before = pix::node_balances(&exit).await?;
