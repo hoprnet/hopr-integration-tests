@@ -481,6 +481,18 @@ impl IntegrationEnv {
     }
 }
 
+/// A line difference: edge-client dropped `BlokliEndpoint::from_optional_url` on v5, where the
+/// constructor takes an already-parsed `Url` and cannot fall back to the production endpoint.
+#[cfg(feature = "v5")]
+fn blokli_endpoint(url: &str) -> anyhow::Result<BlokliEndpoint> {
+    Ok(BlokliEndpoint::new(url.parse()?))
+}
+
+#[cfg(not(feature = "v5"))]
+fn blokli_endpoint(url: &str) -> anyhow::Result<BlokliEndpoint> {
+    Ok(BlokliEndpoint::from_optional_url(Some(url))?)
+}
+
 /// Boot Edgli on `extra`, connect to peers, start the channel-lifecycle strategy, and
 /// wait until at least one outgoing channel is open. Shared by the local and Rotsee
 /// setups. `target_channels` is how many outgoing channels the strategy aims to open to
@@ -504,7 +516,7 @@ async fn boot_edgli(
     let edgli = Edgli::new(
         edgli_config(&extra.safe_address, &extra.module_address, tuning),
         hopr_keys,
-        BlokliEndpoint::from_optional_url(Some(blokli_url))?,
+        blokli_endpoint(blokli_url)?,
         Some(tuning.connector),
         tuning.probe_local,
         |s: EdgliInitState| tracing::info!(?s, "edgli init"),

@@ -15,10 +15,11 @@ edgli = { git = "https://github.com/hoprnet/edge-client", branch = "main", defau
   "blokli",
 ] }
 
-# Here only for hopr-lib's `telemetry`. MUST name the rev edgli resolves or the lock carries two
-# hopr-libs; run.sh mirrors edge-client's pin over this and fails if two copies survive. A `rev`
-# not a branch: hoprnet publishes neither crate, so consumers pin a master rev by hand.
-hopr-lib = { git = "https://github.com/hoprnet/hoprnet", rev = "85e698a726710e205e8f76f4df7ad52debd2ff86", default-features = false, features = [
+# Here only for hopr-lib's `telemetry`. MUST name what edgli names or the lock carries two
+# hopr-libs; run.sh mirrors edge-client's pin over this and fails if two copies survive. Mirrors
+# edge-client's own `branch = "master"` — a `rev` here goes stale the moment master moves, and
+# run.sh then rewrites it anyway.
+hopr-lib = { git = "https://github.com/hoprnet/hoprnet", branch = "master", default-features = false, features = [
   "telemetry",
 ] }
 
