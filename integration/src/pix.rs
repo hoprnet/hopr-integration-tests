@@ -81,7 +81,7 @@ pub const SPEND_WINDOW: std::time::Duration = std::time::Duration::from_secs(24 
 /// The generator dimensions this test runs with, as edgli's `protocol.pix`.
 ///
 /// `additional_shares` is `Some` deliberately — see [`PIX_ADDITIONAL_SHARES`].
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn dimensions() -> edgli::PixGlobalConfig {
     edgli::PixGlobalConfig {
         num_ssa_parts: PIX_POLYS,
@@ -109,7 +109,7 @@ pub fn dimensions() -> edgli::PixGlobalConfig {
 /// channel stakes, and a reserve is how a production node protects them — but here the budget is
 /// already well under what the Safe holds, and a second floor would just be a second thing that
 /// could refuse a deposit for a reason no assertion names.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn entry_config(budget: HoprBalance) -> anyhow::Result<edgli::PixEntryConfig> {
     Ok(edgli::PixEntryConfig {
         strategy: edgli::PixEntryStrategy {
@@ -131,7 +131,7 @@ pub fn entry_config(budget: HoprBalance) -> anyhow::Result<edgli::PixEntryConfig
 /// Delegates to edgli rather than recomputing `polys × shares × PAYLOAD_SIZE` here. The Exit
 /// derives the price it expects from the *announced* `PixParams`, so a second implementation of
 /// the same product is a second thing that can disagree with it.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn quota_per_ssa() -> anyhow::Result<u64> {
     let cfg = edgli::hopr_lib::config::HoprLibConfig {
         protocol: edgli::hopr_lib::exports::transport::HoprProtocolConfig {
@@ -144,7 +144,7 @@ pub fn quota_per_ssa() -> anyhow::Result<u64> {
 }
 
 /// wxHOPR one completed SSA cycle costs the entry.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn per_cycle() -> anyhow::Result<HoprBalance> {
     let price: HoprBalance = PRICE_PER_BYTE.parse().context("PRICE_PER_BYTE")?;
     Ok(price * quota_per_ssa()?)
@@ -655,7 +655,7 @@ hopr_packets_count{type="forwarded"} 99999
 
     /// The surplus is emitted every cycle whether or not a share is lost, so it is billed. Pricing
     /// the threshold alone would underpay by a fifth of the traffic at the shipped factor.
-    #[cfg(feature = "pix")]
+    #[cfg(feature = "v5")]
     #[test]
     fn the_quota_should_bill_the_surplus() -> anyhow::Result<()> {
         let with_surplus = quota_per_ssa()?;
@@ -680,7 +680,7 @@ hopr_packets_count{type="forwarded"} 99999
 
     /// The dimensions have to sit inside the Exit's `--enable-pix` window, or every Session is
     /// refused with `UnacceptablePixParams` before a byte moves.
-    #[cfg(feature = "pix")]
+    #[cfg(feature = "v5")]
     #[test]
     fn the_quota_should_fall_inside_the_localcluster_window() -> anyhow::Result<()> {
         // `identity::PixSettings::default()` in hoprd-localcluster.

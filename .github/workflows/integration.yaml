@@ -1,8 +1,7 @@
 name: Integration throughput test
 # Runs the 0-hop + 1-hop throughput test (full stack). Triggered by:
-#   * hoprd merging to its v4 line, blokli merging to release/0.13, or edge-client
-#     merging to main — and by a `run-integration` label on a PR in any of them
-#     (all via workflow_dispatch / repository_dispatch from those repos),
+#   * hoprd, blokli or edge-client merging to the branch the chosen line names (via
+#     workflow_dispatch / repository_dispatch from those repos),
 #   * a nightly schedule, which is the ONLY coverage the v4 release lines get: a
 #     merge queue can only be attached to a repository's default branch, so
 #     hoprd/edge-client/blokli cannot gate merges into their `release/*` branches,
@@ -10,11 +9,11 @@ name: Integration throughput test
 #   * the MERGE QUEUE for this repo's own `main` — so a change here cannot land
 #     without the test passing, whether or not anyone remembered the label,
 #   * a hopr-integration-tests PR labelled `run-integration` (to run it before queueing).
-# Each triggering project supplies its own rev; the other two use the defaults in
-# scripts/integration/run.sh.
 #
-# One release line per run (see run.sh for the branch table). A dispatch picks its line;
-# runs that gate THIS repo fan out over both, since the test bodies are shared source.
+# One release line per run; README has the branch table. The dispatching project supplies its
+# rev, everything else resolves to the head of its branch on that line. A dispatch picks the
+# line; runs that gate THIS repo fan out over both through `strategy.matrix.line` below, since
+# the test bodies are shared source.
 on:
   repository_dispatch:
     types: [integration]

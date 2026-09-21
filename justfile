@@ -152,7 +152,7 @@ pix *scenarios: build-chain
     # a fresh chain, and the two here want different entry deposit budgets.
     SCENARIOS='{{scenarios}}'
     [ -n "${SCENARIOS}" ] || SCENARIOS='edgli_entry_deposits_should_be_swept_into_the_exit_safe a_session_should_close_when_the_entry_can_no_longer_deposit'
-    export SCENARIOS TEST_TARGET=pix CARGO_FEATURES='--features pix'
+    export SCENARIOS TEST_TARGET=pix
     # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh

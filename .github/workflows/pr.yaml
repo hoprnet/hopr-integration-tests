@@ -7,7 +7,7 @@ name: PR
 # integration.yaml. See runner/README.md.
 #
 # Both jobs fan out over the two release lines: shared source, two dependency sets
-# (`Cargo.toml` = v4, `Cargo.v5.toml` = v5), and v5 is where `--features pix` is checked.
+# (`Cargo.toml` = v4, `Cargo.v5.toml` = v5), and v5 is the line carrying PIX.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -91,8 +91,8 @@ jobs:
           cp integration/Cargo.v5.toml integration/Cargo.toml
           cp integration/Cargo.v5.lock integration/Cargo.lock
       # `--all-features` means "everything this line declares": on v4 that is `prof`, on v5 it
-      # also picks up `v5` and `pix`. Revisit if a mutually exclusive feature is ever added —
-      # edgli's `pix-curvy` is one, so do not forward it alongside `pix-test`.
+      # also picks up `v5`, which carries PIX. Revisit if a mutually exclusive feature is ever
+      # added — edgli's `pix-curvy` is one, so do not forward it alongside `pix-test`.
       - name: Format + clippy
         run: |
           nix develop github:hoprnet/hoprnet --command bash -c '

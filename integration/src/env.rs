@@ -45,14 +45,14 @@ fn edge_p2p_port() -> u16 {
 struct ExtraStrategies {
     /// Entry-side PIX settlement. `None` leaves the node unable to pay, which is a legitimate
     /// configuration — it just cannot hold a PIX Session open.
-    #[cfg(feature = "pix")]
+    #[cfg(feature = "v5")]
     pix: Option<edgli::PixEntryConfig>,
 }
 
 impl ExtraStrategies {
     /// Append whatever was requested to the strategy list.
     fn apply(self, cfg: &mut edgli::strategy::MultiStrategyConfig) {
-        #[cfg(feature = "pix")]
+        #[cfg(feature = "v5")]
         if let Some(pix) = self.pix {
             tracing::info!(
                 price_per_byte = %pix.strategy.price_per_byte,
@@ -63,20 +63,20 @@ impl ExtraStrategies {
         }
         // With every optional strategy compiled out there is nothing to append, and the argument
         // would read as unused.
-        #[cfg(not(feature = "pix"))]
+        #[cfg(not(feature = "v5"))]
         let _ = cfg;
     }
 }
 
 /// Response buffer a PIX Session provisions, in bytes. See `IntegrationEnv::open_pix_session` —
 /// this is a share-delivery pipeline depth, not a throughput knob, and small is the point.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 const PIX_RESPONSE_BUFFER_BYTES: u64 = 16_000;
 /// Ceiling on artificial SURB generation for a PIX Session, in bits per second.
 ///
 /// Generous on purpose: with a buffer that small the balancer has to refill promptly, and this
 /// caps the rate rather than the depth.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 const PIX_MAX_SURB_UPSTREAM_BITS: u64 = 20_000_000;
 
 const PEER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -185,7 +185,7 @@ impl IntegrationEnv {
     /// arrange for it to run dry without also deciding what the stakes leave behind. See
     /// [`crate::pix::entry_config`] for how a scenario picks it, and [`crate::pix`] for why
     /// nothing here funds the entry any more.
-    #[cfg(feature = "pix")]
+    #[cfg(feature = "v5")]
     pub async fn setup_pix(budget: crate::HoprBalance) -> anyhow::Result<Self> {
         cluster::request_pix();
         let cluster = cluster::bring_up().await?;
@@ -306,7 +306,7 @@ impl IntegrationEnv {
     ) -> anyhow::Result<(HoprSession, Address)> {
         // A cluster brought up for PIX wants the PIX Session config, and a scenario should not
         // have to know that: `setup_pix` already said so once.
-        #[cfg(feature = "pix")]
+        #[cfg(feature = "v5")]
         if cluster::pix_enabled() {
             return self.open_pix_session(forward_hops, return_hops).await;
         }
@@ -399,7 +399,7 @@ impl IntegrationEnv {
     /// Both hop counts must be at least 1. The share encryption key is derived from the first
     /// relayer's acknowledgement, so a zero-hop path has nothing to derive it from and the Session
     /// is refused outright.
-    #[cfg(feature = "pix")]
+    #[cfg(feature = "v5")]
     async fn open_pix_session(
         &self,
         forward_hops: usize,
@@ -442,7 +442,6 @@ impl IntegrationEnv {
     /// It is not a PIX-only figure. The channel-lifecycle strategy stakes and tops up from the same
     /// Safe, so read a *decrease* here as an upper bound on PIX spend rather than as a measurement
     /// of it; `pix::PixCounters::deposits` is what counts deposits.
-    #[cfg(feature = "pix")]
     pub async fn entry_safe_balance(&self) -> anyhow::Result<crate::HoprBalance> {
         Ok(self
             .edgli
@@ -611,6 +610,19 @@ fn edgli_config(
             config::{SurbPopOrder, SurbStoreConfig},
         },
     };
+    // Follows the Exit's build, and which hoprd a suite runs is a per-run choice, not a compile
+    // one: hoprd's `From<UserHoprLibConfig>` pins LIFO and a PIX build pins FIFO (hoprd#91) — a
+    // share reaches the Exit only when its SURB is spent, so newest-first leaves the oldest
+    // unspent until the per-pseudonym ring buffer overwrites them. A cluster whose two ends
+    // disagree measures neither order.
+    #[cfg(feature = "v5")]
+    let pop_order = if cluster::pix_enabled() {
+        SurbPopOrder::Fifo
+    } else {
+        SurbPopOrder::Lifo
+    };
+    #[cfg(not(feature = "v5"))]
+    let pop_order = SurbPopOrder::Lifo;
     HoprLibConfig {
         host: HostConfig {
             address: HostType::IPv4("0.0.0.0".to_string()),
@@ -624,17 +636,8 @@ fn edgli_config(
             },
             path_planner: tuning.path_planner,
             packet: HoprPacketPipelineConfig {
-                // Follows the Exit's build rather than the library default: hoprd's `From
-                // <UserHoprLibConfig>` pins LIFO, and a cluster whose two ends disagree measures
-                // neither. A PIX build pins FIFO instead (hoprd#91) — a share reaches the Exit
-                // only when its SURB is spent, so newest-first leaves the oldest unspent until
-                // the per-pseudonym ring buffer overwrites them.
                 surb_store: SurbStoreConfig {
-                    pop_order: if cfg!(feature = "pix") {
-                        SurbPopOrder::Fifo
-                    } else {
-                        SurbPopOrder::Lifo
-                    },
+                    pop_order,
                     // A scenario may shrink the reply-opener cache to bring its overflow into a
                     // CI-length window; otherwise the library default (100 000) stands.
                     max_openers_per_pseudonym: cluster::edgli_max_openers()
@@ -650,7 +653,7 @@ fn edgli_config(
             },
             // edgli derives the quota it announces from these dimensions and nothing else, and the
             // Exit refuses any Session whose quota falls outside its `quota_range`.
-            #[cfg(feature = "pix")]
+            #[cfg(feature = "v5")]
             pix: crate::pix::dimensions(),
             ..Default::default()
         },

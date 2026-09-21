@@ -130,7 +130,7 @@ pub fn edgli_max_openers() -> Option<usize> {
     REQUESTED_EDGLI_MAX_OPENERS.get().copied()
 }
 
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 static REQUESTED_PIX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Ask for the cluster to be started with PIX enabled, before the first [`bring_up`].
@@ -149,13 +149,13 @@ static REQUESTED_PIX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// only a v5 `hoprd-localcluster` has, so a v4 build should not be able to name it at all.
 ///
 /// First call in a test binary wins.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn request_pix() -> bool {
     *REQUESTED_PIX.get_or_init(|| true)
 }
 
 /// Whether [`request_pix`] was called.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn pix_enabled() -> bool {
     REQUESTED_PIX.get().copied().unwrap_or(false)
 }
@@ -586,7 +586,7 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         "--funding-amount",
         &channel_funding_amount(),
     ]);
-    #[cfg(feature = "pix")]
+    #[cfg(feature = "v5")]
     if pix_enabled() {
         tracing::info!("cluster nodes will be configured for PIX");
         cmd.arg("--enable-pix");

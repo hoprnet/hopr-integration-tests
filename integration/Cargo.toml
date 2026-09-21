@@ -67,10 +67,8 @@ debug-assertions = true
 inherits = "release"
 debug = true
 
-# `v5` and `pix` are not declared on this line, so name them as expected cfgs or `-D warnings`
-# fails on `unexpected_cfgs`. Better than declaring dummy features: `--features pix` now fails
-# with "does not have feature" instead of compiling PIX code against a v4 edgli.
+# `v5` is not declared on this line, so name it as an expected cfg or `-D warnings` fails on
+# `unexpected_cfgs`. Better than declaring a dummy feature: `--features v5` now fails with
+# "does not have feature" instead of compiling v5 code against a v4 edgli.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = [
-  'cfg(feature, values("v5", "pix"))',
-] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("v5"))'] }

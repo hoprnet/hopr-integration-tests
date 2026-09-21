@@ -331,7 +331,7 @@ run_suite exit_origination exit_should_keep_originating_when_a_return_path_becom
 # Entry-side PIX: v5 only (`edgli/pix-test` has no v4 counterpart). Named explicitly —
 # the two want different entry deposit budgets, and each gets its own chain.
 if [ "${PIX_SUITE}" = "1" ]; then
-  export HOPRD_BIN="${PIX_BIN}" CARGO_FEATURES="--features pix"
+  export HOPRD_BIN="${PIX_BIN}"
   run_suite pix \
     edgli_entry_deposits_should_be_swept_into_the_exit_safe \
     a_session_should_close_when_the_entry_can_no_longer_deposit

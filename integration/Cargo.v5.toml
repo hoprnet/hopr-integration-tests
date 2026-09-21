@@ -55,24 +55,15 @@ console-subscriber = { version = "0.5", optional = true }
 # `RUSTFLAGS="--cfg tokio_unstable --check-cfg cfg(tokio_unstable)"`.
 prof = ["dep:console-subscriber"]
 
-# Entry-side PIX: compiles `src/pix.rs`, the PIX half of `src/env.rs`, and `tests/pix.rs`.
+# The release line AND everything it carries: `v5` marks the whole stack (hoprd main, hoprnet
+# master, edge-client main, blokli 0.14) and gates the code that differs because the APIs differ.
+# PIX is part of that stack, not an option on it — every v5 run has it enabled.
 #
-# Off by default so the CI throughput build does not pull PIX in — it selects a deposit pool three
-# crates away and changes what `HoprPixSpec` resolves to, which is not something the 0-hop/1-hop
-# tests should carry silently.
-#
-# `pix-test` is edge-client's secp256k1 pool: the only implemented one, and visible on-chain. Its
-# sibling `pix-curvy` is the anonymous pool and is a stub whose methods panic on the first deposit,
-# so it is not an alternative here.
-# The release line, not a capability: `v5` marks the whole stack (hoprd main, hoprnet master,
-# edge-client main, blokli 0.14) and gates code that differs because the APIs differ. On by
-# default here — this manifest IS the v5 line.
+# `pix-test` is edge-client's secp256k1 deposit pool: the only implemented one, and visible
+# on-chain. Its sibling `pix-curvy` is the anonymous pool, a stub whose methods panic on the first
+# deposit, so it is not an alternative here and must never be forwarded alongside this one.
 default = ["v5"]
-v5 = []
-
-# Entry-side PIX: one feature OF the v5 stack, not a synonym for it. Implies `v5` because
-# `edgli/pix-test` exists nowhere else.
-pix = ["v5", "edgli/pix-test"]
+v5 = ["edgli/pix-test"]
 
 [dev-dependencies]
 test-log = { version = "0.2", features = ["trace"] }
@@ -96,11 +87,3 @@ debug-assertions = true
 [profile.flamegraph]
 inherits = "release"
 debug = true
-
-# `v5` and `pix` are not declared on this line, so name them as expected cfgs or `-D warnings`
-# fails on `unexpected_cfgs`. Better than declaring dummy features: `--features pix` now fails
-# with "does not have feature" instead of compiling PIX code against a v4 edgli.
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = [
-  'cfg(feature, values("v5", "pix"))',
-] }

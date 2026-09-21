@@ -22,8 +22,8 @@ pub mod env;
 pub mod origination;
 // Ungated on purpose, though only `tests/pix.rs` drives it: the balance and counter readers are
 // plain parsers, and gating them would keep the subtlest logic in this crate — absent-vs-zero,
-// whole-multiple reconciliation — out of the default `cargo test --lib` that CI runs. Only the
-// parts naming edgli's PIX types are `#[cfg(feature = "pix")]`.
+// whole-multiple reconciliation — out of the v4 `cargo test --lib` that CI runs. Only the parts
+// naming edgli's PIX types are `#[cfg(feature = "v5")]`.
 pub mod pix;
 pub mod pump;
 pub mod relayers;
