@@ -110,7 +110,6 @@ jobs:
     strategy:
       # A red line cancels the other: the first failure is the one to read.
       fail-fast: true
-      # The runner executes one job at a time anyway.
       max-parallel: 1
       matrix:
         line: [v4, v5]

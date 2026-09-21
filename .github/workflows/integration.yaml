@@ -83,6 +83,10 @@ jobs:
     # carries the line, so required checks must name "Integration throughput (v4|v5)".
     strategy:
       fail-fast: false
+      # One line at a time. The box hosts several runner instances sharing these labels, so
+      # without this both legs start at once and collide on anvil 8545, bloklid 8080, node ports
+      # 13000/19000 and /tmp/hopr-chain — which the hygiene steps also delete under each other.
+      max-parallel: 1
       matrix:
         line: >-
           ${{ fromJSON((github.event_name == 'merge_group' || github.event_name == 'pull_request')
