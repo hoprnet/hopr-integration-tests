@@ -657,6 +657,7 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
             phase: Some(SURVIVAL_PHASE),
             idle_budget: Some(SURVIVAL_IDLE_BUDGET),
             tail_grace: Some(SURVIVAL_TAIL_GRACE),
+            ..PumpOpts::default()
         },
     )
     .await?;
@@ -832,6 +833,7 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
             phase: Some(OUTAGE_PHASE),
             idle_budget: Some(OUTAGE_DURATION),
             tail_grace: Some(OUTAGE_DURATION),
+            ..PumpOpts::default()
         },
     )
     .await?;
@@ -885,6 +887,7 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
             phase: Some(SURVIVAL_PHASE),
             idle_budget: Some(SURVIVAL_IDLE_BUDGET),
             tail_grace: Some(SURVIVAL_TAIL_GRACE),
+            ..PumpOpts::default()
         },
     )
     .await?;

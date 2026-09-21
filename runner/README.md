@@ -199,19 +199,25 @@ There are no gate variables — thresholds are hardcoded in
 
 ## hoprd v4 / v5 split
 
-hoprd `main` is **v5**; this test targets **v4**. The integration crate pins
-`hopr-lib` to hoprnet `release/4.0` (which edge-client `main` also resolves), so
-a v5 hoprd binary would be paired with a v4 library set. `run.sh` therefore
-builds from `HOPRD_LINE` (`release/4.1` — the only v4 branch hoprd has; `4.0`
-exists as a hoprnet branch and as hoprd tags `v4.0.x`, not as a hoprd branch) and
-**rejects** a dispatched hoprd rev not contained in that line, before spending a
-build on it. Bypass with `HOPRD_SKIP_LINE_CHECK=1`.
+Both lines are supported, one per run: `LINE=v4` (default) builds hoprd from
+`release/4.1` against edge-client `release/4.1` and blokli `release/0.13`; `LINE=v5`
+builds from `main` against edge-client `main` and blokli `v0.14.0`, and adds the PIX
+suite. `release/4.1` is the only v4 branch hoprd has — `4.0` exists as a hoprnet branch
+and as hoprd tags `v4.0.x`, not as a hoprd branch. The dependency sets live side by side
+in the crate (`Cargo.toml` = v4, `Cargo.v5.toml` = v5) and `run.sh` swaps the v5 one in
+for the run; the test bodies are shared source.
 
-**hoprd side:** its merge workflow must only dispatch from `release/4.1`. A
-dispatch fired on a `main` merge now fails fast with
-`hoprd ref '<sha>' is not contained in 'release/4.1'` instead of running a
-mismatched stack. When v5 gets its own line, run this workflow twice with
-different `HOPRD_LINE` values rather than loosening the check.
+`run.sh` **rejects** a dispatched hoprd rev not contained in `HOPRD_LINE`, before
+spending a build on it (bypass: `HOPRD_SKIP_LINE_CHECK=1`). Mixing the lines is not a
+matter of taste: blokli `release/0.13` cannot bootstrap a v5 localcluster at all
+(`service_registry` first appears in v0.14.0), and edge-client `main` repinned hopr-lib
+to hoprnet `master` in #151.
+
+**Upstream side:** each repo dispatches with the line matching the branch it merged —
+`client_payload[line]=v5` from a `main` merge, omitted (v4) from a `release/*` one. A v4
+gate that fires on a `main` merge fails fast with
+`hoprd ref '<sha>' is not on the 'release/4.1' line` instead of running a mismatched
+stack.
 
 ### How the upstream repos call in
 
@@ -234,11 +240,17 @@ dispatch inputs, and "newest run" is a race because three repos dispatch here an
 `integration` concurrency group makes runs queue rather than start. The caller passes a
 unique marker, `run-name` puts it in the run title, and the caller polls for it.
 
-**hoprd's gate is scoped to the v4 line on purpose.** hopr-integration-tests only supports v4
-(its crate pins hoprnet `release/4.0`) and rejects a rev off that line, so pointing
-the gate at `main` (v5) would fail every merge. Keying on
-`vars.MAINTENANCE_RELEASE_BRANCH` rather than a literal branch means a bump to
-`release/4.2` needs no workflow edit.
+**Every dispatch names its line, and the default is v4.** A caller adds
+`client_payload[line]=v5` (or `-f line=v5` for `workflow_dispatch`) when the rev it is
+gating is on the v5 side; omitting it asks for v4. `run.sh` then rejects a rev that is
+not contained in that line's hoprd branch, so a v5 sha dispatched without `line=v5`
+fails in the first minute with the reason rather than after a 40-minute build.
+
+**hoprd's existing gate is scoped to the v4 line on purpose** — it keys on
+`vars.MAINTENANCE_RELEASE_BRANCH` rather than a literal branch, so a bump to
+`release/4.2` needs no workflow edit, and it sends no `line`, which is v4. Gating v5 is
+a merge queue on hoprd `main` (a queue can only attach to a repository's default
+branch), and that gate has to send `line=v5`.
 
 **A PR head is `ahead` of the line, not contained in it.** The containment check in
 `run.sh` accepts `identical`/`behind`/`ahead` and rejects only `diverged` — without
@@ -261,8 +273,12 @@ behind an upstream gate run, so keep the queue's max wait comfortably above the
 
 **hopr-integration-tests has no rulesets at all** as of 2026-09-04 — `main` is unprotected, so
 this trigger fires but nothing enforces it. To make it a real gate, create a ruleset
-for `main` with a merge queue rule and `Integration throughput` among its required
-status checks.
+for `main` with a merge queue rule and both `Integration throughput (v4)` and
+`Integration throughput (v5)` among its required status checks. The line is part of the
+job name because a queue candidate runs one job per line; `Integration throughput`
+without a suffix matches neither. Same for `Format + clippy (v4|v5)` and
+`Unit tests (v4|v5)`. Do **not** require `Validate title` — it is PR-only and cannot
+report on a merge group.
 
 ### Prerequisites in the upstream repos
 
@@ -305,18 +321,23 @@ in-flight run rather than cancelling it.
 
 ### What the gate runs
 
-Every suite a local cluster can drive, on every run — 5 scenarios, each with its own
-fresh chain, ~28 min of test time (~45 min including build):
+Every scenario whose verdict is trustworthy, on every run — 3 on v4, 5 on v5, each with
+its own fresh chain, ~17 min of test time on v4 (~35 min including build):
 
-| Suite              | Scenarios                                 |
-| ------------------ | ----------------------------------------- |
-| `integration`      | `zero_hop`, `one_hop`                     |
-| `return_path`      | return-relayer loss, forward-relayer loss |
-| `exit_origination` | the unresolvable-return-path repro        |
+| Suite              | Scenarios                                  | Line |
+| ------------------ | ------------------------------------------ | ---- |
+| `integration`      | `zero_hop`, `one_hop`                      | both |
+| `exit_origination` | the unresolvable-return-path repro         | both |
+| `pix`              | deposits swept; session closes when unpaid  | v5   |
 
-Three `return_path` scenarios are held out as flaky — `spread` (asserts a ratio on a
-random draw) and the two survival scenarios that miss their recovery deadline on some
-machines but not others. Run them by hand with `just return-path <name>`.
+**`return_path` is held out entirely.** Every scenario in it asserts an arrival ratio
+over a relayer draw the test does not force, so the verdict tracks the draw rather than
+the code: `spread` asserts the histogram is spread, and the survival scenarios assert
+≥83% arrival after killing one of three return relayers — reachable only if the victim
+carried roughly its share. A 2026-09-08 v4 run failed at 67.9% with the victim holding
+53% of replies (45/32/23), which is the mechanism rather than a slow machine. Fixing it
+means scaling the gate by the victim's measured share, or forcing the spread before the
+kill. Run them by hand with `just return-path <name>`.
 
 `rotsee` is excluded (needs a funded Gnosis identity and a reachable public exit) and
 so is `profiling` (emits traces, not a verdict, and needs `--features prof` +
@@ -331,7 +352,7 @@ A red run posts to Zulip (stream **HOPRd**, topic **integration**) naming the
 trigger and the three versions that actually ran, e.g.
 
 ```text
-**Integration throughput test FAILED** — PR [#22](…) (`em/hookup-ci`)
+**Integration throughput test FAILED** (v4) — PR [#22](…) (`em/hookup-ci`)
 * hoprd `release/4.1`
 * edge-client `main (58564a22)`
 * blokli `release/0.13`
@@ -347,16 +368,17 @@ stack.
 
 ## Triggering / validating
 
-- **On a hopr-integration-tests PR:** add the `run-integration` label → the test runs against
-  the hoprd v4 line, edge-client main, and blokli `release/0.13`.
+- **On a hopr-integration-tests PR:** add the `run-integration` label → the test runs on
+  **both** lines, one job each, back to back on the single runner.
 - **Manual:** `gh workflow run integration.yaml -R hoprnet/hopr-integration-tests`
   then `gh run watch -R hoprnet/hopr-integration-tests --exit-status`.
 - **Simulate a merge trigger:**
   ```bash
   gh api repos/hoprnet/hopr-integration-tests/dispatches \
     -f event_type=integration \
+    -f 'client_payload[line]=v4' \
     -f 'client_payload[project]=edge-client' \
-    -f 'client_payload[rev]=<edge-client main sha>'
+    -f 'client_payload[rev]=<edge-client release/4.1 sha>'
   ```
 
 Concurrency: a new push to a PR cancels that PR's in-progress run; dispatch/manual
