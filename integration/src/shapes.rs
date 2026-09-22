@@ -347,7 +347,7 @@ pub fn surb_balancer() -> edgli::hopr_lib::exports::transport::SurbBalancerConfi
 /// Must agree with what [`cluster_pix_yaml`] gives the Exit: edgli derives the quota it announces
 /// from these and nothing else, and the Exit refuses any Session whose quota falls outside the
 /// window that YAML sets. [`install_profile`] is what keeps the two from being set separately.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn entry_dimensions() -> edgli::PixGlobalConfig {
     edgli::PixGlobalConfig {
         num_ssa_parts: PIX_POLYS,
@@ -358,7 +358,7 @@ pub fn entry_dimensions() -> edgli::PixGlobalConfig {
 }
 
 /// wxHOPR one completed cycle costs the Entry at this profile.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn per_cycle() -> anyhow::Result<crate::HoprBalance> {
     let price: crate::HoprBalance = format!("{PRICE_PER_BYTE_WXHOPR:.10} wxHOPR").parse()?;
     Ok(price * QUOTA_PER_SSA)
@@ -371,7 +371,7 @@ pub fn per_cycle() -> anyhow::Result<crate::HoprBalance> {
 /// per-deposit ceiling has to clear a quota 2 500x larger. Sharing one function would mean a
 /// scenario silently taking the demo price against this geometry, which refuses every deposit for
 /// being over `max_ssa_allocation`.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn entry_config() -> anyhow::Result<edgli::PixEntryConfig> {
     let per_cycle = per_cycle()?;
     Ok(edgli::PixEntryConfig {
@@ -400,7 +400,7 @@ pub fn entry_config() -> anyhow::Result<edgli::PixEntryConfig> {
 /// The Exit's admission window and the Entry's announced geometry are read by different processes
 /// and neither can derive the other, so this is the one call that sets them together. Calling it
 /// is what makes a scenario a *shape* scenario rather than a demo-geometry one.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn install_profile() {
     crate::cluster::request_pix_settings(cluster_pix_yaml());
     crate::pix::request_dimensions(entry_dimensions());

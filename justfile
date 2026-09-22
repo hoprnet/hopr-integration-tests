@@ -191,7 +191,7 @@ pix-shapes *scenarios: build-chain
     # first because a failure in it means none of the shapes can be read.
     SCENARIOS='{{scenarios}}'
     [ -n "${SCENARIOS}" ] || SCENARIOS='the_profile_geometry_completes_a_cycle an_idle_session_completes_its_cycle_on_exit_fill a_browsing_session_sustains_its_cycles a_download_session_sustains_its_cycles an_upload_session_completes_on_fill a_mixed_session_sustains_its_cycles'
-    export SCENARIOS TEST_TARGET=pix_shapes CARGO_FEATURES='--features pix'
+    export SCENARIOS TEST_TARGET=pix_shapes
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
 

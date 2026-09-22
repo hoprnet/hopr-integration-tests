@@ -197,7 +197,7 @@ impl IntegrationEnv {
     /// than the demo's own `max_ssa_allocation`, so every deposit is refused for being over the
     /// ceiling — which reads from the Exit as an entry that never paid. See
     /// [`crate::shapes::entry_config`].
-    #[cfg(feature = "pix")]
+    #[cfg(feature = "v5")]
     pub async fn setup_pix_with(pix: edgli::PixEntryConfig) -> anyhow::Result<Self> {
         cluster::request_pix();
         let cluster = cluster::bring_up().await?;
@@ -448,7 +448,7 @@ impl IntegrationEnv {
     ///   direction — so the shapes that matter most to it, a bulk upload with almost nothing coming
     ///   back, cannot be expressed against a loopback at all. A `UdpStream` target pointed at an
     ///   asymmetric service is how they are.
-    #[cfg(feature = "pix")]
+    #[cfg(feature = "v5")]
     pub async fn open_pix_session_with(
         &self,
         forward_hops: usize,

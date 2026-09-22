@@ -160,6 +160,7 @@ pub fn pix_enabled() -> bool {
     REQUESTED_PIX.get().copied().unwrap_or(false)
 }
 
+#[cfg(feature = "v5")]
 static REQUESTED_PIX_SETTINGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Ask for PIX to be enabled with a *named geometry*, before the first [`bring_up`].
@@ -181,6 +182,7 @@ static REQUESTED_PIX_SETTINGS: std::sync::OnceLock<String> = std::sync::OnceLock
 /// three from one profile.
 ///
 /// First call in a test binary wins.
+#[cfg(feature = "v5")]
 pub fn request_pix_settings(yaml: impl Into<String>) -> &'static str {
     request_pix();
     REQUESTED_PIX_SETTINGS.get_or_init(|| yaml.into())

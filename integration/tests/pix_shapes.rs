@@ -20,7 +20,7 @@
 //! hours rather than minutes. See `docs/pix-traffic-shapes.md` for the measured results and the
 //! configuration they pin.
 
-#![cfg(feature = "pix")]
+#![cfg(feature = "v5")]
 
 use std::time::Duration;
 

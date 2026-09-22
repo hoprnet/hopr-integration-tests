@@ -30,7 +30,7 @@ pub mod relayers;
 pub mod session_metrics;
 // Ungated for the same reason `pix` is: the profile is arithmetic over constants, and its
 // compile-time guards and unit tests are what catch a geometry edited without re-deriving what
-// depends on it. Those should run in the default `cargo test --lib`, not only under `--features pix`.
+// depends on it. Those should run in the default `cargo test --lib`, on both lines.
 pub mod shapes;
 pub mod udp_service;
 

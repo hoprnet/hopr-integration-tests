@@ -78,7 +78,7 @@ pub const MAX_DEPOSIT_TRACKING_TIME: std::time::Duration = std::time::Duration::
 /// is reached would never end.
 pub const SPEND_WINDOW: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 static REQUESTED_DIMENSIONS: std::sync::OnceLock<edgli::PixGlobalConfig> =
     std::sync::OnceLock::new();
 
@@ -93,7 +93,7 @@ static REQUESTED_DIMENSIONS: std::sync::OnceLock<edgli::PixGlobalConfig> =
 /// supported way to move both at once.
 ///
 /// First call in a test binary wins.
-#[cfg(feature = "pix")]
+#[cfg(feature = "v5")]
 pub fn request_dimensions(cfg: edgli::PixGlobalConfig) -> &'static edgli::PixGlobalConfig {
     REQUESTED_DIMENSIONS.get_or_init(|| cfg)
 }
