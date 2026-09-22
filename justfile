@@ -105,11 +105,8 @@ integration-binchain *scenarios: build build-chain
 return-path *scenarios: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
-    # Named explicitly rather than left to the default filter: run-binchain.sh gives each
-    # scenario a fresh chain, and the kill scenario leaves a dead node behind it.
-    SCENARIOS='{{scenarios}}'
-    [ -n "${SCENARIOS}" ] || SCENARIOS='return_paths_should_spread_across_distinct_relayers session_should_survive_return_relayer_loss session_should_survive_forward_relayer_loss session_should_survive_common_mode_return_outage a_symmetric_session_should_survive_relayer_loss'
-    export SCENARIOS TEST_TARGET=return_path
+    # Empty = every scenario in the target, each on its own fresh chain.
+    export SCENARIOS='{{scenarios}}' TEST_TARGET=return_path
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
 
 # Exit-origination repro (binary chain): does the exit keep originating packets when
@@ -117,7 +114,6 @@ return-path *scenarios: build build-chain
 exit-origination: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
-    export SCENARIOS=exit_should_keep_originating_when_a_return_path_becomes_unresolvable
     export TEST_TARGET=exit_origination
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
 
@@ -148,11 +144,7 @@ pix *scenarios: build-chain
       exit 1
     }
 
-    # Named explicitly rather than left to the default filter: run-binchain.sh gives each scenario
-    # a fresh chain, and the two here want different entry deposit budgets.
-    SCENARIOS='{{scenarios}}'
-    [ -n "${SCENARIOS}" ] || SCENARIOS='edgli_entry_deposits_should_be_swept_into_the_exit_safe a_session_should_close_when_the_entry_can_no_longer_deposit'
-    export SCENARIOS TEST_TARGET=pix
+    export SCENARIOS='{{scenarios}}' TEST_TARGET=pix
     # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
