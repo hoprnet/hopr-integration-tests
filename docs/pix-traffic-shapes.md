@@ -21,7 +21,7 @@ All three sides of a run must still be on one hoprnet rev — **`11b5f1b6`** as 
 A skew is not subtle but it is silent from here: two sources put two `hopr-lib`s in the lock, the
 entry runs one and registers its metrics in the other, and every counter reads zero.
 
-**Agreeing on the commit is not enough — the git *reference* has to match too.** edge-client#170
+**Agreeing on the commit is not enough — the git _reference_ has to match too.** edge-client#170
 moved its own pin from a `rev` to `branch = "master"`, and naming a `rev` here that resolves to the
 identical commit still splits the graph. Measured on this manifest:
 
@@ -54,18 +54,18 @@ quota = 81 920 x 1038                            = 85 032 960 B (81.1 MiB)
 **Not the deployed geometry, and deliberately so.** What governs PIX is ratios, not rates: the
 client's SURB buffer is `16 x R` and a cycle is `cycle_seconds x R`, so `buffer / E = 16 /
 cycle_seconds` and the packet rate cancels. A buffer that is a realistic fraction of a cycle
-therefore depends on the cycle *length* alone, and a ~4.5 min cycle reproduces the deployed 5.2 %
+therefore depends on the cycle _length_ alone, and a ~4.5 min cycle reproduces the deployed 5.2 %
 at a rate a 1-hop local cluster carries comfortably. The deployed 4608 x 80 at 10 Mbps would be
 10-15 min per cycle and put a full pass out of reach.
 
-| quantity | value | deployed |
-| --- | --- | --- |
-| SURB buffer | 4 800 SURBs (5.9 % of `E`) | 19 264 (5.2 %) |
-| free credit (`parts x surplus`) | 16 384 | 73 728 |
-| `max_served_without_progress` | 2048 (credit covers the queue) | 2048 |
-| `max_recovery_time` | **12 min** | 2 h |
-| fill rate an idle cycle needs | 120 packets/s | 72 packets/s |
-| `fill.max_rate` | 250 | 250 |
+| quantity                        | value                          | deployed       |
+| ------------------------------- | ------------------------------ | -------------- |
+| SURB buffer                     | 4 800 SURBs (5.9 % of `E`)     | 19 264 (5.2 %) |
+| free credit (`parts x surplus`) | 16 384                         | 73 728         |
+| `max_served_without_progress`   | 2048 (credit covers the queue) | 2048           |
+| `max_recovery_time`             | **12 min**                     | 2 h            |
+| fill rate an idle cycle needs   | 120 packets/s                  | 72 packets/s   |
+| `fill.max_rate`                 | 250                            | 250            |
 
 `max_recovery_time` is the one deliberate departure. It is no longer only a backstop: since the
 Exit fills a cycle the application left unfinished, it is also the idle tariff, and an idle
@@ -78,18 +78,18 @@ the floor `validate_incoming_session_pix_config` enforces (`quota_range_max / 18
 Measured on a 3-node local cluster, 1 hop, binary chain.
 
 Counters are the Exit's `hopr_strategy_pix_*` delta over the scenario; **paid** is the rise in the
-Exit's *Safe balance*, read from the chain. Those two columns were read at hoprnet **`57b5e679`**.
+Exit's _Safe balance_, read from the chain. Those two columns were read at hoprnet **`57b5e679`**.
 The **wall** column carries that run and the re-run at **`11b5f1b6`**. All six pass at both revs,
 under the same assertions, payment floor included.
 
-| shape | traffic offered | recovered | swept | deposits | paid (wxHOPR) | wall `57b5e679` | wall `11b5f1b6` |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| **geometry spike** | 88 MB at 300 pkt/s, loopback | 1 | 1 | 2 | 0.08503296 = **1×** | 593 s | 595 s |
-| **idle** | 25 keep-alives of 32 B, one per 25 s | 1 | 1 | 2 | 0.08503296 = **1×** | 817 s | 795 s |
-| **browsing** | 40 kB bursts every 3 s (~13 kB/s), 540 s | 1 | 1 | 2 | 0.08503296 = **1×** | 745 s | 712 s |
-| **download** | service pushes 2 cycles at 300 pkt/s | 2 | 2 | 3 | 0.17006592 = **2×** | 753 s | 719 s |
-| **upload** | 300 pkt/s into a sink, nothing returns | 1 | 1 | 2 | 0.08503296 = **1×** | 690 s | 690 s |
-| **mixed** | browse 180 s → quiet 120 s → bulk 1 cycle | 2 | 2 | 3 | 0.17006592 = **2×** | 1113 s | 1113 s |
+| shape              | traffic offered                           | recovered | swept | deposits | paid (wxHOPR)       | wall `57b5e679` | wall `11b5f1b6` |
+| ------------------ | ----------------------------------------- | --------- | ----- | -------- | ------------------- | --------------- | --------------- |
+| **geometry spike** | 88 MB at 300 pkt/s, loopback              | 1         | 1     | 2        | 0.08503296 = **1×** | 593 s           | 595 s           |
+| **idle**           | 25 keep-alives of 32 B, one per 25 s      | 1         | 1     | 2        | 0.08503296 = **1×** | 817 s           | 795 s           |
+| **browsing**       | 40 kB bursts every 3 s (~13 kB/s), 540 s  | 1         | 1     | 2        | 0.08503296 = **1×** | 745 s           | 712 s           |
+| **download**       | service pushes 2 cycles at 300 pkt/s      | 2         | 2     | 3        | 0.17006592 = **2×** | 753 s           | 719 s           |
+| **upload**         | 300 pkt/s into a sink, nothing returns    | 1         | 1     | 2        | 0.08503296 = **1×** | 690 s           | 690 s           |
+| **mixed**          | browse 180 s → quiet 120 s → bulk 1 cycle | 2         | 2     | 3        | 0.17006592 = **2×** | 1113 s          | 1113 s          |
 
 Not one scenario recorded a deposit timeout, and none was closed by the supervisor.
 
@@ -110,7 +110,7 @@ this shape and reproducible in kind rather than in schedule:
 ```
 
 No channel closed on chain and the supervisor never intervened — this is the transport, not the
-strategy. The peers came back on their own; what did not come back in time was the *channel graph*,
+strategy. The peers came back on their own; what did not come back in time was the _channel graph_,
 unresolvable for ~100 s after the connections were restored, and the bulk phase's 60 s idle budget
 expires inside that window.
 
@@ -151,7 +151,7 @@ latency, and there is almost none here. **This is the profile's main fidelity li
 
 **Browsing is much closer to idle than to busy.** 40 kB every 3 s is ~13 kB/s, which is ~14 return
 packets/s against the ~114/s a cycle of this geometry needs inside its deadline. So a browsing
-client's cycles are completed by *fill*, not by the browsing. The first version of that scenario
+client's cycles are completed by _fill_, not by the browsing. The first version of that scenario
 asked for two cycles' worth of packets at that rate — a payload nearly four hours long — and
 stopped 4 % in.
 
@@ -186,7 +186,7 @@ more probing traffic — but an idle VPN client is exactly the case that produce
 interaction between a quiet Session and quality-scored channel closure is real.
 
 **The echo pump cannot express an asymmetric shape.** `pump_halves`' reader decides completion
-against the payload that was *sent*, because every other scenario here targets the Exit's loopback.
+against the payload that was _sent_, because every other scenario here targets the Exit's loopback.
 A download's reply volume is the service's choice, so the pump declared `Complete` after 0.23 s
 against a 491 s push; an upload's is zero, so it would have declared `NeverStarted` at 30 s. Both
 shapes now drive the Session directly.
@@ -207,10 +207,10 @@ expected to be busy. Nothing here measured what an idle Session costs.
 
 - **Transit is a memcpy.** All three nodes are on localhost, so the round trip is sub-millisecond
   and a shallower SURB buffer suffices than a deployment needs. The absolute buffer depth here does
-  not transfer; the *ratio* is what these runs are about. `cluster::request_latency_profile()` can
+  not transfer; the _ratio_ is what these runs are about. `cluster::request_latency_profile()` can
   simulate a WAN RTT and a run that cares should say what it simulated.
 - **One client.** Nothing here measures an Exit serving several Sessions at once, which is where
   `max_live_cycle_bytes` and the uplink start to bind.
 - **The price is scaled.** 1e-9 wxHOPR/B rather than the deployed 5.33e-8, because the cluster
   funds each node's Safe from a fixed pot. Nothing in the protocol reads the absolute figure — both
-  sides check the *product* with the quota — so the exchange measured is the same one.
+  sides check the _product_ with the quota — so the exchange measured is the same one.

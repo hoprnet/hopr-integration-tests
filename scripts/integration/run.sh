@@ -311,7 +311,7 @@ run_suite() { # target, then any scenarios to HOLD OUT of it
   local target="$1"
   shift
   echo "═══════ suite: ${target} ═══════"
-  if ! TEST_TARGET="${target}" SCENARIOS_EXCEPT="$*" bash "${BINCHAIN}"; then
+  if ! TEST_TARGET="${target}" SCENARIOS_EXCEPT="$*" SCENARIOS_FIRST="${SCENARIOS_FIRST:-}" bash "${BINCHAIN}"; then
     echo "suite ${target} FAILED" >&2
     suite_rc=1
   fi
@@ -339,10 +339,18 @@ run_suite exit_origination
 if [ "${PIX_SUITE}" = "1" ]; then
   export HOPRD_BIN="${PIX_BIN}"
   run_suite pix
-  # Gated: `pix_shapes` needs a `hoprd-localcluster` carrying `--pix-config`, which hoprd `main`
-  # does not have yet -- its localcluster only takes `--enable-pix`, whose demo geometry is a
-  # 32-packet cycle no traffic shape fits inside. Enable once that seam lands.
-  #   run_suite pix_shapes
+
+  # `pix_shapes` additionally needs a localcluster that takes `--pix-config`: the bare
+  # `--enable-pix` is a 32-packet demo cycle that no traffic shape fits inside. Probed on the
+  # binary, the same way the deposit pool is, rather than assumed from the ref.
+  if grep -qa 'pix-config' "${REPO_ROOT}/result-localcluster/bin/hoprd-localcluster"; then
+    # The spike first -- if the geometry cannot complete one cycle, no shape below can be read.
+    SCENARIOS_FIRST=the_profile_geometry_completes_a_cycle run_suite pix_shapes
+  else
+    echo "::error::the hoprd-localcluster built from '${HOPRD_REF}' has no --pix-config, so the" >&2
+    echo "pix_shapes suite cannot state its geometry. Use a newer hoprd ref." >&2
+    suite_rc=1
+  fi
 fi
 
 exit "${suite_rc}"

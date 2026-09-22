@@ -328,7 +328,7 @@ its own fresh chain, ~17 min of test time on v4 (~35 min including build):
 | ------------------ | ------------------------------------------ | ---- |
 | `integration`      | `zero_hop`, `one_hop`                      | both |
 | `exit_origination` | the unresolvable-return-path repro         | both |
-| `pix`              | deposits swept; session closes when unpaid  | v5   |
+| `pix`              | deposits swept; session closes when unpaid | v5   |
 
 **`return_path` is held out entirely.** Every scenario in it asserts an arrival ratio
 over a relayer draw the test does not force, so the verdict tracks the draw rather than

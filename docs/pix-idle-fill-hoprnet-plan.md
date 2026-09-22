@@ -20,13 +20,13 @@ balancer is off still hits `max_recovery_time` (or `RecoveryIdle`) exactly as to
 
 ### 1.1 Terms
 
-| term | meaning |
-| --- | --- |
-| E | packets one cycle emits, `polys × (threshold + surplus)`; 327 680 at 4096 × 64 + 16 |
-| organic egress | Exit → Entry data packets, the ones that pass the service gate today |
-| fill | Exit-originated keep-alive packets, one SURB and one share each, sent only to advance a cycle |
-| heartbeat | the fill floor while organic egress already covers the need (default one per 60 s) |
-| floor rate | `E / max_recovery_time`, about 46 packets/s at the shipped 2 h deadline and production geometry |
+| term           | meaning                                                                                         |
+| -------------- | ----------------------------------------------------------------------------------------------- |
+| E              | packets one cycle emits, `polys × (threshold + surplus)`; 327 680 at 4096 × 64 + 16             |
+| organic egress | Exit → Entry data packets, the ones that pass the service gate today                            |
+| fill           | Exit-originated keep-alive packets, one SURB and one share each, sent only to advance a cycle   |
+| heartbeat      | the fill floor while organic egress already covers the need (default one per 60 s)              |
+| floor rate     | `E / max_recovery_time`, about 46 packets/s at the shipped 2 h deadline and production geometry |
 
 ### 1.2 Rate law
 
@@ -63,13 +63,13 @@ the action channel is not flooded during steady state.
 
 ### 1.3 Where each piece lives
 
-| piece | crate / file | why there |
-| --- | --- | --- |
-| rate law, per-cycle state, tick scheduling | `transport/session/src/supervision/supervisor.rs` | pure state machine already owns `dims`, `largest_shares_seen`, the hard deadline and the tail |
-| periodic tick, new action variant, coalescing | `transport/session/src/supervision/worker.rs`, `mod.rs` | the worker already runs the deadline timer and forwards actions |
-| sending packets, SURB-reserve backoff, telemetry | `transport/session/src/manager.rs`, `utils.rs` | the Exit keep-alive stream and its `RateController` already exist (`manager.rs:3851`, `utils.rs:251`) |
-| config, validation | `supervision/mod.rs` (`SupervisorConfig`, `validate_pix_supervision`), `manager.rs` (`validate_incoming_session_pix_config`) | same place as every other supervisor dial |
-| operator config | `hoprd/src/config.rs` `UserIncomingSessionPixConfig` (hoprd repo) | the flattened mirror hoprd exposes |
+| piece                                            | crate / file                                                                                                                 | why there                                                                                             |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| rate law, per-cycle state, tick scheduling       | `transport/session/src/supervision/supervisor.rs`                                                                            | pure state machine already owns `dims`, `largest_shares_seen`, the hard deadline and the tail         |
+| periodic tick, new action variant, coalescing    | `transport/session/src/supervision/worker.rs`, `mod.rs`                                                                      | the worker already runs the deadline timer and forwards actions                                       |
+| sending packets, SURB-reserve backoff, telemetry | `transport/session/src/manager.rs`, `utils.rs`                                                                               | the Exit keep-alive stream and its `RateController` already exist (`manager.rs:3851`, `utils.rs:251`) |
+| config, validation                               | `supervision/mod.rs` (`SupervisorConfig`, `validate_pix_supervision`), `manager.rs` (`validate_incoming_session_pix_config`) | same place as every other supervisor dial                                                             |
+| operator config                                  | `hoprd/src/config.rs` `UserIncomingSessionPixConfig` (hoprd repo)                                                            | the flattened mirror hoprd exposes                                                                    |
 
 Key reuse: `utils::spawn_keep_alive_stream` returns a `RateController`
 (`balancer/rate_limiting.rs:17`) whose `set_rate_per_unit(n, period)` is exactly the knob the
@@ -155,11 +155,11 @@ gets the same four so the harnesses can switch fill off for the tests that pin t
 
 ### 1.7 Telemetry
 
-| metric | type | labels |
-| --- | --- | --- |
-| `hopr_session_pix_fill_packets_total` | SimpleCounter, node-wide | none, so it survives hoprd's `/metrics` filter |
-| `hopr_session_pix_fill_rate` | MultiGauge | `session_id` |
-| `hopr_session_pix_fill_cycles_total` | SimpleCounter | cycles recovered while fill was above the heartbeat |
+| metric                                | type                     | labels                                              |
+| ------------------------------------- | ------------------------ | --------------------------------------------------- |
+| `hopr_session_pix_fill_packets_total` | SimpleCounter, node-wide | none, so it survives hoprd's `/metrics` filter      |
+| `hopr_session_pix_fill_rate`          | MultiGauge               | `session_id`                                        |
+| `hopr_session_pix_fill_cycles_total`  | SimpleCounter            | cycles recovered while fill was above the heartbeat |
 
 Add to `METRICS.md`. Existing `hopr_session_pix_closures_total{reason}` is what proves the backstop
 still fires when fill cannot run.
@@ -193,7 +193,7 @@ Six PRs, each independently mergeable and green. Conventional Commits titles as 
 
 - `PixFillConfig` on `SupervisorConfig`, defaults, `validate_pix_supervision` rules.
 - `supervisor.rs`: per-cycle `fill: Option<FillState { clock_start, last_served_total, organic_ema,
-  last_rate }>`, armed together with the recovery clocks in `arm_recovery_clocks_for_earliest`
+last_rate }>`, armed together with the recovery clocks in `arm_recovery_clocks_for_earliest`
   (`supervisor.rs:432`); `pub fn next_fill_tick(&self) -> Option<Instant>`;
   `pub fn handle_fill_tick(&mut self, now, served_total) -> Vec<SessionPixAction>` implementing 1.2
   with hysteresis; rate reset to 0 in `close_ssa_and_collect`, `perform_recovered_transition` and
@@ -269,14 +269,14 @@ Six PRs, each independently mergeable and green. Conventional Commits titles as 
 
 ## 3. Test matrix
 
-| property | level | test |
-| --- | --- | --- |
-| rate law correctness, edge cases | unit, supervisor | PR 2 |
-| tick scheduling and coalescing | unit, worker | PR 3 |
-| packets leave at the set rate, backoff | unit, manager | PR 4 |
-| idle cycle completes, successor funded | e2e, hopr-lib | PR 5 |
-| backstop still closes without SURB supply | e2e, hopr-lib | PR 5 |
-| fill yields under load | e2e, hopr-lib | PR 5 |
+| property                                     | level              | test                                            |
+| -------------------------------------------- | ------------------ | ----------------------------------------------- |
+| rate law correctness, edge cases             | unit, supervisor   | PR 2                                            |
+| tick scheduling and coalescing               | unit, worker       | PR 3                                            |
+| packets leave at the set rate, backoff       | unit, manager      | PR 4                                            |
+| idle cycle completes, successor funded       | e2e, hopr-lib      | PR 5                                            |
+| backstop still closes without SURB supply    | e2e, hopr-lib      | PR 5                                            |
+| fill yields under load                       | e2e, hopr-lib      | PR 5                                            |
 | production geometry, real chain, edgli Entry | manual, hoprd-test | scenario switch from app-layer filler to native |
 
 ## 4. Rollout and defaults
