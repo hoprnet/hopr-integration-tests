@@ -15,13 +15,17 @@
 #   EDGLI_REF        default edge-client ref (default: per LINE)
 #   BLOKLI_REF       blokli ref override     (default: per LINE)
 #   HOPRD_SKIP_LINE_CHECK  set to 1 to run a hoprd rev outside HOPRD_LINE anyway
-#   NIX_SYSTEM_SUFFIX    nix output arch suffix (default: x86_64-linux)
+#   NIX_SYSTEM_SUFFIX    cross-build to this nix system (default: empty = build for this machine)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CRATE_CARGO="${REPO_ROOT}/integration/Cargo.toml"
 CRATE_LOCK="${REPO_ROOT}/integration/Cargo.lock"
-ARCH="${NIX_SYSTEM_SUFFIX:-x86_64-linux}"
+# Bare flake names resolve to this system, and `binary-hoprd-localcluster` has no per-system
+# alias at all — only an x86_64-linux one. So suffix nothing by default; NIX_SYSTEM_SUFFIX is a
+# cross-build override (CI sets it to keep building the musl outputs), not a default.
+SUFFIX="${NIX_SYSTEM_SUFFIX:+-${NIX_SYSTEM_SUFFIX}}"
+SYSTEM="${NIX_SYSTEM_SUFFIX:-$(nix eval --raw --impure --expr builtins.currentSystem)}"
 
 # Per-line defaults; an explicit env override still wins.
 LINE="${LINE:-v4}"
@@ -189,8 +193,8 @@ nix_build() { # description, then `nix build` arguments
 }
 
 echo "building hoprd binaries from ref ${HOPRD_REF} ..."
-nix_build "hoprd" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-${ARCH}" --out-link "${REPO_ROOT}/result-hoprd"
-nix_build "hoprd-localcluster" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-localcluster-${ARCH}" --out-link "${REPO_ROOT}/result-localcluster"
+nix_build "hoprd" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd${SUFFIX}" --out-link "${REPO_ROOT}/result-hoprd"
+nix_build "hoprd-localcluster" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-localcluster${SUFFIX}" --out-link "${REPO_ROOT}/result-localcluster"
 
 # ── Build the blokli binary chain from the branch (bloklid + deployer + anvil) ──
 # `--refresh` is load-bearing: nix caches a flake ref's resolved revision for
@@ -207,8 +211,8 @@ nix_build "anvil (foundry)" -L "nixpkgs#foundry" --out-link "${REPO_ROOT}/result
 # x86_64-linux only — the flake exposes no other arch, so darwin goes via `just pix`.
 PIX_SUITE=0
 if [ "${LINE}" = "v5" ]; then
-  if [ "${ARCH}" = "x86_64-linux" ]; then
-    nix_build "hoprd (PIX pool)" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-pix-test-${ARCH}" \
+  if [ "${SYSTEM}" = "x86_64-linux" ]; then
+    nix_build "hoprd (PIX pool)" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-pix-test-${SYSTEM}" \
       --out-link "${REPO_ROOT}/result-hoprd-pix"
     PIX_BIN="${REPO_ROOT}/result-hoprd-pix/bin/hoprd"
     # `POOL` in hoprd::strategy is compiled in for exactly this check.
@@ -218,7 +222,7 @@ if [ "${LINE}" = "v5" ]; then
     }
     PIX_SUITE=1
   else
-    echo "skipping the PIX suite: no binary-hoprd-pix-test output for ${ARCH} (use \`just pix\`)"
+    echo "skipping the PIX suite: no binary-hoprd-pix-test output for ${SYSTEM} (use \`just pix\`)"
   fi
 fi
 

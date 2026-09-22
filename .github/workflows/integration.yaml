@@ -277,6 +277,10 @@ jobs:
             echo "TRIGGER=manual run"
           fi >>"${GITHUB_ENV}"
       - name: Resolve versions, build stack, run test
+        # Pinned rather than left to run.sh's native default: the runners are x86_64-linux,
+        # and the suffixed outputs are the static musl builds CI has always run.
+        env:
+          NIX_SYSTEM_SUFFIX: x86_64-linux
         run: nix develop github:hoprnet/hoprnet --command bash scripts/integration/run.sh
       # The console now carries a summary; this is where the detail lives when a run
       # goes red. Only on failure, so a green run stores nothing.

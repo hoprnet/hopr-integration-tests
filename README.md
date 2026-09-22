@@ -204,6 +204,21 @@ documents the underlying env contract the recipes set up.
 
 The test is `#[ignore]` — it needs external binaries + a container runtime.
 
+### Seeing the logs
+
+```bash
+RUST_LOG=info,edgli=debug TEST_ARGS=--nocapture HOPRD_KEEP_ARTIFACTS=1 \
+  just integration-binchain zero_hop
+```
+
+| Where | How |
+| ----- | --- |
+| Scenario measurements (goodput, arrival, stalls) | `TEST_ARGS=--nocapture`. libtest swallows a **passing** test's output, so without it a green run prints no measurements at all. |
+| Harness + stack tracing | `RUST_LOG`, default `info,edgli=debug`. That narrates every packet — ~6900 lines to surface ~44. CI uses `warn,hoprd_integration_test=info`; start there and widen. |
+| Per-node `hoprd_<i>.log` | `HOPRD_KEEP_ARTIFACTS=1`. The cluster dir is a `TempDir` dropped at teardown, so the evidence is gone by the time a failure is worth reading. The run logs the path it keeps (`/tmp/hoprd-it-*`, or under `/tmp/nix-shell.*/` in the dev shell). Leaks on purpose — `rm -rf /tmp/hoprd-it-*` afterwards. |
+| anvil / bloklid / deployer | Always written to `/tmp/hopr-chain/*.log`. Tailed to stderr automatically if the chain dies during startup. |
+| nix build output | On the console for `just`; `run.sh` redirects it to `nix-build.log`, which is why a long build there looks like a hang. |
+
 ### Prerequisites
 
 | Var                       | Required      | Meaning                                                                                                        |
@@ -231,9 +246,11 @@ Build the binaries from the [`hoprnet/hoprd`](https://github.com/hoprnet/hoprd) 
 (pass a ref to test a branch/PR, e.g. `github:hoprnet/hoprd/<sha>#…`):
 
 ```bash
-nix build -L github:hoprnet/hoprd#binary-hoprd-x86_64-linux              --out-link result-hoprd
-nix build -L github:hoprnet/hoprd#binary-hoprd-localcluster-x86_64-linux --out-link result-localcluster
-# on macOS use the bare names: .#binary-hoprd and .#binary-hoprd-localcluster
+nix build -L github:hoprnet/hoprd#binary-hoprd              --out-link result-hoprd
+nix build -L github:hoprnet/hoprd#binary-hoprd-localcluster --out-link result-localcluster
+# these are what `run.sh` builds. The flake also names per-system outputs
+# (`-x86_64-linux`, …), but only `binary-hoprd` has one for every system —
+# `binary-hoprd-localcluster` is x86_64-linux only. Cross-build with NIX_SYSTEM_SUFFIX.
 ```
 
 For the chain, prefer the flake binary chain over the docker image — build blokli
