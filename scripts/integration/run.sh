@@ -262,21 +262,26 @@ print(f"  edgli pinned: {pinned.splitlines()[0]}")
 
 # The v5 set has a direct `hopr-lib` that MUST name the rev edgli resolves, else the lock
 # carries two copies and metrics are registered by one and incremented by the other.
-# Mirror edge-client's own pin rather than trust ours. No-op on v4 (no such dep).
-ours = re.search(r'^hopr-lib\s*=\s*\{.*?\}', src, re.S | re.M)
-if ours:
-    theirs = re.search(r'^hopr-lib\s*=\s*\{.*?\}', os.environ['EDGLI_MANIFEST'], re.S | re.M)
+# `hopr-strategy` is the same hazard one level down, and is pinned by VERSION rather than by
+# git ref. A committed version goes stale the moment edge-client bumps the major (4.0.0 -> 5.1.0
+# broke main on 2026-09-23), so mirror both rather than trusting either. No-op on v4 (no such deps).
+KEY = r'\b(?:branch|rev|tag)\s*=\s*"[^"]*"'
+for dep, keypat in (("hopr-lib", KEY), ("hopr-strategy", r'\bversion\s*=\s*"[^"]*"')):
+    stanza_re = r'^' + dep + r'\s*=\s*\{.*?\}'
+    ours = re.search(stanza_re, src, re.S | re.M)
+    if not ours:
+        continue
+    theirs = re.search(stanza_re, os.environ['EDGLI_MANIFEST'], re.S | re.M)
     if not theirs:
-        sys.exit("run.sh: edge-client's manifest has no `hopr-lib` stanza to mirror")
-    key = re.search(r'\b(?:branch|rev|tag)\s*=\s*"[^"]*"', theirs.group(0))
+        sys.exit(f"run.sh: edge-client's manifest has no `{dep}` stanza to mirror")
+    key = re.search(keypat, theirs.group(0))
     if not key:
-        sys.exit("run.sh: edge-client pins hopr-lib without a branch/rev/tag")
-    mirrored, n = re.subn(r'\b(?:branch|rev|tag)\s*=\s*"[^"]*"', key.group(0),
-                          ours.group(0), count=1)
+        sys.exit(f"run.sh: edge-client pins {dep} without a key this can mirror")
+    mirrored, n = re.subn(keypat, key.group(0), ours.group(0), count=1)
     if n == 0:
-        sys.exit("run.sh: our `hopr-lib` stanza carries no branch/rev/tag to mirror onto")
+        sys.exit(f"run.sh: our `{dep}` stanza carries no key to mirror onto")
     src = src[: ours.start()] + mirrored + src[ours.end() :]
-    print(f"  hopr-lib mirrored from edge-client: {key.group(0)}")
+    print(f"  {dep} mirrored from edge-client: {key.group(0)}")
 
 open(path, 'w').write(src)
 PY
