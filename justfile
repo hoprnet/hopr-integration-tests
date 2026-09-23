@@ -102,6 +102,15 @@ integration-binchain *scenarios: build build-chain
     [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
+# Scenarios that kill cluster nodes -- return_path -- must NOT run this way: the next one
+# inherits the corpse. See scripts/integration/run-shared.sh. Args = test binaries.
+# EXPERIMENT: one chain + one cluster per test binary, all its scenarios in sequence.
+integration-shared *targets: build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -n '{{targets}}' ] && export TEST_TARGETS='{{targets}}'
+    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-shared.sh
+
 # Return-path resilience (binary chain): are replies spread over distinct relayers, and
 # does the stream survive one of them dying? Runs its own 5-node cluster — see
 # integration/tests/return_path.rs. Optional args = test-name filters.

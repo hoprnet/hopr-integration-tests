@@ -499,6 +499,29 @@ impl Drop for ClusterHandle {
     }
 }
 
+static SHARED: tokio::sync::OnceCell<&'static ClusterHandle> = tokio::sync::OnceCell::const_new();
+
+/// Whether `HOPRD_SHARED_CLUSTER` asks for one cluster per test *binary* instead of one per test.
+///
+/// Bring-up dominates a short scenario's wall clock, and every scenario in a binary agrees on the
+/// cluster's shape by construction -- the `request_*` knobs above are all first-call-wins. Teardown
+/// then belongs to whoever started the process: the handle is leaked, so the localcluster outlives
+/// the last test and `scripts/integration/run-shared.sh` reaps it.
+pub fn shared_cluster_enabled() -> bool {
+    std::env::var("HOPRD_SHARED_CLUSTER").is_ok_and(|v| v != "0")
+}
+
+/// The binary-wide cluster, brought up on first use.
+pub async fn bring_up_shared() -> anyhow::Result<&'static ClusterHandle> {
+    SHARED
+        .get_or_try_init(|| async {
+            let handle = bring_up().await?;
+            Ok::<_, anyhow::Error>(&*Box::leak(Box::new(handle)))
+        })
+        .await
+        .copied()
+}
+
 /// Bring up the cluster (managed mode) or attach to a running one (external mode),
 /// then wait until it is fully ready (nodes up, peers visible, full-mesh channels).
 pub async fn bring_up() -> anyhow::Result<ClusterHandle> {
@@ -659,18 +682,33 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         );
         cmd.env(key, value);
     }
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit());
+    // The pipe reader below lives on the runtime of whichever test triggered bring-up. A shared
+    // cluster outlives that runtime, and a pipe nobody drains blocks localcluster's next write, so
+    // there the output goes to a file instead.
+    let stdout_log = shared_cluster_enabled().then(|| data_dir.join("localcluster.log"));
+    match &stdout_log {
+        Some(path) => {
+            cmd.stdout(std::fs::File::create(path).context("creating localcluster log")?);
+        }
+        None => {
+            cmd.stdout(std::process::Stdio::piped());
+        }
+    }
+    cmd.stderr(std::process::Stdio::inherit());
 
     let mut child = cmd.spawn()?;
-    let stdout = child.stdout.take().expect("stdout captured");
-    tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt as _;
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::info!(target: "localcluster", "{}", line);
-        }
-    });
+    if let Some(path) = &stdout_log {
+        tracing::info!(path = %path.display(), "localcluster output goes to a file (shared cluster)");
+    } else {
+        let stdout = child.stdout.take().expect("stdout captured");
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt as _;
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::info!(target: "localcluster", "{}", line);
+            }
+        });
+    }
 
     let summary = match wait_status_running(
         std::path::Path::new(&lc_bin),
