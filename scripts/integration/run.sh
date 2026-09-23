@@ -307,34 +307,50 @@ done
 BINCHAIN="$(dirname "${BASH_SOURCE[0]}")/run-binchain.sh"
 suite_rc=0
 
-run_suite() { # target, then scenario names
+run_suite() { # target, then any scenarios to HOLD OUT of it
   local target="$1"
   shift
   echo "═══════ suite: ${target} ═══════"
-  if ! SCENARIOS="$*" TEST_TARGET="${target}" bash "${BINCHAIN}"; then
+  if ! TEST_TARGET="${target}" SCENARIOS_EXCEPT="$*" SCENARIOS_FIRST="${SCENARIOS_FIRST:-}" bash "${BINCHAIN}"; then
     echo "suite ${target} FAILED" >&2
     suite_rc=1
   fi
 }
 
 echo "running integration tests (binary chain) ..."
-run_suite integration zero_hop one_hop
+run_suite integration
 # `return_path` is held out ENTIRELY: its scenarios assert an arrival ratio over an
 # unforced random relayer draw, so a red says nothing. Locally: `just return-path`.
-run_suite exit_origination exit_should_keep_originating_when_a_return_path_becomes_unresolvable
+# If it is ever wired back in, three of its five are the flaky ones — `spread` asserts a ratio on a
+# random draw, and the two survival scenarios miss their recovery deadline on some machines but not
+# others:
+#   run_suite return_path \
+#     return_paths_should_spread_across_distinct_relayers \
+#     session_should_survive_common_mode_return_outage \
+#     a_symmetric_session_should_survive_relayer_loss
+run_suite exit_origination
 # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore FAILS
 # against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there. Wiring it in now
 # would turn the nightly red every run. Enable once that fix is in release/4.0 — at which point the
 # test flips to passing and becomes a genuine regression guard.
-#   run_suite upload_survival sustained_upload_keeps_the_return_path_alive
+#   run_suite upload_survival
 
-# Entry-side PIX: v5 only (`edgli/pix-test` has no v4 counterpart). Named explicitly —
-# the two want different entry deposit budgets, and each gets its own chain.
+# Entry-side PIX: v5 only (`edgli/pix-test` has no v4 counterpart).
 if [ "${PIX_SUITE}" = "1" ]; then
   export HOPRD_BIN="${PIX_BIN}"
-  run_suite pix \
-    edgli_entry_deposits_should_be_swept_into_the_exit_safe \
-    a_session_should_close_when_the_entry_can_no_longer_deposit
+  run_suite pix
+
+  # `pix_shapes` additionally needs a localcluster that takes `--pix-config`: the bare
+  # `--enable-pix` is a 32-packet demo cycle that no traffic shape fits inside. Probed on the
+  # binary, the same way the deposit pool is, rather than assumed from the ref.
+  if grep -qa 'pix-config' "${REPO_ROOT}/result-localcluster/bin/hoprd-localcluster"; then
+    # The spike first -- if the geometry cannot complete one cycle, no shape below can be read.
+    SCENARIOS_FIRST=the_profile_geometry_completes_a_cycle run_suite pix_shapes
+  else
+    echo "::error::the hoprd-localcluster built from '${HOPRD_REF}' has no --pix-config, so the" >&2
+    echo "pix_shapes suite cannot state its geometry. Use a newer hoprd ref." >&2
+    suite_rc=1
+  fi
 fi
 
 exit "${suite_rc}"

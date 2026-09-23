@@ -105,11 +105,8 @@ integration-binchain *scenarios: build build-chain
 return-path *scenarios: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
-    # Named explicitly rather than left to the default filter: run-binchain.sh gives each
-    # scenario a fresh chain, and the kill scenario leaves a dead node behind it.
-    SCENARIOS='{{scenarios}}'
-    [ -n "${SCENARIOS}" ] || SCENARIOS='return_paths_should_spread_across_distinct_relayers session_should_survive_return_relayer_loss session_should_survive_forward_relayer_loss session_should_survive_common_mode_return_outage a_symmetric_session_should_survive_relayer_loss'
-    export SCENARIOS TEST_TARGET=return_path
+    # Empty = every scenario in the target, each on its own fresh chain.
+    export SCENARIOS='{{scenarios}}' TEST_TARGET=return_path
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
 
 # Exit-origination repro (binary chain): does the exit keep originating packets when
@@ -117,7 +114,6 @@ return-path *scenarios: build build-chain
 exit-origination: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
-    export SCENARIOS=exit_should_keep_originating_when_a_return_path_becomes_unresolvable
     export TEST_TARGET=exit_origination
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
 
@@ -148,12 +144,46 @@ pix *scenarios: build-chain
       exit 1
     }
 
-    # Named explicitly rather than left to the default filter: run-binchain.sh gives each scenario
-    # a fresh chain, and the two here want different entry deposit budgets.
-    SCENARIOS='{{scenarios}}'
-    [ -n "${SCENARIOS}" ] || SCENARIOS='edgli_entry_deposits_should_be_swept_into_the_exit_safe a_session_should_close_when_the_entry_can_no_longer_deposit'
-    export SCENARIOS TEST_TARGET=pix
+    export SCENARIOS='{{scenarios}}' TEST_TARGET=pix
     # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
+    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
+
+# PIX under end-user traffic shapes (binary chain; manual, NOT run in CI, hours per full pass).
+#
+# Same build path as `just pix`, but at a geometry whose cycle is long enough for a traffic shape
+# to exist inside it — see integration/src/shapes.rs. Needs a HOPRD_SRC carrying the Exit-side PIX
+# fill (hoprnet#8396); the idle scenario measures exactly that, and against a hoprd without it an
+# idle cycle strands its deposit by design.
+#
+# Optional args = test-name filters. The sweep drives this through scripts/integration/pix-sweep.sh.
+pix-shapes *scenarios: build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    src="$(cd '{{hoprd_src}}' && pwd)"
+    echo "building PIX-enabled hoprd + hoprd-localcluster from ${src}"
+    (cd "${src}" && nix develop -c cargo build --release -p hoprd --features strategy-pix-test)
+    (cd "${src}" && nix develop -c cargo build --release -p hoprd-localcluster)
+    export HOPRD_BIN="${src}/target/release/hoprd"
+    export HOPRD_LOCALCLUSTER_BIN="${src}/target/release/hoprd-localcluster"
+
+    grep -qa 'non-anonymous-secp256k1' "${HOPRD_BIN}" || {
+      echo "${HOPRD_BIN} was not built with the secp256k1 deposit pool. Rebuild it:" >&2
+      echo "    cargo build --release -p hoprd --features strategy-pix-test" >&2
+      exit 1
+    }
+    # The geometry seam these scenarios need. A hoprd-localcluster without it ignores --pix-config
+    # and silently runs the demo geometry, which every shape assertion would then be measuring.
+    "${HOPRD_LOCALCLUSTER_BIN}" --help 2>&1 | grep -q -- '--pix-config' || {
+      echo "${HOPRD_LOCALCLUSTER_BIN} has no --pix-config; HOPRD_SRC is behind the geometry seam." >&2
+      exit 1
+    }
+
+    # Named explicitly rather than left to a filter: each gets a fresh chain, and the spike runs
+    # first because a failure in it means none of the shapes can be read.
+    SCENARIOS='{{scenarios}}'
+    [ -n "${SCENARIOS}" ] || SCENARIOS='the_profile_geometry_completes_a_cycle an_idle_session_completes_its_cycle_on_exit_fill a_browsing_session_sustains_its_cycles a_download_session_sustains_its_cycles an_upload_session_completes_on_fill a_mixed_session_sustains_its_cycles'
+    export SCENARIOS TEST_TARGET=pix_shapes
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
 
