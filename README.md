@@ -10,10 +10,10 @@ It gates **both release lines** from one crate — the test bodies are shared so
 only the dependency set differs — and runs on a dedicated self-hosted Hetzner runner
 (label `hetzner`):
 
-| | hoprd | hoprnet | edge-client | blokli | PIX suite |
-| --- | --- | --- | --- | --- | --- |
-| **v4** (default) | `release/4.1` | `release/4.0` | `release/4.1` | `release/0.13` | no |
-| **v5** | `main` | `master` | `main` | `v0.14.0` | yes |
+|                  | hoprd         | hoprnet       | edge-client   | blokli         | PIX suite |
+| ---------------- | ------------- | ------------- | ------------- | -------------- | --------- |
+| **v4** (default) | `release/4.1` | `release/4.0` | `release/4.1` | `release/0.13` | no        |
+| **v5**           | `main`        | `master`      | `main`        | `v0.14.0`      | yes       |
 
 Pick one with `LINE=v4`/`LINE=v5` (`just ci` / `just ci-v5`, or the `line` input on
 `integration.yaml`). The two are not mixable: a v4 blokli cannot bootstrap a v5
@@ -73,21 +73,23 @@ Five extra test binaries reuse the same `IntegrationEnv` harness. CI runs the on
 local cluster can drive and whose verdict is trustworthy — `integration`,
 `exit_origination`, and `pix` on v5:
 
-| Binary                      | What it needs                                             | In CI | Run with                    |
-| --------------------------- | --------------------------------------------------------- | ----- | --------------------------- |
-| `tests/integration.rs`      | a 3-node cluster                                          | yes   | `just integration-binchain` |
-| `tests/return_path.rs`      | a 5-node cluster (more CPU than the throughput tests)     | no    | `just return-path`          |
-| `tests/exit_origination.rs` | a cluster + a pseudonym-lifetime wait                     | yes   | `just exit-origination`     |
-| `tests/pix.rs`              | `--features pix` + a PIX-enabled `hoprd` (flake output on linux, source build on darwin) | v5 only | `LINE=v5 just pix`          |
-| `tests/rotsee.rs`           | a funded Gnosis identity + exit node (`EDGLI_ROTSEE_*`)   | no    | `just rotsee`               |
-| `tests/profiling.rs`        | `--features prof` + `--profile tracer` + `tokio_unstable` | no    | `just profile`              |
+| Binary                      | What it needs                                                               | In CI   | Run with                         |
+| --------------------------- | --------------------------------------------------------------------------- | ------- | -------------------------------- |
+| `tests/integration.rs`      | a 3-node cluster                                                            | yes     | `just integration-binchain`      |
+| `tests/return_path.rs`      | a 5-node cluster (more CPU than the throughput tests)                       | no      | `just return-path`               |
+| `tests/exit_origination.rs` | a cluster + a pseudonym-lifetime wait                                       | yes     | `just exit-origination`          |
+| `tests/pix.rs`              | a PIX-enabled `hoprd` (flake output on linux, source build on darwin)       | v5 only | `LINE=v5 just pix`               |
+| `tests/pix_shapes.rs`       | the above, plus a `hoprd-localcluster` taking `--pix-config`                | v5 only | `LINE=v5 just pix-shapes`        |
+| `tests/upload_survival.rs`  | a cluster; fails until the reply-opener fix (hoprnet#8417) reaches the line | no      | see `scripts/integration/run.sh` |
+| `tests/rotsee.rs`           | a funded Gnosis identity + exit node (`EDGLI_ROTSEE_*`)                     | no      | `just rotsee`                    |
+| `tests/profiling.rs`        | `--features prof` + `--profile tracer` + `tokio_unstable`                   | no      | `just profile`                   |
 
 `rotsee` cannot run in CI (no funded identity) and `profiling` should not: it emits
 Perfetto/tokio-console traces rather than a pass/fail verdict, and needs its own build.
 `return_path` is held out for a different reason — every one of its scenarios asserts an
 arrival ratio over an unforced random relayer draw, so a red there says nothing; see
 [`runner/README.md`](runner/README.md). What remains runs on every gate: 3 scenarios on
-v4, 5 on v5, each with a fresh chain.
+v4, 11 on v5, each with a fresh chain.
 
 - **Return path** reproduces the 2026-08-11 return-path break. Sessions are opened with a
   **0-hop forward and 1-hop return** path, so the only packets a cluster node forwards are
@@ -221,14 +223,14 @@ RUST_LOG=info,edgli=debug TEST_ARGS=--nocapture HOPRD_KEEP_ARTIFACTS=1 \
 
 ### Prerequisites
 
-| Var                       | Required      | Meaning                                                                                                        |
-| ------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------- |
-| `HOPRD_BIN`               | managed mode  | path to a `hoprd` binary                                                                                       |
-| `HOPRD_LOCALCLUSTER_BIN`  | always        | path to a `hoprd-localcluster` binary                                                                          |
-| `HOPRD_CHAIN_IMAGE`       | managed mode  | a `bloklid-anvil` image tag                                                                                    |
-| `HOPRD_CONTAINER_RUNTIME` | no            | `docker` (default), `container`, `podman`                                                                      |
-| `HOPRD_CLUSTER_DATA_DIR`  | external mode | data-dir of an already-running cluster                                                                         |
-| `HOPRD_CHAIN_URL`         | binary chain  | attach to an external blokli (e.g. `http://localhost:8080`); skips the container, replaces `HOPRD_CHAIN_IMAGE` |
+| Var                       | Required      | Meaning                                                                                                                                     |
+| ------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HOPRD_BIN`               | managed mode  | path to a `hoprd` binary                                                                                                                    |
+| `HOPRD_LOCALCLUSTER_BIN`  | always        | path to a `hoprd-localcluster` binary                                                                                                       |
+| `HOPRD_CHAIN_IMAGE`       | managed mode  | a `bloklid-anvil` image tag                                                                                                                 |
+| `HOPRD_CONTAINER_RUNTIME` | no            | `docker` (default), `container`, `podman`                                                                                                   |
+| `HOPRD_CLUSTER_DATA_DIR`  | external mode | data-dir of an already-running cluster                                                                                                      |
+| `HOPRD_CHAIN_URL`         | binary chain  | attach to an external blokli (e.g. `http://localhost:8080`); skips the container, replaces `HOPRD_CHAIN_IMAGE`                              |
 | `HOPRD_SRC`               | `just pix`    | hoprd checkout to build the PIX binaries from (default `../hoprd`); built from source since the flake exposes no binary with a deposit pool |
 
 Docker is the only external service: the chain (anvil + blokli + contracts) runs

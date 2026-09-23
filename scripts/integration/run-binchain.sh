@@ -8,7 +8,9 @@
 #   just build-chain    # bloklid + anvil
 #
 # Env:
-#   SCENARIOS   space-separated test names (default: "zero_hop one_hop")
+#   SCENARIOS   space-separated test names (default: every test in TEST_TARGET)
+#   SCENARIOS_EXCEPT  test names to hold out of that default, e.g. a flaky one
+#   SCENARIOS_FIRST   test names to move to the front, when one has to be read before the rest
 #   TEST_TARGET test binary to run them from (default: "integration"; "return_path" for
 #               the return-path resilience scenarios)
 #   TEST_ARGS   extra libtest args, e.g. "--nocapture" to see a passing scenario's own
@@ -30,12 +32,73 @@ export RUST_LOG="${RUST_LOG:-info,edgli=debug}"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
 export HOPRD_PUMP_MBPS="${HOPRD_PUMP_MBPS:-0.5}"
 
-SCENARIOS="${SCENARIOS:-zero_hop one_hop}"
 TEST_TARGET="${TEST_TARGET:-integration}"
 # Split once into an array. An unquoted ${TEST_ARGS} would be pathname-expanded, so a value
 # containing `*` would reach libtest as a list of repository filenames.
 read -r -a TEST_ARGS_ARR <<<"${TEST_ARGS:-}"
 read -r -a CARGO_FEATURES_ARR <<<"${CARGO_FEATURES:-}"
+
+# Asked of the binary rather than listed by every caller, so a new scenario runs the moment it is
+# written. A caller holds one out by naming it in SCENARIOS_EXCEPT -- enumerating what must NOT run
+# keeps the list short and puts the reason next to the name. SCENARIOS still forces an exact set.
+if [ -z "${SCENARIOS:-}" ]; then
+  discovered="$(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c \
+    cargo test --manifest-path integration/Cargo.toml "${CARGO_FEATURES_ARR[@]}" \
+    --test "${TEST_TARGET}" -- --list |
+    sed -n 's/: test$//p' | tr '\n' ' ')"
+  [ -n "${discovered}" ] || {
+    echo "no tests found in target '${TEST_TARGET}' -- wrong name, or a feature gate compiled it out" >&2
+    exit 1
+  }
+
+  # A typo here would hold nothing out and read as a clean run, which is the failure worth being
+  # loud about.
+  for held in ${SCENARIOS_EXCEPT:-}; do
+    case " ${discovered} " in
+    *" ${held} "*) ;;
+    *)
+      echo "SCENARIOS_EXCEPT names '${held}', which is not a test in '${TEST_TARGET}'" >&2
+      exit 1
+      ;;
+    esac
+  done
+
+  SCENARIOS=""
+  for scenario in ${discovered}; do
+    case " ${SCENARIOS_EXCEPT:-} " in
+    *" ${scenario} "*) ;;
+    *) SCENARIOS="${SCENARIOS}${scenario} " ;;
+    esac
+  done
+  [ -n "${SCENARIOS}" ] || {
+    echo "every scenario in '${TEST_TARGET}' is held out by SCENARIOS_EXCEPT" >&2
+    exit 1
+  }
+
+  # `--list` is alphabetical, which is the wrong order when one scenario has to be read before the
+  # rest mean anything. Names in SCENARIOS_FIRST move to the front, in the order given.
+  if [ -n "${SCENARIOS_FIRST:-}" ]; then
+    rest=""
+    for scenario in ${SCENARIOS}; do
+      case " ${SCENARIOS_FIRST} " in
+      *" ${scenario} "*) ;;
+      *) rest="${rest}${scenario} " ;;
+      esac
+    done
+    for first in ${SCENARIOS_FIRST}; do
+      case " ${SCENARIOS} " in
+      *" ${first} "*) ;;
+      *)
+        echo "SCENARIOS_FIRST names '${first}', which is not a test in '${TEST_TARGET}'" >&2
+        exit 1
+        ;;
+      esac
+    done
+    SCENARIOS="${SCENARIOS_FIRST} ${rest}"
+  fi
+  echo "scenarios in ${TEST_TARGET}: ${SCENARIOS}"
+  [ -z "${SCENARIOS_EXCEPT:-}" ] || echo "held out: ${SCENARIOS_EXCEPT}"
+fi
 BLOKLI_API_PORT="${BLOKLI_API_PORT:-8080}"
 
 CHAIN_PID=""
