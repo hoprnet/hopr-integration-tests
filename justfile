@@ -5,11 +5,7 @@
 #   just integration-binchain   # build hoprd, run all scenarios against a fresh flake chain
 #   just unit                   # fast unit tests (no cluster)
 #
-# Docker path (LOCAL alternative — CI uses the binary chain; floating :latest tag may drift):
-#   just integration            # build binaries, preflight (pull image), run all scenarios
-#   just scenario 0-hop         # run a single scenario against a fresh env
-#
-# Fast iteration (one cluster, many runs — docker path):
+# Fast iteration (one cluster, many runs):
 #   just cluster-up             # terminal 1: bring up a persistent cluster
 #   just attach                 # terminal 2: run scenarios against it
 #
@@ -22,13 +18,6 @@ set shell := ["bash", "-uc"]
 # Dev shell providing the rust toolchain. Override with a local checkout for speed:
 #   HOPRNET_SHELL=path:../hoprnet just integration
 hoprnet := env_var_or_default("HOPRNET_SHELL", "github:hoprnet/hoprnet")
-
-# Chain image for the DOCKER path only (override: `just chain_image=… integration`,
-# or set BLOKLID_ANVIL_IMAGE). NOT aligned with the v4 line: the registry has no
-# jura tag and no clean `0.13.x` tag for bloklid-anvil (only `0.13.1-commit.*` and
-# `-pr.*`), so this floating tag can drift well ahead of the pinned binaries.
-# Prefer the binary chain (build-chain / integration-binchain) locally.
-chain_image := env_var_or_default("BLOKLID_ANVIL_IMAGE", "europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil:latest-rhine")
 
 # Release line every ref below derives from: v4 (default) or v5. Mirrors LINE in
 # scripts/integration/run.sh, whose header carries the branch table. The lines are not mixable.
@@ -63,28 +52,6 @@ build:
     nix build -L 'github:hoprnet/hoprd/{{hoprd_ref}}#binary-hoprd' --out-link result-hoprd
     nix build -L 'github:hoprnet/hoprd/{{hoprd_ref}}#binary-hoprd-localcluster' --out-link result-localcluster
 
-# Verify docker + nix + pull the chain image (idempotent doctor).
-preflight:
-    bash scripts/integration/preflight.sh '{{chain_image}}'
-
-# Full local run (managed mode): build → preflight → run both tests.
-# Optional args = test-name filters (e.g. `just integration zero_hop`).
-integration *filter: build preflight
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export HOPRD_BIN="$PWD/result-hoprd/bin/hoprd"
-    export HOPRD_LOCALCLUSTER_BIN="$PWD/result-localcluster/bin/hoprd-localcluster"
-    export HOPRD_CHAIN_IMAGE='{{chain_image}}'
-    export RUST_LOG="${RUST_LOG:-info,edgli=debug}"
-    # Debug-build async setup overflows the default thread stack on x86_64 CI.
-    export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
-    # Cap send rate so the CPU-constrained runner's packet pool doesn't saturate.
-    export HOPRD_PUMP_MBPS="${HOPRD_PUMP_MBPS:-0.5}"
-    # Safety-net teardown: remove any chain container left behind (localcluster
-    # cleans up on graceful exit; this covers crashes/timeouts).
-    trap 'docker ps -aq --filter "ancestor={{chain_image}}" | xargs -r docker rm -f' EXIT
-    {{v5_deps}} nix develop {{hoprnet}} -c cargo test --manifest-path integration/Cargo.toml --test integration --no-fail-fast {{filter}} -- --include-ignored --test-threads=1
-
 # Build the image-free chain: bloklid + blokli-contract-deployer (blokli branch)
 # and anvil (nixpkgs foundry). Replaces the bloklid-anvil docker image. `--refresh`
 # so a moved branch head is picked up instead of nix's cached revision for it.
@@ -103,13 +70,13 @@ integration-binchain *scenarios: build build-chain
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
 # Scenarios that kill cluster nodes -- return_path -- must NOT run this way: the next one
-# inherits the corpse. See scripts/integration/run-shared.sh. Args = test binaries.
-# EXPERIMENT: one chain + one cluster per test binary, all its scenarios in sequence.
+# inherits the corpse. Args = test binaries.
+# One chain + one cluster per test binary, all its scenarios in sequence (MODE=suite).
 integration-shared *targets: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
     [ -n '{{targets}}' ] && export TEST_TARGETS='{{targets}}'
-    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-shared.sh
+    MODE=suite HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
 # Return-path resilience (binary chain): are replies spread over distinct relayers, and
 # does the stream survive one of them dying? Runs its own 5-node cluster — see
@@ -136,29 +103,10 @@ pix *scenarios:
     #!/usr/bin/env bash
     set -euo pipefail
     [ '{{line}}' = v5 ] || { echo "PIX is v5-only — run: LINE=v5 just pix" >&2; exit 2; }
-    src="$(cd '{{hoprd_src}}' 2>/dev/null && pwd)" || {
-      echo "HOPRD_SRC '{{hoprd_src}}' is not a directory — point it at a v5 hoprd checkout." >&2
-      exit 2
-    }
+    source scripts/integration/lib.sh
+    pix_build '{{hoprd_src}}'
     just build-chain
-    echo "building PIX-enabled hoprd + hoprd-localcluster from ${src}"
-    # Release rather than debug: debug builds slow packet processing and cryptography enough to
-    # distort the SSA cycle pacing the scenarios rest on. Only hoprd needs the feature named —
-    # hoprd-localcluster already depends on the same pool unconditionally.
-    (cd "${src}" && nix develop -c cargo build --release -p hoprd --features strategy-pix-test)
-    (cd "${src}" && nix develop -c cargo build --release -p hoprd-localcluster)
-    export HOPRD_BIN="${src}/target/release/hoprd"
-    export HOPRD_LOCALCLUSTER_BIN="${src}/target/release/hoprd-localcluster"
-
-    # The deposit pool is a *build-time* choice, and a binary carrying the other one bootstraps
-    # normally and then simply never deposits — several minutes into a run. `POOL` in
-    # hoprd::strategy is a &str compiled in for exactly this check.
-    grep -qa 'non-anonymous-secp256k1' "${HOPRD_BIN}" || {
-      echo "${HOPRD_BIN} was not built with the secp256k1 deposit pool. Rebuild it:" >&2
-      echo "    cargo build --release -p hoprd --features strategy-pix-test" >&2
-      echo "(The pools are mutually exclusive and the binary carries exactly one.)" >&2
-      exit 1
-    }
+    pix_check_hoprd "${HOPRD_BIN}"
 
     export SCENARIOS='{{scenarios}}' TEST_TARGET=pix
     # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
@@ -173,33 +121,16 @@ pix *scenarios:
 # fill (hoprnet#8396); the idle scenario measures exactly that, and against a hoprd without it an
 # idle cycle strands its deposit by design.
 #
-# Optional args = test-name filters. The sweep drives this through scripts/integration/pix-sweep.sh.
+# Optional args = test-name filters.
 pix-shapes *scenarios:
     #!/usr/bin/env bash
     set -euo pipefail
     [ '{{line}}' = v5 ] || { echo "PIX is v5-only — run: LINE=v5 just pix-shapes" >&2; exit 2; }
-    src="$(cd '{{hoprd_src}}' 2>/dev/null && pwd)" || {
-      echo "HOPRD_SRC '{{hoprd_src}}' is not a directory — point it at a v5 hoprd checkout." >&2
-      exit 2
-    }
+    source scripts/integration/lib.sh
+    pix_build '{{hoprd_src}}'
     just build-chain
-    echo "building PIX-enabled hoprd + hoprd-localcluster from ${src}"
-    (cd "${src}" && nix develop -c cargo build --release -p hoprd --features strategy-pix-test)
-    (cd "${src}" && nix develop -c cargo build --release -p hoprd-localcluster)
-    export HOPRD_BIN="${src}/target/release/hoprd"
-    export HOPRD_LOCALCLUSTER_BIN="${src}/target/release/hoprd-localcluster"
-
-    grep -qa 'non-anonymous-secp256k1' "${HOPRD_BIN}" || {
-      echo "${HOPRD_BIN} was not built with the secp256k1 deposit pool. Rebuild it:" >&2
-      echo "    cargo build --release -p hoprd --features strategy-pix-test" >&2
-      exit 1
-    }
-    # The geometry seam these scenarios need. A hoprd-localcluster without it ignores --pix-config
-    # and silently runs the demo geometry, which every shape assertion would then be measuring.
-    "${HOPRD_LOCALCLUSTER_BIN}" --help 2>&1 | grep -q -- '--pix-config' || {
-      echo "${HOPRD_LOCALCLUSTER_BIN} has no --pix-config; HOPRD_SRC is behind the geometry seam." >&2
-      exit 1
-    }
+    pix_check_hoprd "${HOPRD_BIN}"
+    pix_check_localcluster "${HOPRD_LOCALCLUSTER_BIN}"
 
     # Only the order is stated: a failed geometry spike makes every shape after it unreadable.
     export SCENARIOS='{{scenarios}}' TEST_TARGET=pix_shapes
@@ -210,29 +141,31 @@ pix-shapes *scenarios:
 
 # Run a single test against a fresh env (e.g. `just scenario zero_hop`).
 scenario name:
-    @just integration '{{name}}'
+    @just integration-binchain '{{name}}'
 
-# Bring up a persistent cluster for iteration (blocks; Ctrl-C to stop). Run in its own terminal.
-cluster-up: build preflight
-    HOPRD_CHAIN_IMAGE='{{chain_image}}' \
-    ./result-localcluster/bin/hoprd-localcluster \
-      --size 3 --extra-identities 1 \
-      --api-port-base 13000 --p2p-port-base 19000 \
-      --api-token test-token-localcluster \
-      --hoprd-bin ./result-hoprd/bin/hoprd \
-      --data-dir '{{data_dir}}'
+# Bring up a persistent cluster on a fresh binary chain (blocks; Ctrl-C to stop).
+# Run in its own terminal, then drive it from another with `just attach`.
+cluster-up: build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/integration/lib.sh
+    it_env
+    trap 'chain_stop; reap_nodes' EXIT INT TERM
+    chain_start
+    cluster_up '{{data_dir}}'
+    cluster_wait '{{data_dir}}'
+    echo "cluster ready — run \`just attach\` in another terminal; Ctrl-C here to tear down"
+    wait "${CLUSTER_PID}"
 
 # Run tests against the persistent cluster from `cluster-up` (no bring-up).
 # Optional args = test-name filters (e.g. `just attach one_hop`).
 attach *filter:
     #!/usr/bin/env bash
     set -euo pipefail
-    export HOPRD_LOCALCLUSTER_BIN="$PWD/result-localcluster/bin/hoprd-localcluster"
+    source scripts/integration/lib.sh
+    it_env
     export HOPRD_CLUSTER_DATA_DIR='{{data_dir}}'
-    export RUST_LOG="${RUST_LOG:-info,edgli=debug}"
-    export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
-    export HOPRD_PUMP_MBPS="${HOPRD_PUMP_MBPS:-0.5}"
-    {{v5_deps}} nix develop {{hoprnet}} -c cargo test --manifest-path integration/Cargo.toml --test integration --no-fail-fast {{filter}} -- --include-ignored --test-threads=1
+    HOPRNET_SHELL='{{hoprnet}}' cargo_it integration '{{filter}}'
 
 # Fast unit tests (gate + parse logic; no cluster).
 unit:
@@ -279,9 +212,8 @@ ci:
 ci-v5:
     LINE=v5 nix develop {{hoprnet}} -c bash scripts/integration/run.sh
 
-# Remove the chain container, stray processes, and temp dirs.
+# Kill stray chain/node processes and remove the temp dirs.
 clean:
-    -docker ps -aq --filter ancestor='{{chain_image}}' | xargs -r docker rm -f
-    -pkill -f result-hoprd/bin/hoprd
-    -pkill -f hoprd-localcluster
-    -rm -rf '{{data_dir}}' /tmp/hoprd-it-* resolved.env
+    -bash scripts/integration/lib.sh chain_stop
+    -bash scripts/integration/lib.sh reap_nodes
+    -bash scripts/integration/lib.sh clean_tmp

@@ -1,15 +1,12 @@
 //! Local cluster lifecycle — bring up (or attach to) a `hoprd-localcluster`.
 //!
-//! `hoprd-localcluster` is the orchestrator: it starts the chain container, funds
-//! the node Safes via `hopli`, spawns the `hoprd` processes, and opens the
-//! full-mesh channels.
+//! `hoprd-localcluster` is the orchestrator: it funds the node Safes via `hopli`, spawns the
+//! `hoprd` processes, and opens the full-mesh channels.
 //!
-//! **Contracts.** We do NOT deploy contracts here. The `bloklid-anvil` chain
-//! image deploys the full HOPR contract set on startup (its entrypoint runs
-//! anvil → `blokli-contract-deployer` → writes the addresses into the bloklid
-//! config), so by the time blokli answers `/readyz` the contracts are live and
-//! their addresses are served to the nodes. The only case lacking contracts is
-//! pointing `HOPRD_CHAIN_URL` at a foreign chain — not used by managed mode.
+//! **Contracts.** We do NOT deploy them here, and neither does localcluster.
+//! `scripts/integration/lib.sh chain_up` runs anvil → `blokli-contract-deployer` → bloklid, so
+//! by the time the chain answers GraphQL the addresses are live and served to the nodes. Only
+//! an `HOPRD_CHAIN_URL` pointed at a foreign chain would lack them.
 
 use std::{path::PathBuf, time::Duration};
 
@@ -506,7 +503,7 @@ static SHARED: tokio::sync::OnceCell<&'static ClusterHandle> = tokio::sync::Once
 /// Bring-up dominates a short scenario's wall clock, and every scenario in a binary agrees on the
 /// cluster's shape by construction -- the `request_*` knobs above are all first-call-wins. Teardown
 /// then belongs to whoever started the process: the handle is leaked, so the localcluster outlives
-/// the last test and `scripts/integration/run-shared.sh` reaps it.
+/// the last test and `scripts/integration/run-binchain.sh` (MODE=suite) reaps it.
 pub fn shared_cluster_enabled() -> bool {
     std::env::var("HOPRD_SHARED_CLUSTER").is_ok_and(|v| v != "0")
 }
@@ -569,47 +566,16 @@ async fn attach_external(data_dir: &str) -> anyhow::Result<ClusterHandle> {
     })
 }
 
-/// A test that aborts (e.g. SIGABRT on a stack overflow) skips [`ClusterHandle`]'s
-/// Drop, leaking its chain container + node processes onto the fixed ports and
-/// breaking the next serial test. Managed mode owns those ports, so clear any
-/// leftover before bringing up.
-fn reap_stale(chain_image: &str, runtime: &str, lc_bin: &str, hoprd_bin: &str) {
-    let script = format!(
-        "{runtime} ps -aq --filter ancestor={chain_image} | xargs -r {runtime} rm -f; \
-         pkill -9 -f {lc_bin}; pkill -9 -f {hoprd_bin}; true"
-    );
-    match std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&script)
-        .status()
-    {
-        Ok(_) => tracing::info!("reaped stale cluster state (container + node processes)"),
-        Err(e) => tracing::warn!("reap of stale cluster state failed: {e}"),
-    }
-}
-
 async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     let lc_bin = std::env::var("HOPRD_LOCALCLUSTER_BIN")
         .map_err(|_| anyhow::anyhow!("HOPRD_LOCALCLUSTER_BIN is not set"))?;
     let hoprd_bin =
         std::env::var("HOPRD_BIN").map_err(|_| anyhow::anyhow!("HOPRD_BIN is not set"))?;
-    let chain_url = std::env::var("HOPRD_CHAIN_URL").ok();
-    let chain_image = std::env::var("HOPRD_CHAIN_IMAGE").ok();
-    let container_runtime = std::env::var("HOPRD_CONTAINER_RUNTIME").ok();
-
-    // External chain (HOPRD_CHAIN_URL, e.g. a locally-built bloklid) skips the
-    // container; only image mode has a stale container to reap.
-    if chain_url.is_none() {
-        let image = chain_image.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("set HOPRD_CHAIN_URL (external chain) or HOPRD_CHAIN_IMAGE (container)")
-        })?;
-        reap_stale(
-            image,
-            container_runtime.as_deref().unwrap_or("docker"),
-            &lc_bin,
-            &hoprd_bin,
-        );
-    }
+    // The chain is always external now: `scripts/integration/lib.sh` starts anvil + bloklid and
+    // the runner reaps them. Stale node processes are that script's job too (`reap_nodes`).
+    let chain_url = std::env::var("HOPRD_CHAIN_URL").map_err(|_| {
+        anyhow::anyhow!("HOPRD_CHAIN_URL is not set (start one with lib.sh chain_up)")
+    })?;
 
     let tempdir = tempfile::TempDir::with_prefix("hoprd-it-")?;
     let data_dir = tempdir.path().to_path_buf();
@@ -661,14 +627,7 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         cmd.args(["--latency", &format!("config:{}", path.to_str().unwrap())]);
         tracing::info!(?path, "cluster will run with an artificial latency profile");
     }
-    if let Some(url) = &chain_url {
-        cmd.args(["--chain-url", url]);
-    } else {
-        cmd.args(["--chain-image", chain_image.as_deref().unwrap()]);
-    }
-    if let Some(runtime) = container_runtime {
-        cmd.args(["--container-runtime", &runtime]);
-    }
+    cmd.args(["--chain-url", &chain_url]);
     cmd.env("HOPRD_USE_OPENTELEMETRY", "false");
     for (key, value) in REQUESTED_NODE_ENV
         .get()

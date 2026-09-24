@@ -53,12 +53,11 @@ its cluster: bring up → run → tear down. Three source modules:
 | `env.rs`     | `IntegrationEnv`: cluster + booted `edgli` + open channels; `open_unreliable_session(hops)` session factory |
 | `pump.rs`    | reusable goodput/loss pump; returns a `Transfer` result                                                     |
 
-**Contracts:** the chain deploys the full HOPR contract set on startup (anvil →
-`blokli-contract-deployer` → addresses baked into the bloklid config), whether it
-comes from the flake-built binary chain (what CI uses — `run.sh` → `run-binchain.sh`
-with the latest `blokli` release — and recommended locally) or the `bloklid-anvil`
-docker image (a local-only alternative). The framework never deploys contracts. Only
-an external `HOPRD_CHAIN_URL` pointed at a foreign chain would lack them.
+**Contracts:** `scripts/integration/lib.sh chain_up` deploys the full HOPR contract set on
+startup (anvil → `blokli-contract-deployer` → addresses baked into the bloklid config), so by the
+time the chain answers GraphQL the nodes are served live addresses. Neither the framework nor
+localcluster deploys contracts. Only an `HOPRD_CHAIN_URL` pointed at a foreign chain would lack
+them.
 
 ### Adding a scenario
 
@@ -161,39 +160,28 @@ Goodput (`mbps`) is logged but not gated.
 
 ## Running the test
 
-The chain can come from two places:
-
-- **Binary chain (recommended, no docker):** anvil + bloklid built from the
-  **blokli flake at its latest release** (`github:hoprnet/blokli/<tag>#bloklid`,
-  currently `v0.14.0`, the first with the `service_registry` contract address the
-  current `hoprd-localcluster` requires), attached via `--chain-url`. Every scenario gets a fresh
-  locally-built chain. This is the reliable local path — it pins a concrete
-  blokli release instead of a floating docker tag.
-- **Docker image (local alternative):** the `bloklid-anvil` image, pulled at a
-  **floating** tag (`:latest` / `:latest-rhine`) which can drift ahead of the pinned
-  `hoprd`/`edgli` and break local runs with schema skew. Prefer the binary chain
-  locally; CI does not use this path.
+The chain is anvil + bloklid built from the **blokli flake at its latest release**
+(`github:hoprnet/blokli/<tag>#bloklid`, currently `v0.14.0`, the first with the
+`service_registry` contract address the current `hoprd-localcluster` requires), started by
+`scripts/integration/lib.sh chain_up` and attached via `--chain-url`. It pins a concrete blokli
+release rather than a floating docker tag.
 
 ### Quickstart (`just`)
 
 ```bash
-# recommended: binary chain (blokli from flake branch release/0.13, no docker)
 just build-chain             # bloklid + blokli-contract-deployer + anvil, from the blokli flake tag
-just integration-binchain    # build hoprd, run both scenarios against a fresh flake chain per scenario
+just integration-binchain    # build hoprd, run both scenarios against a fresh chain per scenario
 just integration-binchain zero_hop   # one scenario
+just integration-shared      # one chain + cluster for the whole binary (~20% faster)
 
 just unit                # fast unit tests (no cluster)
-
-# docker-image path (LOCAL alternative — CI uses the binary chain; floating :latest tag may drift):
-just integration         # build binaries, preflight (pull image), run both tests
-just scenario zero_hop   # one test, fresh env
-just preflight           # docker + nix + chain-image doctor
 just ci                  # CI-equivalent: the whole v4 line (or overrides)
 just ci-v5               # same on the v5 line, PIX suite included
-# fast iteration — one cluster, many runs (docker path):
+
+# fast iteration — one cluster, many runs:
 just cluster-up          # terminal 1 (blocks)
 just attach one_hop      # terminal 2
-just clean               # tear down container + temp state
+just clean               # kill stray processes + temp state
 ```
 
 `just --list` shows all recipes. The refs come from the `line` var (default `v4`, set with
@@ -206,71 +194,57 @@ documents the underlying env contract the recipes set up.
 
 The test is `#[ignore]` — it needs external binaries + a container runtime.
 
+### Seeing the logs
+
+```bash
+RUST_LOG=info,edgli=debug TEST_ARGS=--nocapture HOPRD_KEEP_ARTIFACTS=1 \
+  just integration-binchain zero_hop
+```
+
+| Where | How |
+| ----- | --- |
+| Per-node `hoprd_<i>.log` | `HOPRD_KEEP_ARTIFACTS=1`. The cluster dir is a `TempDir` dropped at teardown, so the evidence is gone by the time a failure is worth reading. The run logs the path it keeps (`/tmp/hoprd-it-*/…/hoprd_<i>.log`, or under `/tmp/nix-shell.*/` in the dev shell). Leaks on purpose — `rm -rf /tmp/hoprd-it-*` afterwards. |
+| Harness + stack tracing | `RUST_LOG`, default `info,edgli=debug`. That narrates every packet — ~6900 lines to surface ~44. CI uses `warn,hoprd_integration_test=info`; start there and widen. |
+| anvil / bloklid / deployer | Always written to `/tmp/hopr-chain/*.log`. Tailed to stderr automatically if the chain dies during startup. |
+| nix build output | On the console for `just`; `run.sh` redirects it to `nix-build.log`, which is why a long build there looks like a hang. |
+
 ### Prerequisites
 
 | Var                       | Required      | Meaning                                                                                                                                     |
 | ------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `HOPRD_BIN`               | managed mode  | path to a `hoprd` binary                                                                                                                    |
 | `HOPRD_LOCALCLUSTER_BIN`  | always        | path to a `hoprd-localcluster` binary                                                                                                       |
-| `HOPRD_CHAIN_IMAGE`       | managed mode  | a `bloklid-anvil` image tag                                                                                                                 |
-| `HOPRD_CONTAINER_RUNTIME` | no            | `docker` (default), `container`, `podman`                                                                                                   |
 | `HOPRD_CLUSTER_DATA_DIR`  | external mode | data-dir of an already-running cluster                                                                                                      |
-| `HOPRD_CHAIN_URL`         | binary chain  | attach to an external blokli (e.g. `http://localhost:8080`); skips the container, replaces `HOPRD_CHAIN_IMAGE`                              |
+| `HOPRD_CHAIN_URL`         | managed mode  | the blokli to attach to (default `http://localhost:8080`), started by `lib.sh chain_up`                                                     |
 | `HOPRD_SRC`               | `just pix`    | hoprd checkout to build the PIX binaries from (default `../hoprd`); built from source since the flake exposes no binary with a deposit pool |
 
-Docker is the only external service: the chain (anvil + blokli + contracts) runs
-as a single `bloklid-anvil` container on the host daemon — `localcluster` launches
-it with `docker run --platform linux/amd64 -p 8080:8080 …` (auto-pulls if absent)
-and removes it on exit. No docker-in-docker. The host just needs the docker daemon
-up and registry auth. [`scripts/integration/preflight.sh`](scripts/integration/preflight.sh)
-checks both and pulls the image (idempotent — also a local "doctor"):
-
-```bash
-scripts/integration/preflight.sh <bloklid-anvil-image-ref>
-```
+No container runtime is needed: the chain is three local binaries
+(`scripts/integration/lib.sh chain_up` runs anvil → `blokli-contract-deployer` → bloklid) and
+localcluster attaches to it over `--chain-url`.
 
 Build the binaries from the [`hoprnet/hoprd`](https://github.com/hoprnet/hoprd) repo
 (pass a ref to test a branch/PR, e.g. `github:hoprnet/hoprd/<sha>#…`):
 
 ```bash
-nix build -L github:hoprnet/hoprd#binary-hoprd-x86_64-linux              --out-link result-hoprd
-nix build -L github:hoprnet/hoprd#binary-hoprd-localcluster-x86_64-linux --out-link result-localcluster
-# on macOS use the bare names: .#binary-hoprd and .#binary-hoprd-localcluster
+nix build -L github:hoprnet/hoprd#binary-hoprd              --out-link result-hoprd
+nix build -L github:hoprnet/hoprd#binary-hoprd-localcluster --out-link result-localcluster
+# these are what `run.sh` builds. The flake also names per-system outputs
+# (`-x86_64-linux`, …), but only `binary-hoprd` has one for every system —
+# `binary-hoprd-localcluster` is x86_64-linux only. Cross-build with NIX_SYSTEM_SUFFIX.
 ```
 
-For the chain, prefer the flake binary chain over the docker image — build blokli
-(anvil + bloklid) from its **`release/0.13`** branch (Cachix-cached):
+For the chain, build blokli (anvil + bloklid) from its release tag (Cachix-cached):
 
 ```bash
 nix build -L 'github:hoprnet/blokli/v0.14.0#bloklid' --out-link result-bloklid   # a blokli release (CI resolves the latest per run)
 nix build -L 'nixpkgs#foundry'                       --out-link result-foundry   # anvil
 ```
 
-Only if you must use the docker path instead: `docker pull
-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil:latest`
-(floating tag — may drift ahead of the pinned binaries).
+### Managed mode (the runner owns the chain and cluster)
 
-### Managed mode (test owns the cluster lifetime)
-
-```bash
-export HOPRD_BIN=$PWD/result-hoprd/bin/hoprd
-export HOPRD_LOCALCLUSTER_BIN=$PWD/result-localcluster/bin/hoprd-localcluster
-export HOPRD_CHAIN_IMAGE=europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil:latest
-export RUST_LOG=info,edgli=debug
-
-cd integration
-cargo test --test integration -- --include-ignored --test-threads=1   # both tests
-# one hop count: append `zero_hop` or `one_hop` before the `--`
-```
-
-The cluster + chain container are torn down automatically on exit.
-
-### Binary-chain mode (recommended — flake blokli, no docker)
-
-Set `HOPRD_CHAIN_URL` instead of `HOPRD_CHAIN_IMAGE`; localcluster then attaches to
-an already-running blokli rather than starting a container.
-[`scripts/integration/run-binchain.sh`](scripts/integration/run-binchain.sh) wires
-this up — it starts a fresh flake-built chain per scenario and tears it down:
+[`scripts/integration/run-binchain.sh`](scripts/integration/run-binchain.sh) starts a fresh
+chain per scenario (`MODE=scenario`, the default) or one per test binary (`MODE=suite`) and
+tears it down:
 
 ```bash
 export HOPRD_BIN=$PWD/result-hoprd/bin/hoprd                     # from a PR? build that ref

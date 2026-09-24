@@ -1,12 +1,12 @@
 //! Cross-repo integration throughput tests: one `#[test]` per hop count.
 //!
-//! Both are `#[ignore]` — they need external binaries + a container runtime.
+//! Both are `#[ignore]` — they need external binaries + a running chain.
 //! Each test owns its cluster (bring up → run → tear down). Run with:
 //!
 //! ```bash
 //! export HOPRD_LOCALCLUSTER_BIN=/path/to/hoprd-localcluster
 //! export HOPRD_BIN=/path/to/hoprd
-//! export HOPRD_CHAIN_IMAGE=<bloklid-anvil image tag>
+//! export HOPRD_CHAIN_URL=http://localhost:8080
 //! cargo test --test integration -- --include-ignored --test-threads=1
 //! # one hop count: append `zero_hop` or `one_hop` as a filter (before `--`)
 //! ```

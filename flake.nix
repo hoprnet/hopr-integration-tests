@@ -59,6 +59,7 @@
         pre-commit-check = pre-commit.lib.${system}.run {
           src = ./.;
           hooks = {
+            shellcheck.enable = true;
             check-executables-have-shebangs.enable = true;
             check-shebang-scripts-are-executable.enable = true;
             check-case-conflicts.enable = true;
@@ -102,6 +103,8 @@
             python3
             pinact
             actionlint
+            shellcheck
+            shfmt
           ];
         };
       }
