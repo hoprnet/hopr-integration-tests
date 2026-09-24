@@ -59,34 +59,35 @@ build-chain:
     nix build -L --refresh 'github:hoprnet/blokli/{{blokli_ref}}#bloklid' --out-link result-bloklid
     nix build -L 'nixpkgs#foundry' --out-link result-foundry
 
-# Full local run WITHOUT docker: build hoprd + the binary chain, then run each
-# scenario against a fresh locally-built anvil+bloklid (via --chain-url). Optional
-# args = scenarios (default: `zero_hop one_hop`), e.g. `just integration-binchain zero_hop`.
+# Build hoprd + the binary chain, then run the scenarios on one locally-built anvil+bloklid
+# and one cluster (via --chain-url). Optional args = scenarios, e.g.
+# `just integration-binchain zero_hop`.
 integration-binchain *scenarios: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
-    # run-binchain.sh enters the dev shell itself (per scenario), so no outer wrap.
+    # run-binchain.sh enters the dev shell itself, so no outer wrap.
     [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
-
-# Scenarios that kill cluster nodes -- return_path -- must NOT run this way: the next one
-# inherits the corpse. Args = test binaries.
-# One chain + one cluster per test binary, all its scenarios in sequence (MODE=suite).
-integration-shared *targets: build build-chain
-    #!/usr/bin/env bash
-    set -euo pipefail
-    [ -n '{{targets}}' ] && export TEST_TARGETS='{{targets}}'
-    MODE=suite HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
 # Return-path resilience (binary chain): are replies spread over distinct relayers, and
 # does the stream survive one of them dying? Runs its own 5-node cluster — see
 # integration/tests/return_path.rs. Optional args = test-name filters.
+#
+# One invocation PER SCENARIO, unlike every other suite: these kill cluster nodes, so a shared
+# cluster would hand the next scenario a corpse.
 return-path *scenarios: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
-    # Empty = every scenario in the target, each on its own fresh chain.
-    export SCENARIOS='{{scenarios}}' TEST_TARGET=return_path
-    HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
+    source scripts/integration/lib.sh
+    it_env
+    export TEST_TARGET=return_path HOPRNET_SHELL='{{hoprnet}}'
+    scenarios='{{scenarios}}'
+    [ -n "${scenarios}" ] || scenarios="$(list_scenarios return_path)"
+    rc=0
+    for scenario in ${scenarios}; do
+      SCENARIOS="${scenario}" {{v5_deps}} bash scripts/integration/run-binchain.sh || rc=1
+    done
+    exit "${rc}"
 
 # Exit-origination repro (binary chain): does the exit keep originating packets when
 # one of its return paths can never be resolved? See integration/tests/exit_origination.rs.

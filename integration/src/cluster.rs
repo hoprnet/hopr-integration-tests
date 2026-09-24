@@ -453,62 +453,25 @@ pub(crate) fn parse_summary_json(json: &str) -> anyhow::Result<ClusterSummary> {
 
 // ── RAII handle ───────────────────────────────────────────────────────────────
 
+/// Kept alive for the life of the process: the handle is leaked (see [`bring_up_shared`]), so the
+/// localcluster outlives the last test and the runner reaps it. The fields are held rather than
+/// read -- dropping `_tempdir` would delete the node logs a failed run is diagnosed from.
 pub struct ClusterHandle {
     /// `Some` when we started the cluster; `None` in external mode.
-    child: Option<tokio::process::Child>,
+    _child: Option<tokio::process::Child>,
     pub summary: ClusterSummary,
     _tempdir: Option<tempfile::TempDir>,
 }
 
-impl Drop for ClusterHandle {
-    fn drop(&mut self) {
-        let Some(child) = self.child.as_mut() else {
-            return; // external cluster — leave it alone
-        };
-        #[cfg(unix)]
-        if let Some(pid) = child.id() {
-            use nix::sys::signal::{Signal, kill};
-            use nix::unistd::Pid;
-            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGINT);
-        }
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-                _ => {
-                    // Deadline hit or try_wait errored: SIGKILL, then reap — start_kill
-                    // only signals, so without a wait the process lingers as a zombie.
-                    let _ = child.start_kill();
-                    let reap_deadline = std::time::Instant::now() + Duration::from_secs(5);
-                    while std::time::Instant::now() < reap_deadline {
-                        if matches!(child.try_wait(), Ok(Some(_))) {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
-                    break;
-                }
-            }
-        }
-    }
-}
-
 static SHARED: tokio::sync::OnceCell<&'static ClusterHandle> = tokio::sync::OnceCell::const_new();
 
-/// Whether `HOPRD_SHARED_CLUSTER` asks for one cluster per test *binary* instead of one per test.
+/// The binary-wide cluster, brought up on first use and shared by every test in the binary.
 ///
 /// Bring-up dominates a short scenario's wall clock, and every scenario in a binary agrees on the
 /// cluster's shape by construction -- the `request_*` knobs above are all first-call-wins. Teardown
-/// then belongs to whoever started the process: the handle is leaked, so the localcluster outlives
-/// the last test and `scripts/integration/run-binchain.sh` (MODE=suite) reaps it.
-pub fn shared_cluster_enabled() -> bool {
-    std::env::var("HOPRD_SHARED_CLUSTER").is_ok_and(|v| v != "0")
-}
-
-/// The binary-wide cluster, brought up on first use.
+/// belongs to whoever started the process: the handle is leaked, so the localcluster outlives the
+/// last test and `scripts/integration/run-binchain.sh` reaps it. A scenario that needs a cluster
+/// to itself is run as its own invocation.
 pub async fn bring_up_shared() -> anyhow::Result<&'static ClusterHandle> {
     SHARED
         .get_or_try_init(|| async {
@@ -560,7 +523,7 @@ async fn attach_external(data_dir: &str) -> anyhow::Result<ClusterHandle> {
     let summary = wire_into_summary(wire, Some(std::path::Path::new(data_dir)))?;
     tracing::info!(blokli_url = %summary.blokli_url, "attached to external cluster");
     Ok(ClusterHandle {
-        child: None,
+        _child: None,
         summary,
         _tempdir: None,
     })
@@ -641,33 +604,14 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         );
         cmd.env(key, value);
     }
-    // The pipe reader below lives on the runtime of whichever test triggered bring-up. A shared
-    // cluster outlives that runtime, and a pipe nobody drains blocks localcluster's next write, so
-    // there the output goes to a file instead.
-    let stdout_log = shared_cluster_enabled().then(|| data_dir.join("localcluster.log"));
-    match &stdout_log {
-        Some(path) => {
-            cmd.stdout(std::fs::File::create(path).context("creating localcluster log")?);
-        }
-        None => {
-            cmd.stdout(std::process::Stdio::piped());
-        }
-    }
+    // To a file, not a pipe: the cluster outlives the runtime of whichever test triggered
+    // bring-up, and a pipe nobody drains blocks localcluster's next write.
+    let stdout_log = data_dir.join("localcluster.log");
+    cmd.stdout(std::fs::File::create(&stdout_log).context("creating localcluster log")?);
     cmd.stderr(std::process::Stdio::inherit());
 
     let mut child = cmd.spawn()?;
-    if let Some(path) = &stdout_log {
-        tracing::info!(path = %path.display(), "localcluster output goes to a file (shared cluster)");
-    } else {
-        let stdout = child.stdout.take().expect("stdout captured");
-        tokio::spawn(async move {
-            use tokio::io::AsyncBufReadExt as _;
-            let mut lines = tokio::io::BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::info!(target: "localcluster", "{}", line);
-            }
-        });
-    }
+    tracing::info!(path = %stdout_log.display(), "localcluster output goes to a file");
 
     let summary = match wait_status_running(
         std::path::Path::new(&lc_bin),
@@ -705,7 +649,7 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     };
 
     Ok(ClusterHandle {
-        child: Some(child),
+        _child: Some(child),
         summary,
         _tempdir: tempdir,
     })

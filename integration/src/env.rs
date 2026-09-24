@@ -138,31 +138,8 @@ pub struct IntegrationEnv {
     edgli: Edgli,
     _reactor: futures::future::AbortHandle,
     targets: Targets,
-    /// `Some` for a local cluster; `None` for Rotsee (no local process).
-    _cluster: Option<ClusterRef>,
-}
-
-/// A cluster this env tears down on drop, or the binary-wide one it merely borrows.
-enum ClusterRef {
-    Owned(Box<ClusterHandle>),
-    Shared(&'static ClusterHandle),
-}
-
-impl ClusterRef {
-    fn summary(&self) -> &ClusterSummary {
-        match self {
-            Self::Owned(h) => &h.summary,
-            Self::Shared(h) => &h.summary,
-        }
-    }
-}
-
-async fn acquire_cluster() -> anyhow::Result<ClusterRef> {
-    if cluster::shared_cluster_enabled() {
-        Ok(ClusterRef::Shared(cluster::bring_up_shared().await?))
-    } else {
-        Ok(ClusterRef::Owned(Box::new(cluster::bring_up().await?)))
-    }
+    /// The binary-wide cluster; `None` for Rotsee (no local process).
+    _cluster: Option<&'static ClusterHandle>,
 }
 
 impl Drop for IntegrationEnv {
@@ -178,8 +155,8 @@ impl IntegrationEnv {
     /// Bring up the local cluster, boot Edgli on the pre-funded extra identity, start
     /// the channel strategy, and wait until at least one outgoing channel is open.
     pub async fn setup() -> anyhow::Result<Self> {
-        let cluster = acquire_cluster().await?;
-        let summary = cluster.summary().clone();
+        let cluster = cluster::bring_up_shared().await?;
+        let summary = cluster.summary.clone();
         let extra = summary.extras[0].clone();
 
         let (edgli, reactor) = boot_edgli(
@@ -227,8 +204,8 @@ impl IntegrationEnv {
     #[cfg(feature = "v5")]
     pub async fn setup_pix_with(pix: edgli::PixEntryConfig) -> anyhow::Result<Self> {
         cluster::request_pix();
-        let cluster = acquire_cluster().await?;
-        let summary = cluster.summary().clone();
+        let cluster = cluster::bring_up_shared().await?;
+        let summary = cluster.summary.clone();
         let extra = summary.extras[0].clone();
 
         let (edgli, reactor) = boot_edgli(
@@ -305,7 +282,7 @@ impl IntegrationEnv {
     pub fn cluster(&self) -> anyhow::Result<&ClusterSummary> {
         self._cluster
             .as_ref()
-            .map(|c| c.summary())
+            .map(|c| &c.summary)
             .ok_or_else(|| anyhow::anyhow!("no local cluster (Rotsee env)"))
     }
 

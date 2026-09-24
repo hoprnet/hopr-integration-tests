@@ -170,9 +170,8 @@ release rather than a floating docker tag.
 
 ```bash
 just build-chain             # bloklid + blokli-contract-deployer + anvil, from the blokli flake tag
-just integration-binchain    # build hoprd, run both scenarios against a fresh chain per scenario
+just integration-binchain    # build hoprd, run both scenarios on one chain + cluster
 just integration-binchain zero_hop   # one scenario
-just integration-shared      # one chain + cluster for the whole binary (~20% faster)
 
 just unit                # fast unit tests (no cluster)
 just ci                  # CI-equivalent: the whole v4 line (or overrides)
@@ -242,9 +241,8 @@ nix build -L 'nixpkgs#foundry'                       --out-link result-foundry  
 
 ### Managed mode (the runner owns the chain and cluster)
 
-[`scripts/integration/run-binchain.sh`](scripts/integration/run-binchain.sh) starts a fresh
-chain per scenario (`MODE=scenario`, the default) or one per test binary (`MODE=suite`) and
-tears it down:
+[`scripts/integration/run-binchain.sh`](scripts/integration/run-binchain.sh) starts one fresh
+chain and one cluster per test binary, reused by every scenario in it, and tears both down:
 
 ```bash
 export HOPRD_BIN=$PWD/result-hoprd/bin/hoprd                     # from a PR? build that ref

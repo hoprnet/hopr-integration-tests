@@ -214,17 +214,21 @@ cluster_wait() {
 
 # The one cargo invocation. Skips the dev-shell wrap when already inside one — `just ci` and CI
 # both enter it before calling the runner, which used to open a second shell per scenario.
+# Extra args after the target are libtest filters; SKIP_SCENARIOS names tests to hold out.
 cargo_it() {
-  local target="${1:?usage: cargo_it <test-target> [filter]}" filter="${2:-}"
+  local target="${1:?usage: cargo_it <test-target> [filter...]}"
+  shift
   local -a wrap=()
   [ -z "${IN_NIX_SHELL:-}" ] && [ "${HOPRNET_SHELL:-}" != none ] &&
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
-  local -a test_args cargo_features
+  local -a test_args cargo_features skips=()
   read -r -a test_args <<<"${TEST_ARGS:-}"
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
+  local held
+  for held in ${SKIP_SCENARIOS:-}; do skips+=(--skip "${held}"); done
   "${wrap[@]}" cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
-    "${cargo_features[@]}" --test "${target}" ${filter:+"${filter}"} \
-    --no-fail-fast -- --include-ignored --test-threads=1 "${test_args[@]}"
+    "${cargo_features[@]}" --test "${target}" "$@" \
+    --no-fail-fast -- --include-ignored --test-threads=1 "${skips[@]}" "${test_args[@]}"
 }
 
 # Ask the binary what it carries, so a new scenario runs the moment it is written.
