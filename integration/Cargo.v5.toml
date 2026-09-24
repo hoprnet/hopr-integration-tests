@@ -24,9 +24,9 @@ hopr-lib = { git = "https://github.com/hoprnet/hoprnet", branch = "master", defa
 ] }
 
 # The other half: edge-client enables `hopr-lib/telemetry` but not `hopr-strategy/telemetry`, so
-# without this every `hopr_strategy_pix_*` counter is absent rather than zero. Version must match
-# what edgli resolves (4.0.0) or a second copy links in and reads all zeroes.
-hopr-strategy = { version = "4.0.0", default-features = false, features = [
+# without this every `hopr_strategy_pix_*` counter is absent rather than zero. Must name the version
+# edgli names or a second copy links in and reads all zeroes; run.sh mirrors edge-client's own.
+hopr-strategy = { version = "5.1.0", default-features = false, features = [
   "telemetry",
 ] }
 

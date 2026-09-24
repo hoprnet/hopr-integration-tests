@@ -48,6 +48,9 @@ hoprd_ref := env_var_or_default("HOPRD_REF", if line == "v5" { "main" } else { "
 # workstation cannot build — so `just pix` compiles hoprd from this tree instead.
 hoprd_src := env_var_or_default("HOPRD_SRC", "../hoprd")
 
+# LINE=v5 runs v5 binaries, so the crate needs the v5 manifest too (run.sh does its own swap).
+v5_deps := if line == "v5" { "bash scripts/integration/with-v5-deps.sh" } else { "" }
+
 data_dir := "/tmp/hopr-it"
 
 _default:
@@ -80,7 +83,7 @@ integration *filter: build preflight
     # Safety-net teardown: remove any chain container left behind (localcluster
     # cleans up on graceful exit; this covers crashes/timeouts).
     trap 'docker ps -aq --filter "ancestor={{chain_image}}" | xargs -r docker rm -f' EXIT
-    nix develop {{hoprnet}} -c cargo test --manifest-path integration/Cargo.toml --test integration --no-fail-fast {{filter}} -- --include-ignored --test-threads=1
+    {{v5_deps}} nix develop {{hoprnet}} -c cargo test --manifest-path integration/Cargo.toml --test integration --no-fail-fast {{filter}} -- --include-ignored --test-threads=1
 
 # Build the image-free chain: bloklid + blokli-contract-deployer (blokli branch)
 # and anvil (nixpkgs foundry). Replaces the bloklid-anvil docker image. `--refresh`
@@ -97,7 +100,7 @@ integration-binchain *scenarios: build build-chain
     set -euo pipefail
     # run-binchain.sh enters the dev shell itself (per scenario), so no outer wrap.
     [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
-    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
+    HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
 # Return-path resilience (binary chain): are replies spread over distinct relayers, and
 # does the stream survive one of them dying? Runs its own 5-node cluster — see
@@ -107,7 +110,7 @@ return-path *scenarios: build build-chain
     set -euo pipefail
     # Empty = every scenario in the target, each on its own fresh chain.
     export SCENARIOS='{{scenarios}}' TEST_TARGET=return_path
-    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
+    HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
 # Exit-origination repro (binary chain): does the exit keep originating packets when
 # one of its return paths can never be resolved? See integration/tests/exit_origination.rs.
@@ -115,16 +118,20 @@ exit-origination: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
     export TEST_TARGET=exit_origination
-    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
+    HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
 # End-to-end PIX with edgli as the paying entry (binary chain; manual, NOT run in CI).
 # Builds hoprd from HOPRD_SRC (default ../hoprd) because the nix flake has no PIX binary.
 # See integration/tests/pix.rs. Optional args = test-name filters.
-pix *scenarios: build-chain
+pix *scenarios:
     #!/usr/bin/env bash
     set -euo pipefail
     [ '{{line}}' = v5 ] || { echo "PIX is v5-only — run: LINE=v5 just pix" >&2; exit 2; }
-    src="$(cd '{{hoprd_src}}' && pwd)"
+    src="$(cd '{{hoprd_src}}' 2>/dev/null && pwd)" || {
+      echo "HOPRD_SRC '{{hoprd_src}}' is not a directory — point it at a v5 hoprd checkout." >&2
+      exit 2
+    }
+    just build-chain
     echo "building PIX-enabled hoprd + hoprd-localcluster from ${src}"
     # Release rather than debug: debug builds slow packet processing and cryptography enough to
     # distort the SSA cycle pacing the scenarios rest on. Only hoprd needs the feature named —
@@ -147,7 +154,8 @@ pix *scenarios: build-chain
     export SCENARIOS='{{scenarios}}' TEST_TARGET=pix
     # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
-    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
+    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/with-v5-deps.sh \
+      bash scripts/integration/run-binchain.sh
 
 # PIX under end-user traffic shapes (binary chain; manual, NOT run in CI, hours per full pass).
 #
@@ -157,10 +165,15 @@ pix *scenarios: build-chain
 # idle cycle strands its deposit by design.
 #
 # Optional args = test-name filters. The sweep drives this through scripts/integration/pix-sweep.sh.
-pix-shapes *scenarios: build-chain
+pix-shapes *scenarios:
     #!/usr/bin/env bash
     set -euo pipefail
-    src="$(cd '{{hoprd_src}}' && pwd)"
+    [ '{{line}}' = v5 ] || { echo "PIX is v5-only — run: LINE=v5 just pix-shapes" >&2; exit 2; }
+    src="$(cd '{{hoprd_src}}' 2>/dev/null && pwd)" || {
+      echo "HOPRD_SRC '{{hoprd_src}}' is not a directory — point it at a v5 hoprd checkout." >&2
+      exit 2
+    }
+    just build-chain
     echo "building PIX-enabled hoprd + hoprd-localcluster from ${src}"
     (cd "${src}" && nix develop -c cargo build --release -p hoprd --features strategy-pix-test)
     (cd "${src}" && nix develop -c cargo build --release -p hoprd-localcluster)
@@ -179,13 +192,12 @@ pix-shapes *scenarios: build-chain
       exit 1
     }
 
-    # Named explicitly rather than left to a filter: each gets a fresh chain, and the spike runs
-    # first because a failure in it means none of the shapes can be read.
-    SCENARIOS='{{scenarios}}'
-    [ -n "${SCENARIOS}" ] || SCENARIOS='the_profile_geometry_completes_a_cycle an_idle_session_completes_its_cycle_on_exit_fill a_browsing_session_sustains_its_cycles a_download_session_sustains_its_cycles an_upload_session_completes_on_fill a_mixed_session_sustains_its_cycles'
-    export SCENARIOS TEST_TARGET=pix_shapes
+    # Only the order is stated: a failed geometry spike makes every shape after it unreadable.
+    export SCENARIOS='{{scenarios}}' TEST_TARGET=pix_shapes
+    export SCENARIOS_FIRST="${SCENARIOS_FIRST:-the_profile_geometry_completes_a_cycle}"
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
-    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/run-binchain.sh
+    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/with-v5-deps.sh \
+      bash scripts/integration/run-binchain.sh
 
 # Run a single test against a fresh env (e.g. `just scenario zero_hop`).
 scenario name:
@@ -211,7 +223,7 @@ attach *filter:
     export RUST_LOG="${RUST_LOG:-info,edgli=debug}"
     export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
     export HOPRD_PUMP_MBPS="${HOPRD_PUMP_MBPS:-0.5}"
-    nix develop {{hoprnet}} -c cargo test --manifest-path integration/Cargo.toml --test integration --no-fail-fast {{filter}} -- --include-ignored --test-threads=1
+    {{v5_deps}} nix develop {{hoprnet}} -c cargo test --manifest-path integration/Cargo.toml --test integration --no-fail-fast {{filter}} -- --include-ignored --test-threads=1
 
 # Fast unit tests (gate + parse logic; no cluster).
 unit:
