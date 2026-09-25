@@ -133,12 +133,20 @@ pix-shapes *scenarios:
     pix_check_hoprd "${HOPRD_BIN}"
     pix_check_localcluster "${HOPRD_LOCALCLUSTER_BIN}"
 
-    # Only the order is stated: a failed geometry spike makes every shape after it unreadable.
-    export SCENARIOS='{{scenarios}}' TEST_TARGET=pix_shapes
-    export SCENARIOS_FIRST="${SCENARIOS_FIRST:-the_profile_geometry_completes_a_cycle}"
+    export TEST_TARGET=pix_shapes HOPRNET_SHELL='{{hoprnet}}'
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
-    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/with-v5-deps.sh \
-      bash scripts/integration/run-binchain.sh
+    runner=(bash scripts/integration/with-v5-deps.sh bash scripts/integration/run-binchain.sh)
+
+    # Named scenarios run as asked; the full pass puts the geometry spike in its own invocation
+    # first, because a cluster serves one invocation and a failed spike makes every shape after
+    # it unreadable.
+    if [ -n '{{scenarios}}' ]; then
+      SCENARIOS='{{scenarios}}' "${runner[@]}"
+    else
+      spike=the_profile_geometry_completes_a_cycle
+      SCENARIOS="${spike}" "${runner[@]}"
+      SCENARIOS_EXCEPT="${spike}" "${runner[@]}"
+    fi
 
 # Run a single test against a fresh env (e.g. `just scenario zero_hop`).
 scenario name:
