@@ -15,13 +15,19 @@
 #   EDGLI_REF        default edge-client ref (default: per LINE)
 #   BLOKLI_REF       blokli ref override     (default: per LINE)
 #   HOPRD_SKIP_LINE_CHECK  set to 1 to run a hoprd rev outside HOPRD_LINE anyway
-#   NIX_SYSTEM_SUFFIX    nix output arch suffix (default: x86_64-linux)
+#   NIX_SYSTEM_SUFFIX    cross-build to this nix system (default: empty = build for this machine)
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/integration/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+REPO_ROOT="${LIB_ROOT}"
 CRATE_CARGO="${REPO_ROOT}/integration/Cargo.toml"
 CRATE_LOCK="${REPO_ROOT}/integration/Cargo.lock"
-ARCH="${NIX_SYSTEM_SUFFIX:-x86_64-linux}"
+# Bare flake names resolve to this system, and `binary-hoprd-localcluster` has no per-system
+# alias at all — only an x86_64-linux one. So suffix nothing by default; NIX_SYSTEM_SUFFIX is a
+# cross-build override (CI sets it to keep building the musl outputs), not a default.
+SUFFIX="${NIX_SYSTEM_SUFFIX:+-${NIX_SYSTEM_SUFFIX}}"
+SYSTEM="${NIX_SYSTEM_SUFFIX:-$(nix eval --raw --impure --expr builtins.currentSystem)}"
 
 # Per-line defaults; an explicit env override still wins.
 LINE="${LINE:-v4}"
@@ -149,6 +155,7 @@ if [ "${LINE}" = "v5" ]; then
   MANIFEST_BACKUP="$(mktemp -d)"
   cp "${CRATE_CARGO}" "${MANIFEST_BACKUP}/Cargo.toml"
   cp "${CRATE_LOCK}" "${MANIFEST_BACKUP}/Cargo.lock"
+  # shellcheck disable=SC2329  # invoked indirectly via the traps below
   restore_manifest() {
     # Idempotent: the signal handler exits, firing the EXIT trap too.
     [ -d "${MANIFEST_BACKUP}" ] || return 0
@@ -189,8 +196,8 @@ nix_build() { # description, then `nix build` arguments
 }
 
 echo "building hoprd binaries from ref ${HOPRD_REF} ..."
-nix_build "hoprd" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-${ARCH}" --out-link "${REPO_ROOT}/result-hoprd"
-nix_build "hoprd-localcluster" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-localcluster-${ARCH}" --out-link "${REPO_ROOT}/result-localcluster"
+nix_build "hoprd" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd${SUFFIX}" --out-link "${REPO_ROOT}/result-hoprd"
+nix_build "hoprd-localcluster" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-localcluster${SUFFIX}" --out-link "${REPO_ROOT}/result-localcluster"
 
 # ── Build the blokli binary chain from the branch (bloklid + deployer + anvil) ──
 # `--refresh` is load-bearing: nix caches a flake ref's resolved revision for
@@ -207,18 +214,14 @@ nix_build "anvil (foundry)" -L "nixpkgs#foundry" --out-link "${REPO_ROOT}/result
 # x86_64-linux only — the flake exposes no other arch, so darwin goes via `just pix`.
 PIX_SUITE=0
 if [ "${LINE}" = "v5" ]; then
-  if [ "${ARCH}" = "x86_64-linux" ]; then
-    nix_build "hoprd (PIX pool)" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-pix-test-${ARCH}" \
+  if [ "${SYSTEM}" = "x86_64-linux" ]; then
+    nix_build "hoprd (PIX pool)" -L "github:hoprnet/hoprd/${HOPRD_REF}#binary-hoprd-pix-test-${SYSTEM}" \
       --out-link "${REPO_ROOT}/result-hoprd-pix"
     PIX_BIN="${REPO_ROOT}/result-hoprd-pix/bin/hoprd"
-    # `POOL` in hoprd::strategy is compiled in for exactly this check.
-    grep -qa 'non-anonymous-secp256k1' "${PIX_BIN}" || {
-      echo "${PIX_BIN} carries no secp256k1 deposit pool — refusing to run the PIX suite" >&2
-      exit 1
-    }
+    pix_check_hoprd "${PIX_BIN}" || exit 1
     PIX_SUITE=1
   else
-    echo "skipping the PIX suite: no binary-hoprd-pix-test output for ${ARCH} (use \`just pix\`)"
+    echo "skipping the PIX suite: no binary-hoprd-pix-test output for ${SYSTEM} (use \`just pix\`)"
   fi
 fi
 
@@ -316,7 +319,8 @@ run_suite() { # target, then any scenarios to HOLD OUT of it
   local target="$1"
   shift
   echo "═══════ suite: ${target} ═══════"
-  if ! TEST_TARGET="${target}" SCENARIOS_EXCEPT="$*" SCENARIOS_FIRST="${SCENARIOS_FIRST:-}" bash "${BINCHAIN}"; then
+  if ! TEST_TARGETS="${target}" SCENARIOS="${SCENARIOS:-}" SCENARIOS_EXCEPT="$*" \
+    bash "${BINCHAIN}"; then
     echo "suite ${target} FAILED" >&2
     suite_rc=1
   fi
@@ -328,17 +332,12 @@ run_suite integration
 # unforced random relayer draw, so a red says nothing. Locally: `just return-path`.
 # If it is ever wired back in, three of its five are the flaky ones — `spread` asserts a ratio on a
 # random draw, and the two survival scenarios miss their recovery deadline on some machines but not
-# others:
-#   run_suite return_path \
-#     return_paths_should_spread_across_distinct_relayers \
-#     session_should_survive_common_mode_return_outage \
-#     a_symmetric_session_should_survive_relayer_loss
+# others: `spread`, `common_mode_return_outage` and `a_symmetric_session_should_survive_relayer_loss`.
 run_suite exit_origination
 # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore FAILS
 # against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there. Wiring it in now
 # would turn the nightly red every run. Enable once that fix is in release/4.0 — at which point the
 # test flips to passing and becomes a genuine regression guard.
-#   run_suite upload_survival
 
 # Entry-side PIX: v5 only (`edgli/pix-test` has no v4 counterpart).
 if [ "${PIX_SUITE}" = "1" ]; then
@@ -348,9 +347,13 @@ if [ "${PIX_SUITE}" = "1" ]; then
   # `pix_shapes` additionally needs a localcluster that takes `--pix-config`: the bare
   # `--enable-pix` is a 32-packet demo cycle that no traffic shape fits inside. Probed on the
   # binary, the same way the deposit pool is, rather than assumed from the ref.
-  if grep -qa 'pix-config' "${REPO_ROOT}/result-localcluster/bin/hoprd-localcluster"; then
-    # The spike first -- if the geometry cannot complete one cycle, no shape below can be read.
-    SCENARIOS_FIRST=the_profile_geometry_completes_a_cycle run_suite pix_shapes
+  if pix_check_localcluster "${REPO_ROOT}/result-localcluster/bin/hoprd-localcluster" 2>/dev/null; then
+    # The geometry spike gets its own run, because a cluster serves one binary invocation and
+    # libtest orders the rest alphabetically: if the geometry cannot complete one cycle, no
+    # shape after it can be read.
+    spike=the_profile_geometry_completes_a_cycle
+    SCENARIOS="${spike}" run_suite pix_shapes
+    run_suite pix_shapes "${spike}"
   else
     echo "::error::the hoprd-localcluster built from '${HOPRD_REF}' has no --pix-config, so the" >&2
     echo "pix_shapes suite cannot state its geometry. Use a newer hoprd ref." >&2

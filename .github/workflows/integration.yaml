@@ -155,12 +155,13 @@ jobs:
       # Stale `result-*` out-links also go: they pin store paths GC would keep.
       - name: Pre-run hygiene
         run: |
+          # Workspace-scoped on purpose: several runner instances share this box, so this must
+          # NOT become lib.sh's reap_nodes, which matches by binary name.
           pkill -f "${GITHUB_WORKSPACE}/result-" || true
-          rm -rf /tmp/hopr-nodes /tmp/hoprd-it-* /tmp/hopr-chain || true
-          # HOPRD_KEEP_ARTIFACTS leaks the cluster dir on purpose, so previous runs'
-          # copies pile up on a persistent runner. Reap them before, not after, so a
-          # failed run's evidence survives until it has been uploaded and read.
-          find /tmp -maxdepth 3 -type d -name 'hoprd-it-*' -exec rm -rf {} + 2>/dev/null || true
+          # HOPRD_KEEP_ARTIFACTS leaks the cluster dir on purpose, so previous runs' copies pile
+          # up on a persistent runner. Reap them before, not after, so a failed run's evidence
+          # survives until it has been uploaded and read.
+          bash scripts/integration/lib.sh clean_tmp || true
           rm -f result-hoprd result-hoprd-pix result-localcluster result-bloklid result-foundry || true
       # Same reason as pr.yaml: the checkout git-cleans the workspace, so a target
       # dir inside it is rebuilt from scratch on every run of a persistent box.
@@ -275,6 +276,10 @@ jobs:
             echo "TRIGGER=manual run"
           fi >>"${GITHUB_ENV}"
       - name: Resolve versions, build stack, run test
+        # Pinned rather than left to run.sh's native default: the runners are x86_64-linux,
+        # and the suffixed outputs are the static musl builds CI has always run.
+        env:
+          NIX_SYSTEM_SUFFIX: x86_64-linux
         run: nix develop github:hoprnet/hoprnet --command bash scripts/integration/run.sh
       # The console now carries a summary; this is where the detail lives when a run
       # goes red. Only on failure, so a green run stores nothing.
@@ -318,7 +323,7 @@ jobs:
         if: always()
         run: |
           pkill -f "${GITHUB_WORKSPACE}/result-" || true
-          rm -rf /tmp/hopr-nodes /tmp/hoprd-it-* /tmp/hopr-chain || true
+          bash scripts/integration/lib.sh clean_tmp || true
       # Nothing reclaims the nix store on a persistent runner, and each run adds a
       # fresh hoprd/blokli closure. GC only when the disk is actually tight, so the
       # common case keeps its warm store and does not re-fetch from Cachix.

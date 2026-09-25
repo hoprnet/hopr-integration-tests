@@ -58,6 +58,42 @@ jobs:
             perf
             test
           requireScope: false
+  shell:
+    name: Shell lint
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          disable-sudo: false
+          egress-policy: audit
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Setup Nix
+        uses: hoprnet/hopr-workflows/actions/setup-nix@5477bd53d62ac15c4804b31fbd55966b29a43997 # setup-nix-v2
+        with:
+          cachix_cache_name: hoprnet
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      # `-i 2` matches what treefmt's shfmt writes; raw shfmt defaults to tabs.
+      - name: shellcheck + shfmt
+        run: |
+          nix develop . --command bash -c '
+            shellcheck scripts/integration/*.sh scripts/*.sh
+            shfmt -i 2 -d scripts/
+          '
+      # The scripts grew by copying: a fork of the runner, three chain pollers, six reapers.
+      # A hard cap is the guardrail; shared logic belongs in lib.sh, not in a new file.
+      - name: Script budget
+        run: |
+          n=$(find scripts/integration -maxdepth 1 -name '*.sh' | wc -l | tr -d ' ')
+          [ "${n}" -le 5 ] || {
+            echo "::error::script budget exceeded (${n} > 5) — put shared logic in scripts/integration/lib.sh"
+            exit 1
+          }
+
   lint:
     name: Format + clippy (${{ matrix.line }})
     runs-on: depot-ubuntu-24.04-4

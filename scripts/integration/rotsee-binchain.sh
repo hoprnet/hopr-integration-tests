@@ -47,7 +47,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "── starting flake chain ──"
-bash "${REPO_ROOT}/scripts/integration/chain-up.sh" &
+bash "${REPO_ROOT}/scripts/integration/lib.sh" chain_up &
 CHAIN_PID=$!
 chain_ready=false
 for _ in $(seq 1 60); do
@@ -101,12 +101,16 @@ done
 # Harvest the funded extra identity + chain endpoint + an exit node from the cluster
 # status into the EDGLI_ROTSEE_* contract the test reads.
 S="$("${LC}" status --data-dir "${DATA_DIR}")"
-export EDGLI_ROTSEE_BLOKLI_URL="$(jq -r '.blokli_url' <<<"${S}")"
-export EDGLI_ROTSEE_IDENTITY_FILE="$(jq -r '.extras[0].keystore_path' <<<"${S}")"
-export EDGLI_ROTSEE_IDENTITY_PASSWORD="$(jq -r '.extras[0].password' <<<"${S}")"
-export EDGLI_ROTSEE_SAFE_ADDRESS="$(jq -r '.extras[0].safe_address' <<<"${S}")"
-export EDGLI_ROTSEE_MODULE_ADDRESS="$(jq -r '.extras[0].module_address' <<<"${S}")"
-export EDGLI_ROTSEE_EXIT_NODE="$(jq -r '.nodes[0].address' <<<"${S}")"
+# Assigned before export so a failing jq aborts under `set -e` instead of exporting an
+# empty value the test only trips over minutes later.
+EDGLI_ROTSEE_BLOKLI_URL="$(jq -r '.blokli_url' <<<"${S}")"
+EDGLI_ROTSEE_IDENTITY_FILE="$(jq -r '.extras[0].keystore_path' <<<"${S}")"
+EDGLI_ROTSEE_IDENTITY_PASSWORD="$(jq -r '.extras[0].password' <<<"${S}")"
+EDGLI_ROTSEE_SAFE_ADDRESS="$(jq -r '.extras[0].safe_address' <<<"${S}")"
+EDGLI_ROTSEE_MODULE_ADDRESS="$(jq -r '.extras[0].module_address' <<<"${S}")"
+EDGLI_ROTSEE_EXIT_NODE="$(jq -r '.nodes[0].address' <<<"${S}")"
+export EDGLI_ROTSEE_BLOKLI_URL EDGLI_ROTSEE_IDENTITY_FILE EDGLI_ROTSEE_IDENTITY_PASSWORD
+export EDGLI_ROTSEE_SAFE_ADDRESS EDGLI_ROTSEE_MODULE_ADDRESS EDGLI_ROTSEE_EXIT_NODE
 export RUST_LOG="${RUST_LOG:-info,edgli=debug}"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
 

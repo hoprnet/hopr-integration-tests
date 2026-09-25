@@ -12,9 +12,8 @@
 //! test.
 //!
 //! ## Modes
-//! - **Managed** (default): set `HOPRD_LOCALCLUSTER_BIN`, `HOPRD_BIN`,
-//!   `HOPRD_CHAIN_IMAGE` (a `bloklid-anvil` image), optional
-//!   `HOPRD_CONTAINER_RUNTIME` (default `docker`).
+//! - **Managed** (default): set `HOPRD_LOCALCLUSTER_BIN`, `HOPRD_BIN` and
+//!   `HOPRD_CHAIN_URL` (a chain from `scripts/integration/lib.sh chain_up`).
 //! - **External**: set `HOPRD_CLUSTER_DATA_DIR` (+ `HOPRD_LOCALCLUSTER_BIN`).
 
 pub mod cluster;

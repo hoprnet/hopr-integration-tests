@@ -31,9 +31,13 @@ use crate::{
     },
 };
 
-/// Edgli's P2P port — one slot beyond the cluster nodes.
+/// Edgli's P2P port — one slot beyond the cluster nodes, then one per boot.
+///
+/// A shared cluster boots several edglis in one process, and the previous one's listener is not
+/// always released by the time the next binds.
 fn edge_p2p_port() -> u16 {
-    P2P_PORT_BASE + cluster_size() as u16
+    static BOOTS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    P2P_PORT_BASE + cluster_size() as u16 + BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Strategies appended to the channel-lifecycle one `default_strategy_cfg` yields.
@@ -134,8 +138,8 @@ pub struct IntegrationEnv {
     edgli: Edgli,
     _reactor: futures::future::AbortHandle,
     targets: Targets,
-    /// `Some` for a local cluster we own; `None` for Rotsee (no local process).
-    _cluster: Option<ClusterHandle>,
+    /// The binary-wide cluster; `None` for Rotsee (no local process).
+    _cluster: Option<&'static ClusterHandle>,
 }
 
 impl Drop for IntegrationEnv {
@@ -151,7 +155,7 @@ impl IntegrationEnv {
     /// Bring up the local cluster, boot Edgli on the pre-funded extra identity, start
     /// the channel strategy, and wait until at least one outgoing channel is open.
     pub async fn setup() -> anyhow::Result<Self> {
-        let cluster = cluster::bring_up().await?;
+        let cluster = cluster::bring_up_shared().await?;
         let summary = cluster.summary.clone();
         let extra = summary.extras[0].clone();
 
@@ -200,7 +204,7 @@ impl IntegrationEnv {
     #[cfg(feature = "v5")]
     pub async fn setup_pix_with(pix: edgli::PixEntryConfig) -> anyhow::Result<Self> {
         cluster::request_pix();
-        let cluster = cluster::bring_up().await?;
+        let cluster = cluster::bring_up_shared().await?;
         let summary = cluster.summary.clone();
         let extra = summary.extras[0].clone();
 
