@@ -191,7 +191,8 @@ patch release. Set `HOPRNET_SHELL=path:../hoprnet` to use a
 local checkout for the dev shell instead of the flake. The rest of this section
 documents the underlying env contract the recipes set up.
 
-The test is `#[ignore]` — it needs external binaries + a container runtime.
+The test is `#[ignore]` — it needs external binaries and a running chain (`lib.sh chain_up`;
+see Managed mode below).
 
 ### Seeing the logs
 
@@ -256,11 +257,13 @@ SCENARIOS="zero_hop one_hop" bash scripts/integration/run-binchain.sh
 ### External mode (attach to a running cluster — faster iteration)
 
 ```bash
-# terminal 1: bring the cluster up once and leave it running
+# terminal 1: bring chain + cluster up once and leave them running (`just cluster-up`)
+bash scripts/integration/lib.sh chain_up &
 hoprd-localcluster --size 3 --extra-identities 1 \
+  --api-host 127.0.0.1 \
   --api-port-base 13000 --p2p-port-base 19000 \
   --api-token test-token-localcluster \
-  --chain-image $HOPRD_CHAIN_IMAGE \
+  --chain-url http://localhost:8080 \
   --hoprd-bin $HOPRD_BIN \
   --data-dir /tmp/hopr-it
 
@@ -280,13 +283,13 @@ Unit tests (cluster status parsing, no external deps): `cargo test --lib`.
 
 ## CI
 
-`pr.yaml` runs on every PR, in three jobs split by what each one needs: the PR
-title check (Conventional Commits) and `lint` (`cargo fmt --check` +
-`cargo clippy -D warnings`) on hosted **depot** runners, and `unit`
-(`cargo test --lib`) on the self-hosted **`hetzner`** box — anything that
-_executes_ a test runs on the same machine as the throughput gate, so results are
-comparable. The `#[ignore]` e2e is **not** run here. All three build in the
-hoprnet dev shell. Locally: `just lint` + `just unit`.
+`pr.yaml` runs on every PR, in four jobs split by what each one needs: the PR
+title check (Conventional Commits), `lint` (`cargo fmt --check` +
+`cargo clippy -D warnings`) and `shell` (shellcheck + shfmt, plus the script-count
+budget) on hosted **depot** runners, and `unit` (`cargo test --lib`) on the
+self-hosted **`hetzner`** box — anything that _executes_ a test runs on the same
+machine as the throughput gate, so results are comparable. The `#[ignore]` e2e is
+**not** run here. Locally: `just lint` + `just unit`.
 
 Both fan out over the two lines (`v4`, `v5`), which is where `--features pix` gets checked
 at all: the v5 job adds a `--features pix` clippy pass and runs `cargo test --lib
