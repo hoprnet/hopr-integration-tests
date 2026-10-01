@@ -346,26 +346,22 @@ const MAX_RELAYER_IMBALANCE: f64 = 2.1;
 /// 4 relayers — and stays lost until probing drops the dead node from the candidate set.
 /// Anything above this floor means the session degraded proportionally instead of
 /// collapsing; concentration puts this number near zero.
-/// Fraction of pre-kill throughput the stream must get back to.
+/// Fraction of the paced baseline's throughput the stream must get back to.
 ///
 /// Losing a relayer costs real capacity, so the bar is not "as before" -- it is that the stream
 /// settles at a usable rate instead of trickling or dying.
 const RECOVERY_FRACTION: f64 = 0.5;
 
-/// How long after the kill that rate must be reached, as the *test* boundary.
+/// How much longer than the healthy session the post-fault session may take to reach that rate.
 ///
-/// Measured from the kill itself, which includes [`KILL_SETTLE`] -- the session is already broken
-/// during that window even though the test is offering nothing, and whoever is waiting for the
-/// connection is not paused along with it.
-///
-/// Measured from when the survival phase starts offering data -- the end of [`KILL_SETTLE`] --
-/// not from the kill, which offers nothing.
+/// Both are timed from their first byte offered, at the same rate, so the ramp a healthy session
+/// needs anyway (queueing, first byte) cancels and only the delay the fault added is left.
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Design target on the same clock as [`RECOVERY_DEADLINE`]. Reported, not asserted.
 const RECOVERY_AIM: Duration = Duration::from_secs(5);
 
-/// [`RECOVERY_DEADLINE`] as `time_to_sustain` reports it: counted from the kill.
+/// [`RECOVERY_DEADLINE`] counted from the kill.
 const RECOVERY_BUDGET_FROM_KILL: Duration =
     Duration::from_secs(KILL_SETTLE.as_secs() + RECOVERY_DEADLINE.as_secs());
 
@@ -383,6 +379,49 @@ const RECOVERY_SUSTAIN_WINDOW: Duration = Duration::from_secs(3);
 const WARMUP_PHASE: u8 = 1;
 /// Phase tag for the post-kill survival payload.
 const SURVIVAL_PHASE: u8 = 2;
+/// Phase tag for the paced pre-fault baseline payload.
+const BASELINE_PHASE: u8 = 4;
+
+/// How long the pre-fault baseline offers load, at the survival phase's rate.
+const BASELINE_LOAD_DURATION: Duration = Duration::from_secs(20);
+
+/// The healthy session under the survival phase's own paced load.
+///
+/// The warm-up rate is a burst drained from a pre-filled SURB buffer, not what the session
+/// sustains, so a target derived from it tracks machine speed rather than recovery.
+async fn measure_paced_baseline(
+    rx: &mut tokio::io::ReadHalf<HoprSession>,
+    tx: &mut tokio::io::WriteHalf<HoprSession>,
+    offered_mbps: f64,
+    label: &str,
+) -> anyhow::Result<Transfer> {
+    let bytes = (offered_mbps * 1_000_000.0 * BASELINE_LOAD_DURATION.as_secs_f64()) as usize;
+    let payload = tagged_payload(BASELINE_PHASE, bytes);
+    let baseline = pump_halves(
+        rx,
+        tx,
+        &payload,
+        label,
+        PUMP_TIMEOUT,
+        PumpOpts {
+            pace: pace_for_rate(offered_mbps),
+            phase: Some(BASELINE_PHASE),
+            ..PumpOpts::default()
+        },
+    )
+    .await?;
+    anyhow::ensure!(
+        baseline.arrival_pct() > 50.0,
+        "paced baseline only returned {:.1}% before any fault — nothing to recover to",
+        baseline.arrival_pct(),
+    );
+    let leftover = drain_until_quiet(rx, DRAIN_QUIET, label).await;
+    anyhow::ensure!(
+        leftover <= MAX_LEFTOVER_BYTES,
+        "{leftover} B of baseline traffic still arriving after drain (limit {MAX_LEFTOVER_BYTES} B)",
+    );
+    Ok(baseline)
+}
 
 /// Bring up a cluster sized for return-path work and open a 0-hop-out / 1-hop-back
 /// session, returning the env, the session, and the nodes that can relay replies.
@@ -568,6 +607,15 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
          survival measurement taken here would mean anything",
     );
 
+    let offered_mbps = before_kill.mbps * SURVIVAL_LOAD_FRACTION;
+    let baseline = measure_paced_baseline(
+        &mut rx,
+        &mut tx,
+        offered_mbps,
+        &format!("{}-baseline", topology.direction),
+    )
+    .await?;
+
     let busiest = spread
         .busiest()
         .ok_or_else(|| anyhow::anyhow!("no relayer forwarded anything; nothing to kill"))?;
@@ -597,7 +645,6 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
     // Phase 4 -- survive: fresh bytes, offered at a steady rate for several times the deadline so
     // that load is still arriving when recovery happens. Sized from the measured baseline rather
     // than fixed, so the offered rate stays a constant fraction of what this cluster can do.
-    let offered_mbps = before_kill.mbps * SURVIVAL_LOAD_FRACTION;
     let survival_bytes =
         (offered_mbps * 1_000_000.0 * SURVIVAL_LOAD_DURATION.as_secs_f64()) as usize;
     tracing::info!(
@@ -645,7 +692,7 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         counters.nonzero()
     );
 
-    assert_recovered(&before_kill, &after_kill, &spread, &spread_after, settle)
+    assert_recovered(&baseline, &after_kill, &spread, &spread_after)
 }
 
 /// The original incident: the entry reassembles the reply stream, and a return relay dies under it.
@@ -766,6 +813,9 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
         "{leftover} B of warm-up traffic still arriving after drain (limit {MAX_LEFTOVER_BYTES} B); \
          the phases cannot be told apart",
     );
+    let offered_mbps = before.mbps * SURVIVAL_LOAD_FRACTION;
+    let baseline =
+        measure_paced_baseline(&mut rx, &mut tx, offered_mbps, "common-mode-baseline").await?;
 
     // Phase 3 — freeze EVERY return relayer at once: the common-mode outage.
     tracing::info!(
@@ -785,7 +835,6 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
     // Phase 4 — offer load into the outage. The return path is fully down, so an unreliable session
     // legitimately delivers little; the point is that it degrades *cleanly* — the pump completes
     // rather than the session panicking, thrashing, or wedging the writer permanently.
-    let offered_mbps = before.mbps * SURVIVAL_LOAD_FRACTION;
     let outage_bytes = (offered_mbps * 1_000_000.0 * OUTAGE_DURATION.as_secs_f64()) as usize;
     let counters_before = session_metrics::sample();
     let outage_payload = tagged_payload(OUTAGE_PHASE, outage_bytes);
@@ -867,7 +916,7 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
     )
     .await?;
 
-    assert_recovered(&before, &after, &spread, &spread_after, settle)
+    assert_recovered(&baseline, &after, &spread, &spread_after)
 }
 
 /// Report every measurement, then assert on them in combination.
@@ -880,19 +929,23 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
 /// such hole: the stream must reach the rate in time, *still* be carrying it when the pump ends,
 /// and never have gone quiet for longer than the deadline on the way.
 fn assert_recovered(
-    before_kill: &Transfer,
+    baseline: &Transfer,
     after_kill: &Transfer,
     spread: &RelayerSpread,
     spread_after: &RelayerSpread,
-    settle: Duration,
 ) -> anyhow::Result<()> {
-    let target_mbps = before_kill.mbps * RECOVERY_FRACTION;
-    // Timed from the kill, so the post-kill settle counts against the deadline. The session is
-    // already broken during that window even though no load is being offered, and a user waiting
-    // for their connection to come back is not paused with it.
-    let recovered_after = after_kill
+    let target_mbps = baseline.mbps * RECOVERY_FRACTION;
+    let healthy_ramp = baseline
         .time_to_sustain(target_mbps, RECOVERY_SUSTAIN_WINDOW)
-        .map(|since_offer| since_offer + settle.as_secs_f64());
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the healthy baseline never held {target_mbps:.2} MB/s for \
+                 {RECOVERY_SUSTAIN_WINDOW:?}, so there is no ramp to measure recovery against"
+            )
+        })?;
+    let recovery = after_kill
+        .time_to_sustain(target_mbps, RECOVERY_SUSTAIN_WINDOW)
+        .map(|s| (s - healthy_ramp).max(0.0));
     let steady_state = after_kill.steady_state_mbps(RECOVERY_SUSTAIN_WINDOW);
     let longest_stall = after_kill.longest_stall();
 
@@ -948,9 +1001,8 @@ fn assert_recovered(
          ttfb {} | longest stall {longest_stall:.1}s | inter-arrival p50 {} / p95 {} | \
          arrival {:.1}% ({} B of {} B) | wall {:.1}s",
         after_kill.outcome,
-        recovered_after.map_or("never reached".to_string(), |s| format!(
-            "took {:.1}s after resume ({s:.1}s after the kill)",
-            (s - KILL_SETTLE.as_secs_f64()).max(0.0)
+        recovery.map_or("never reached".to_string(), |s| format!(
+            "{s:.1}s beyond the healthy {healthy_ramp:.1}s ramp"
         )),
         RECOVERY_AIM.as_secs(),
         RECOVERY_DEADLINE.as_secs(),
@@ -959,7 +1011,7 @@ fn assert_recovered(
         // printed "PASSES the boundary" -- the opposite of the truth, in the one line a reader
         // scans first. Neither threshold is asserted, which is exactly why the wording has to be
         // right: this string is the only place the run says whether it hit them.
-        match recovered_after.map(|s| (s - KILL_SETTLE.as_secs_f64()).max(0.0)) {
+        match recovery {
             None => " (MISSES the boundary: never reached)",
             Some(s) if s > RECOVERY_DEADLINE.as_secs_f64() => " (MISSES the boundary, and the aim)",
             Some(s) if s > RECOVERY_AIM.as_secs_f64() => " (passes the boundary, MISSES the aim)",
@@ -990,42 +1042,36 @@ fn assert_recovered(
         after_kill
             .throughput_at(0.50)
             .map_or("never reached 50%".to_string(), |r| format!("{r:.2} MB/s")),
-        before_kill.mbps * SURVIVAL_LOAD_FRACTION,
-    );
-    tracing::info!(
-        "recovery is timed from the kill: the {settle:?} settle before any load was offered is \
-         included in the figure above",
+        baseline.sent_bytes as f64 / 1_000_000.0 / BASELINE_LOAD_DURATION.as_secs_f64(),
     );
 
-    // 1. Nearly all of the data offered after the fault came back. This is the bar: recovery time,
-    //    steady state and stalls are reported above as diagnostics, but a session that delivers its
-    //    payload has survived losing a relayer whatever shape the curve took getting there.
-    let recovery_from_resume = recovered_after.map(|s| (s - KILL_SETTLE.as_secs_f64()).max(0.0));
+    // 1. It got back to half the healthy rate no more than the deadline later than the healthy
+    //    session did.
     anyhow::ensure!(
-        recovery_from_resume.is_some_and(|s| s <= RECOVERY_DEADLINE.as_secs_f64()),
-        "session did not survive the relayer loss: {} (need ≤{}s at ≥{:.2} MB/s, {:.0}% of the \
-         {:.2} MB/s measured before the kill); {:.1}% of {} B came back, the lost relayer had \
-         carried {:.0}% of replies — {}",
-        recovery_from_resume.map_or("never reached the target rate".to_string(), |s| format!(
-            "took {s:.1}s to recover after traffic resumed"
+        recovery.is_some_and(|s| s <= RECOVERY_DEADLINE.as_secs_f64()),
+        "session did not survive the relayer loss: {} (need ≤{}s beyond the healthy \
+         {healthy_ramp:.1}s ramp at ≥{:.2} MB/s, {:.0}% of the {:.2} MB/s sustained before the \
+         fault); {:.1}% of {} B came back, the lost relayer had carried {:.0}% of replies — {}",
+        recovery.map_or("never reached the target rate".to_string(), |s| format!(
+            "took {s:.1}s longer than the healthy session"
         )),
         RECOVERY_DEADLINE.as_secs(),
         target_mbps,
         RECOVERY_FRACTION * 100.0,
-        before_kill.mbps,
+        baseline.mbps,
         after_kill.arrival_pct(),
         after_kill.sent_bytes,
         spread.max_share() * 100.0,
         spread_after.summary(),
     );
 
-    // 3. It never went quiet for longer than the deadline. A stream that stalls for a minute
+    // 2. It never went quiet for longer than the deadline. A stream that stalls for a minute
     //    mid-transfer can still satisfy both of the above, and is not a recovered stream.
     anyhow::ensure!(
         longest_stall <= RECOVERY_DEADLINE.as_secs_f64(),
         "return path went quiet for {longest_stall:.1}s, longer than the {RECOVERY_DEADLINE:?} \
          deadline, despite recovering at {} — {}",
-        recovered_after.map_or("never".to_string(), |s| format!("{s:.1}s")),
+        recovery.map_or("never".to_string(), |s| format!("{s:.1}s")),
         spread_after.summary(),
     );
 
@@ -1040,7 +1086,7 @@ fn assert_recovered(
     );
     tracing::info!(
         "survived relayer loss: {:.1}% → {:.1}% arrival, replies rerouted to {}",
-        before_kill.arrival_pct(),
+        baseline.arrival_pct(),
         after_kill.arrival_pct(),
         spread_after.summary(),
     );
