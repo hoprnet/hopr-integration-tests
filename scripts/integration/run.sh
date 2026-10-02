@@ -31,91 +31,8 @@ SYSTEM="${NIX_SYSTEM_SUFFIX:-$(nix eval --raw --impure --expr builtins.currentSy
 
 LINE="${LINE:-v4}"
 
-# The tests PR names the rest of a breaking change-set in `Requires:` lines; see README. Resolved
-# here rather than in the workflow: a dispatch runs main's workflow, but this script from the PR.
-companion_source_pr() {
-  [ -n "${GITHUB_EVENT_PATH:-}" ] || return 0
-  python3 - "${GITHUB_EVENT_PATH}" <<'PY'
-import json, re, sys
-
-event = json.load(open(sys.argv[1]))
-pr = ((event.get("client_payload") or {}).get("tests_pr")
-      or (event.get("inputs") or {}).get("tests_pr")
-      or (event.get("pull_request") or {}).get("number"))
-if not pr:
-    queued = re.search(r"/pr-([0-9]+)-", (event.get("merge_group") or {}).get("head_ref", ""))
-    pr = queued and queued.group(1)
-print(pr or "")
-PY
-}
-COMPANION_SOURCE_PR="$(companion_source_pr)"
-if [ -n "${COMPANION_SOURCE_PR}" ]; then
-  body="$(gh pr view "${COMPANION_SOURCE_PR}" -R "${GITHUB_REPOSITORY}" --json body -q .body)"
-  companions="$(sed -nE 's/^[[:space:]]*Requires: hoprnet\/(hoprd|edge-client|blokli)#([0-9]+).*/\1 \2/p' <<<"${body}")"
-  if [ -z "${companions}" ] && grep -qE '^[[:space:]]*Requires:' <<<"${body}"; then
-    echo "::error::#${COMPANION_SOURCE_PR} has a Requires: line that does not parse as 'Requires: hoprnet/<hoprd|edge-client|blokli>#<n>'" >&2
-    exit 1
-  fi
-  while read -r repo num; do
-    [ -n "${repo}" ] || continue
-    read -r state base sha fork < <(gh pr view "${num}" -R "hoprnet/${repo}" \
-      --json state,baseRefName,headRefOid,isCrossRepository \
-      -q '"\(.state) \(.baseRefName) \(.headRefOid) \(.isCrossRepository)"')
-    if [ "${fork}" != false ]; then
-      echo "::error::hoprnet/${repo}#${num} is a fork PR; its head must not run on the self-hosted box" >&2
-      exit 1
-    fi
-    case "${base}" in
-    main) line=v5 ;;
-    release/*) line=v4 ;;
-    *)
-      echo "::error::hoprnet/${repo}#${num} targets '${base}', which maps to no line" >&2
-      exit 1
-      ;;
-    esac
-    case "${state}" in
-    MERGED)
-      echo "hoprnet/${repo}#${num} is merged: ${line} uses the ${base} head"
-      continue
-      ;;
-    OPEN) ;;
-    *)
-      echo "::error::hoprnet/${repo}#${num} is ${state}" >&2
-      exit 1
-      ;;
-    esac
-    if [ "${GITHUB_EVENT_NAME:-}" = merge_group ]; then
-      echo "::error::merge hoprnet/${repo}#${num} first: main must not get ahead of ${repo}" >&2
-      exit 1
-    fi
-    [ "${line}" = "${LINE}" ] || continue
-    case "${repo}" in
-    edge-client) EDGLI_REF="${sha}" ;;
-    hoprd) HOPRD_REF="${sha}" ;;
-    blokli) BLOKLI_REF="${sha}" ;;
-    esac
-    echo "companion: ${repo} at ${sha} (hoprnet/${repo}#${num}, from #${COMPANION_SOURCE_PR})" |
-      tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
-  done <<<"${companions}"
-fi
-
-# Per-line defaults; an explicit env override still wins.
-case "${LINE}" in
-v4)
-  HOPRD_LINE="${HOPRD_LINE:-release/4.1}"
-  EDGLI_REF="${EDGLI_REF:-release/4.1}"
-  BLOKLI_DEFAULT="release/0.13"
-  ;;
-v5)
-  HOPRD_LINE="${HOPRD_LINE:-main}"
-  EDGLI_REF="${EDGLI_REF:-main}"
-  BLOKLI_DEFAULT="release/0.14"
-  ;;
-*)
-  echo "unknown LINE '${LINE}' (expected v4 or v5)" >&2
-  exit 2
-  ;;
-esac
+companion_refs
+line_refs
 HOPRD_REF="${HOPRD_REF:-${HOPRD_LINE}}"
 
 # The triggering project overrides its own rev; the other keeps its default above.
@@ -133,20 +50,6 @@ blokli) BLOKLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=blokli}" ;
   ;;
 esac
 
-# Resolve edge-client ref → concrete sha (cargo git `rev` needs a commit, not a branch).
-resolve_sha() { # owner/repo ref
-  local ref="$2"
-  if [[ $ref =~ ^[0-9a-f]{7,40}$ ]]; then
-    echo "$ref"
-    return
-  fi
-  # Resolve via `gh api`, not `git ls-remote`: the dev shell's LD_LIBRARY_PATH points
-  # at nix glibc, which the system `git-remote-https` helper loads over its older
-  # system glibc, tripping `GLIBC_ABI_DT_X86_64_PLT not found` and aborting the fetch
-  # on CI. `gh` is a self-contained nix binary on PATH (auth via GH_TOKEN in CI; the
-  # repo is public, so this also works unauthenticated locally).
-  gh api "repos/$1/commits/${ref}" --jq '.sha' 2>/dev/null
-}
 EDGLI_SHA="$(resolve_sha hoprnet/edge-client "${EDGLI_REF}")"
 [ -n "${EDGLI_SHA}" ] || {
   echo "could not resolve edge-client ref '${EDGLI_REF}'" >&2
@@ -295,100 +198,12 @@ if [ "${LINE}" = "v5" ]; then
 fi
 
 # ── Pin edgli to the resolved sha, and hopr-lib to whatever that edgli pins ──
-echo "pinning edgli to ${EDGLI_SHA} ..."
-# Read through `gh api` for the reason resolve_sha gives: git-over-https is unusable in the dev
-# shell. Needed because our `hopr-lib` must name the rev edgli resolves, and only edge-client's
-# own manifest says which that is.
-EDGLI_MANIFEST="$(gh api "repos/hoprnet/edge-client/contents/Cargo.toml?ref=${EDGLI_SHA}" \
-  --jq '.content' 2>/dev/null | base64 -d)" || true
-[ -n "${EDGLI_MANIFEST}" ] || {
-  echo "could not read edge-client's Cargo.toml at ${EDGLI_SHA}" >&2
-  exit 1
-}
-export EDGLI_MANIFEST
-python3 - "$CRATE_CARGO" "$EDGLI_SHA" <<'PY'
-import os, re, sys
-
-path, rev = sys.argv[1], sys.argv[2]
-src = open(path).read()
-
-# The committed manifest pins edgli by BRANCH (`branch = "main"`) on purpose, so the
-# default does not drift behind what CI tests. Pinning here therefore has to *replace
-# the branch key with a rev*, not edit an existing rev — an earlier version of this
-# only handled `rev = "<sha>"` and so could never match the committed state.
-# Accept whichever key the stanza carries so a repeat run over an already-pinned
-# manifest works too.
-stanza = re.search(r'^edgli\s*=\s*\{.*?\}', src, re.S | re.M)
-if not stanza:
-    sys.exit(f"run.sh: no `edgli = {{ ... }}` dependency stanza in {path} — "
-             "refusing to run against a stale pin")
-
-pinned, n = re.subn(r'\b(?:branch|rev|tag)\s*=\s*"[^"]*"', f'rev = "{rev}"',
-                    stanza.group(0), count=1)
-if n == 0:
-    sys.exit(f"run.sh: the edgli stanza in {path} carries no branch/rev/tag to "
-             "pin — refusing to run against a stale pin")
-
-src = src[: stanza.start()] + pinned + src[stanza.end() :]
-print(f"  edgli pinned: {pinned.splitlines()[0]}")
-
-# The v5 set has a direct `hopr-lib` that MUST name the rev edgli resolves, else the lock
-# carries two copies and metrics are registered by one and incremented by the other.
-# `hopr-strategy` is the same hazard one level down, and is pinned by VERSION rather than by
-# git ref. A committed version goes stale the moment edge-client bumps the major (4.0.0 -> 5.1.0
-# broke main on 2026-09-23), so mirror both rather than trusting either. No-op on v4 (no such deps).
-KEY = r'\b(?:branch|rev|tag)\s*=\s*"[^"]*"'
-for dep, keypat in (("hopr-lib", KEY), ("hopr-strategy", r'\bversion\s*=\s*"[^"]*"')):
-    stanza_re = r'^' + dep + r'\s*=\s*\{.*?\}'
-    ours = re.search(stanza_re, src, re.S | re.M)
-    if not ours:
-        continue
-    theirs = re.search(stanza_re, os.environ['EDGLI_MANIFEST'], re.S | re.M)
-    if not theirs:
-        sys.exit(f"run.sh: edge-client's manifest has no `{dep}` stanza to mirror")
-    key = re.search(keypat, theirs.group(0))
-    if not key:
-        sys.exit(f"run.sh: edge-client pins {dep} without a key this can mirror")
-    mirrored, n = re.subn(keypat, key.group(0), ours.group(0), count=1)
-    if n == 0:
-        sys.exit(f"run.sh: our `{dep}` stanza carries no key to mirror onto")
-    src = src[: ours.start()] + mirrored + src[ours.end() :]
-    print(f"  {dep} mirrored from edge-client: {key.group(0)}")
-
-open(path, 'w').write(src)
-PY
-# Test the hoprnet edge-client locks, not the branch tip: a hoprnet merge must reach us through an
-# edge-client lock bump, which its gate then tests.
-locked_hoprlib_rev() { # repo ref
-  gh api -H "Accept: application/vnd.github.raw" "repos/hoprnet/$1/contents/Cargo.lock?ref=$2" 2>/dev/null |
-    sed -n '/^name = "hopr-lib"$/,/^source/ s/.*#\([0-9a-f]\{40\}\)"$/\1/p'
-}
-EDGLI_HOPRLIB_REV="$(locked_hoprlib_rev edge-client "${EDGLI_SHA}")" || true
-[ -n "${EDGLI_HOPRLIB_REV}" ] || {
-  echo "could not read edge-client's locked hopr-lib rev at ${EDGLI_SHA}" >&2
-  exit 1
-}
-echo "  hopr-lib pinned to edge-client's lock: ${EDGLI_HOPRLIB_REV}"
+pin_edgli "${EDGLI_SHA}"
 # The cluster's nodes and the edgli entry must speak the same wire format (packet size, SURBs).
 HOPRD_HOPRLIB_REV="$(locked_hoprlib_rev hoprd "${HOPRD_REF}")" || true
 if [ "${HOPRD_HOPRLIB_REV}" != "${EDGLI_HOPRLIB_REV}" ]; then
   echo "::warning::hoprd locks hoprnet ${HOPRD_HOPRLIB_REV:-unknown}, edge-client ${EDGLI_HOPRLIB_REV}; a wire change between them breaks every session" >&2
 fi
-(cd "${REPO_ROOT}/integration" &&
-  cargo update -p edgli &&
-  cargo update -p hopr-lib --precise "${EDGLI_HOPRLIB_REV}")
-
-# Two copies is invisible at runtime: readings come back all-zero rather than erroring,
-# which is exactly what `tests/pix.rs` reads as "never deposited". Catch it here.
-for crate in hopr-lib hopr-strategy; do
-  n="$(grep -c "^name = \"${crate}\"$" "${CRATE_LOCK}" || true)"
-  if [ "${n}" -gt 1 ]; then
-    echo "error: ${n} copies of ${crate} in the lock after pinning — the direct dep and" >&2
-    echo "edge-client's do not name the same source. Reconcile them before running." >&2
-    grep -n -A2 "^name = \"${crate}\"$" "${CRATE_LOCK}" >&2
-    exit 1
-  fi
-done
 
 # ── Run every localcluster suite, fresh chain per scenario ──
 # Everything that a local cluster can drive. `rotsee` is excluded because it needs a
