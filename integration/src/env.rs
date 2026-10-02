@@ -301,13 +301,15 @@ impl IntegrationEnv {
 
     /// Open an unreliable (`Segmentation`-only, no retransmission) session over
     /// `hops` relays to the exit node's built-in loopback service. Rate control
-    /// is left ON.
+    /// is left ON. Returned already warmed up (see `warm_up`): this can block for up to
+    /// `WARM_UP_TIMEOUT` (120 s) and fails if the session never round-trips.
     pub async fn open_unreliable_session(&self, hops: usize) -> anyhow::Result<HoprSession> {
-        Ok(self.open_unreliable_session_paths(hops, hops).await?.0)
+        warm_up(self.open_unreliable_session_paths(hops, hops).await?.0).await
     }
 
     /// As [`Self::open_unreliable_session`], but with the forward and return hop counts
-    /// chosen independently; also returns the exit address.
+    /// chosen independently; also returns the exit address. No warm-up: the caller gets the
+    /// session cold and must establish a baseline itself.
     ///
     /// A 0-hop forward paired with a 1-hop return isolates the return direction: the only
     /// packets any cluster node then forwards are replies travelling `exit → relayer →
@@ -882,6 +884,46 @@ async fn select_session_targets(edgli: &Edgli) -> anyhow::Result<(Address, Addre
         .ok_or_else(|| anyhow::anyhow!("need ≥2 distinct connected peers for 1-hop"))?;
     tracing::info!(zero_hop = %zero_hop, one_hop = %one_hop, "session targets selected");
     Ok((zero_hop, one_hop))
+}
+
+const WARM_UP_PHASE: u8 = 0xF0;
+const WARM_UP_BYTES: usize = 64 * 1024;
+const WARM_UP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+const WARM_UP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Round-trips a small payload until it fully returns, then drains its tail.
+///
+/// Right after setup a 1-hop route can lag the channel opens by seconds, and an unreliable session
+/// never resends what it dropped meanwhile, so a measured transfer must not start before this.
+async fn warm_up(session: HoprSession) -> anyhow::Result<HoprSession> {
+    let (mut rx, mut tx) = tokio::io::split(session);
+    let payload = crate::pump::tagged_payload(WARM_UP_PHASE, WARM_UP_BYTES);
+    let opts = crate::pump::PumpOpts {
+        phase: Some(WARM_UP_PHASE),
+        ..Default::default()
+    };
+    let deadline = tokio::time::Instant::now() + WARM_UP_TIMEOUT;
+    loop {
+        let t = crate::pump::pump_halves(
+            &mut rx,
+            &mut tx,
+            &payload,
+            "warm-up",
+            WARM_UP_ATTEMPT_TIMEOUT,
+            opts,
+        )
+        .await?;
+        if t.arrival_pct() >= 99.0 {
+            break;
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "the session never round-tripped its warm-up within {WARM_UP_TIMEOUT:?} (last {:.1}%)",
+            t.arrival_pct(),
+        );
+    }
+    crate::pump::drain_until_quiet(&mut rx, Duration::from_secs(2), "warm-up").await;
+    Ok(rx.unsplit(tx))
 }
 
 async fn poll_until<F, Fut>(
