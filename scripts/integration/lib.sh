@@ -23,6 +23,206 @@ it_env() {
   export CHAIN_DATA_DIR="${CHAIN_DATA_DIR:-/tmp/hopr-chain}"
 }
 
+# The PR whose `Requires:` lines name the rest of a breaking change-set; see README.
+companion_source_pr() {
+  [ -n "${GITHUB_EVENT_PATH:-}" ] || return 0
+  python3 - "${GITHUB_EVENT_PATH}" <<'PY'
+import json, re, sys
+
+event = json.load(open(sys.argv[1]))
+pr = ((event.get("client_payload") or {}).get("tests_pr")
+      or (event.get("inputs") or {}).get("tests_pr")
+      or (event.get("pull_request") or {}).get("number"))
+if not pr:
+    queued = re.search(r"/pr-([0-9]+)-", (event.get("merge_group") or {}).get("head_ref", ""))
+    pr = queued and queued.group(1)
+print(pr or "")
+PY
+}
+
+# Sets EDGLI_REF / HOPRD_REF / BLOKLI_REF to the open companions on LINE. Read from the checkout,
+# not the workflow: a dispatch runs main's workflow, but this script from the tests PR.
+# shellcheck disable=SC2034  # read by run.sh
+companion_refs() {
+  local source_pr body companions repo num state base sha fork line
+  source_pr="$(companion_source_pr)"
+  [ -n "${source_pr}" ] || return 0
+  body="$(gh pr view "${source_pr}" -R "${GITHUB_REPOSITORY}" --json body -q .body)"
+  companions="$(sed -nE 's/^[[:space:]]*Requires: hoprnet\/(hoprd|edge-client|blokli)#([0-9]+).*/\1 \2/p' <<<"${body}")"
+  if [ -z "${companions}" ] && grep -qE '^[[:space:]]*Requires:' <<<"${body}"; then
+    echo "::error::#${source_pr} has a Requires: line that does not parse as 'Requires: hoprnet/<hoprd|edge-client|blokli>#<n>'" >&2
+    return 1
+  fi
+  while read -r repo num; do
+    [ -n "${repo}" ] || continue
+    read -r state base sha fork < <(gh pr view "${num}" -R "hoprnet/${repo}" \
+      --json state,baseRefName,headRefOid,isCrossRepository \
+      -q '"\(.state) \(.baseRefName) \(.headRefOid) \(.isCrossRepository)"')
+    if [ "${fork}" != false ]; then
+      echo "::error::hoprnet/${repo}#${num} is a fork PR; its head must not run on the self-hosted box" >&2
+      return 1
+    fi
+    case "${base}" in
+    main) line=v5 ;;
+    release/*) line=v4 ;;
+    *)
+      echo "::error::hoprnet/${repo}#${num} targets '${base}', which maps to no line" >&2
+      return 1
+      ;;
+    esac
+    case "${state}" in
+    MERGED)
+      echo "hoprnet/${repo}#${num} is merged: ${line} uses the ${base} head"
+      continue
+      ;;
+    OPEN) ;;
+    *)
+      echo "::error::hoprnet/${repo}#${num} is ${state}" >&2
+      return 1
+      ;;
+    esac
+    if [ "${GITHUB_EVENT_NAME:-}" = merge_group ]; then
+      echo "::error::merge hoprnet/${repo}#${num} first: main must not get ahead of ${repo}" >&2
+      return 1
+    fi
+    [ "${line}" = "${LINE:-v4}" ] || continue
+    case "${repo}" in
+    edge-client) EDGLI_REF="${sha}" ;;
+    hoprd) HOPRD_REF="${sha}" ;;
+    blokli) BLOKLI_REF="${sha}" ;;
+    esac
+    echo "companion: ${repo} at ${sha} (hoprnet/${repo}#${num}, from #${source_pr})" |
+      tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  done <<<"${companions}"
+}
+
+# Per-line defaults; an explicit env override or a companion still wins.
+# shellcheck disable=SC2034  # read by run.sh
+line_refs() {
+  case "${LINE:-v4}" in
+  v4)
+    HOPRD_LINE="${HOPRD_LINE:-release/4.1}"
+    EDGLI_REF="${EDGLI_REF:-release/4.1}"
+    BLOKLI_DEFAULT="release/0.13"
+    ;;
+  v5)
+    HOPRD_LINE="${HOPRD_LINE:-main}"
+    EDGLI_REF="${EDGLI_REF:-main}"
+    BLOKLI_DEFAULT="release/0.14"
+    ;;
+  *)
+    echo "unknown LINE '${LINE}' (expected v4 or v5)" >&2
+    return 2
+    ;;
+  esac
+}
+
+# Cargo git `rev` needs a commit, not a branch. `gh api` rather than `git ls-remote`: the dev
+# shell's LD_LIBRARY_PATH makes the system `git-remote-https` die on `GLIBC_ABI_DT_X86_64_PLT`.
+resolve_sha() { # owner/repo ref
+  local ref="$2"
+  if [[ $ref =~ ^[0-9a-f]{7,40}$ ]]; then
+    echo "$ref"
+    return
+  fi
+  gh api "repos/$1/commits/${ref}" --jq '.sha' 2>/dev/null
+}
+
+# Test the hoprnet edge-client locks, not the branch tip: a hoprnet merge must reach us through an
+# edge-client lock bump, which its gate then tests.
+locked_hoprlib_rev() { # repo ref
+  gh api -H "Accept: application/vnd.github.raw" "repos/hoprnet/$1/contents/Cargo.lock?ref=$2" 2>/dev/null |
+    sed -n '/^name = "hopr-lib"$/,/^source/ s/.*#\([0-9a-f]\{40\}\)"$/\1/p'
+}
+
+# Pin edgli in integration/Cargo.toml to a sha, and hopr-lib / hopr-strategy to what that edgli
+# pins. Sets EDGLI_HOPRLIB_REV.
+pin_edgli() {
+  local sha="${1:?usage: pin_edgli <edge-client sha>}" crate="${LIB_ROOT}/integration" manifest
+  echo "pinning edgli to ${sha} ..."
+  manifest="$(gh api "repos/hoprnet/edge-client/contents/Cargo.toml?ref=${sha}" \
+    --jq '.content' 2>/dev/null | base64 -d)" || true
+  [ -n "${manifest}" ] || {
+    echo "could not read edge-client's Cargo.toml at ${sha}" >&2
+    return 1
+  }
+  EDGLI_MANIFEST="${manifest}" python3 - "${crate}/Cargo.toml" "${sha}" <<'PY' || return 1
+import os, re, sys
+
+path, rev = sys.argv[1], sys.argv[2]
+src = open(path).read()
+
+# The committed manifest pins edgli by BRANCH, so this replaces whichever key the stanza carries.
+stanza = re.search(r'^edgli\s*=\s*\{.*?\}', src, re.S | re.M)
+if not stanza:
+    sys.exit(f"pin_edgli: no `edgli = {{ ... }}` dependency stanza in {path}")
+
+pinned, n = re.subn(r'\b(?:branch|rev|tag)\s*=\s*"[^"]*"', f'rev = "{rev}"',
+                    stanza.group(0), count=1)
+if n == 0:
+    sys.exit(f"pin_edgli: the edgli stanza in {path} carries no branch/rev/tag to pin")
+
+src = src[: stanza.start()] + pinned + src[stanza.end() :]
+print(f"  edgli pinned: {pinned.splitlines()[0]}")
+
+# v5's direct `hopr-lib` / `hopr-strategy` MUST name what edgli resolves, else the lock carries two
+# copies and metrics are registered by one and incremented by the other. No-op on v4.
+KEY = r'\b(?:branch|rev|tag)\s*=\s*"[^"]*"'
+for dep, keypat in (("hopr-lib", KEY), ("hopr-strategy", r'\bversion\s*=\s*"[^"]*"')):
+    stanza_re = r'^' + dep + r'\s*=\s*\{.*?\}'
+    ours = re.search(stanza_re, src, re.S | re.M)
+    if not ours:
+        continue
+    theirs = re.search(stanza_re, os.environ['EDGLI_MANIFEST'], re.S | re.M)
+    if not theirs:
+        sys.exit(f"pin_edgli: edge-client's manifest has no `{dep}` stanza to mirror")
+    key = re.search(keypat, theirs.group(0))
+    if not key:
+        sys.exit(f"pin_edgli: edge-client pins {dep} without a key this can mirror")
+    mirrored, n = re.subn(keypat, key.group(0), ours.group(0), count=1)
+    if n == 0:
+        sys.exit(f"pin_edgli: our `{dep}` stanza carries no key to mirror onto")
+    src = src[: ours.start()] + mirrored + src[ours.end() :]
+    print(f"  {dep} mirrored from edge-client: {key.group(0)}")
+
+open(path, 'w').write(src)
+PY
+  EDGLI_HOPRLIB_REV="$(locked_hoprlib_rev edge-client "${sha}")" || true
+  [ -n "${EDGLI_HOPRLIB_REV}" ] || {
+    echo "could not read edge-client's locked hopr-lib rev at ${sha}" >&2
+    return 1
+  }
+  echo "  hopr-lib pinned to edge-client's lock: ${EDGLI_HOPRLIB_REV}"
+  (cd "${crate}" &&
+    cargo update -p edgli &&
+    cargo update -p hopr-lib --precise "${EDGLI_HOPRLIB_REV}") || return 1
+
+  # Two copies is invisible at runtime: readings come back all-zero rather than erroring.
+  local dep n
+  for dep in hopr-lib hopr-strategy; do
+    n="$(grep -c "^name = \"${dep}\"$" "${crate}/Cargo.lock" || true)"
+    if [ "${n}" -gt 1 ]; then
+      echo "error: ${n} copies of ${dep} in the lock after pinning — the direct dep and" >&2
+      echo "edge-client's do not name the same source. Reconcile them before running." >&2
+      grep -n -A2 "^name = \"${dep}\"$" "${crate}/Cargo.lock" >&2
+      return 1
+    fi
+  done
+}
+
+# The PR checks' entry point: the edgli run.sh would test on LINE, without building anything.
+pin_line_deps() {
+  local sha
+  companion_refs || return 1
+  line_refs || return 1
+  sha="$(resolve_sha hoprnet/edge-client "${EDGLI_REF}")"
+  [ -n "${sha}" ] || {
+    echo "could not resolve edge-client ref '${EDGLI_REF}'" >&2
+    return 1
+  }
+  pin_edgli "${sha}"
+}
+
 # Bring up a docker-free local HOPR chain: anvil, the contract deploy, then bloklid
 # serving GraphQL. Blocks until killed. Run it backgrounded via chain_start.
 chain_up() {

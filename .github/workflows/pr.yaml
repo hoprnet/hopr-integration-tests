@@ -93,11 +93,13 @@ jobs:
             echo "::error::script budget exceeded (${n} > 5) — put shared logic in scripts/integration/lib.sh"
             exit 1
           }
-
   lint:
     name: Format + clippy (${{ matrix.line }})
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
     strategy:
       fail-fast: true
       matrix:
@@ -126,6 +128,13 @@ jobs:
         run: |
           cp integration/Cargo.v5.toml integration/Cargo.toml
           cp integration/Cargo.v5.lock integration/Cargo.lock
+      # The edgli run.sh would test: a companion PR head, else the line's branch head. The
+      # committed locks are only the default for local runs.
+      - name: Pin edgli
+        env:
+          LINE: ${{ matrix.line }}
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop github:hoprnet/hoprnet --command bash -euo pipefail scripts/integration/lib.sh pin_line_deps
       # `--all-features` means "everything this line declares": on v4 that is `prof`, on v5 it
       # also picks up `v5`, which carries PIX. Revisit if a mutually exclusive feature is ever
       # added — edgli's `pix-curvy` is one, so do not forward it alongside `pix-test`.
@@ -143,6 +152,9 @@ jobs:
     # it needs sudo for an eBPF egress monitor and only supports GitHub-hosted runners.
     runs-on: [self-hosted, hetzner]
     timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
     strategy:
       # A red line cancels the other: the first failure is the one to read.
       fail-fast: true
@@ -190,6 +202,13 @@ jobs:
         run: |
           cp integration/Cargo.v5.toml integration/Cargo.toml
           cp integration/Cargo.v5.lock integration/Cargo.lock
+      # The edgli run.sh would test: a companion PR head, else the line's branch head. The
+      # committed locks are only the default for local runs.
+      - name: Pin edgli
+        env:
+          LINE: ${{ matrix.line }}
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop github:hoprnet/hoprnet --command bash -euo pipefail scripts/integration/lib.sh pin_line_deps
       # 67 tests on v4, 69 on v5 — the extra two are the src/pix.rs Prometheus parser.
       - name: Unit tests
         run: |

@@ -90,9 +90,7 @@ jobs:
       - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
           TESTS_PR: ${{ inputs.tests_pr || github.event.client_payload.tests_pr }}
-          MQ_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
           tests_sha=""
@@ -107,28 +105,6 @@ jobs:
             fi
             tests_sha="${sha}"
             echo "Tests from #${TESTS_PR} at \`${sha}\`" >>"${GITHUB_STEP_SUMMARY}"
-          fi
-
-          # This repo merges last, so its locks must already sit on the edge-client branch they name.
-          if [ "${EVENT}" = merge_group ]; then
-            for lock in Cargo.lock Cargo.v5.lock; do
-              read -r branch rev < <(gh api -H "Accept: application/vnd.github.raw" \
-                "repos/${GITHUB_REPOSITORY}/contents/integration/${lock}?ref=${MQ_SHA}" |
-                sed -n '/^name = "edgli"$/,/^source/ s/.*?branch=\([^#]*\)#\([0-9a-f]\{40\}\)"$/\1 \2/p') || true
-              if [ -z "${rev:-}" ]; then
-                echo "::error::no branch-pinned edgli in integration/${lock}" >&2
-                exit 1
-              fi
-              branch="${branch//%2F//}"
-              status="$(gh api "repos/hoprnet/edge-client/compare/${branch}...${rev}" -q .status)"
-              case "${status}" in
-              identical | behind) ;;
-              *)
-                echo "::error::${lock} pins edgli ${rev}, which is not on edge-client ${branch} (${status}); re-pin with \`cargo update -p edgli\`" >&2
-                exit 1
-                ;;
-              esac
-            done
           fi
 
           {
