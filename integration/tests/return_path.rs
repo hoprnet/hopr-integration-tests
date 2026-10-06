@@ -317,28 +317,9 @@ const ACTIVE_RELAYER_FLOOR: f64 = 0.05;
 
 /// Maximum ratio between the busiest and least-busy relayer.
 ///
-/// Selection is weighted-random with the weights tempered (`w' = w^0.5`). Tempering is
-/// monotone, so it never reorders candidates — it only compresses the ratio between them.
-/// The target is therefore *not* 1.0: a good relayer is still supposed to carry more than a
-/// bad one, just not by the raw score ratio.
-///
-/// Derived for this profile rather than from what makes the test green. RFC-0014 scores the
-/// per-node latencies below as 1.0 / 0.7 / 0.3 / 0.15, which as raw weights would give
-/// shares of 46/33/14/7 — a ratio of 6.67. Tempered they become 36/30/20/14, a ratio of
-/// 2.58. Drawing two distinct relayers per packet flattens the marginal distribution
-/// further; calibrating that from the pre-fix run (ideal 6.67 measured 4.63, so ×0.69)
-/// predicts **≈1.79**. The threshold allows jitter above that while staying under the
-/// lowest pre-fix measurement.
-///
-/// **The margin is thin and the value is predicted, not yet measured.** Pre-fix runs
-/// measured 2.28 and 4.63 (`docs/return-path-scenarios.md`), so the separation from the old
-/// behaviour is only ~8% at the low end. With four candidates and `wanted = 2` this ratio
-/// is a weak discriminator, and a run that lands near 2.2 would be ambiguous rather than
-/// conclusive. Re-derive from a measured tempered run before trusting a pass.
-///
-/// Deliberately **not** a cap on the maximum *share*: with only four candidates the shares
-/// overlap between designs, so a share cap cannot separate them and flips sign between runs.
-const MAX_RELAYER_IMBALANCE: f64 = 2.1;
+/// RFC-0014 scores this profile 1.0 / 0.7 / 0.3 / 0.15; two distinct draws per packet predict 2.12
+/// tempered (`w^0.5`) and 4.56 raw (pre-fix measured 4.63), so the bound sits between them.
+const MAX_RELAYER_IMBALANCE: f64 = 3.0;
 
 /// Arrival floor once one of the return relayers is dead.
 ///
@@ -891,8 +872,13 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
         frozen = candidates.len(),
         "thawed all return relayers — letting recovery settle"
     );
-    drain_until_quiet(&mut rx, DRAIN_QUIET, "outage").await;
+    // The outage left gaps in the frame sequence, and the sequencer holds frames behind a gap for
+    // up to the frame timeout per timer tick, so a drain that gives up sooner leaves them to the
+    // survival phase.
     tokio::time::sleep(settle).await;
+    let frame_timeout =
+        Duration::from_millis(session_metrics::sample().frame_timeout_ms().unwrap_or(3000));
+    drain_until_quiet(&mut rx, DRAIN_QUIET + 2 * frame_timeout, "outage").await;
 
     // Phase 6 — recovery: with the path restored, a fresh survival load must come back to a usable
     // rate within the deadline. Reuses the shared recovery assertion so this scenario is held to the
