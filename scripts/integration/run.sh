@@ -264,13 +264,6 @@ run_suite() { # target, then any scenarios to HOLD OUT of it
 
 echo "running integration tests (binary chain) ..."
 run_suite integration
-# `return_path` is held out ENTIRELY: its scenarios assert an arrival ratio over an
-# unforced random relayer draw, so a red says nothing. Locally: `just return-path`.
-# Wiring it back in: run it LAST, after `chain_stop; chain_start`. Its 5-node cluster leaves nodes 3-4
-# announced and channelled but offline, and a later 3-node suite routes through them.
-# If it is ever wired back in, three of its five are the flaky ones — `spread` asserts a ratio on a
-# random draw, and the two survival scenarios miss their recovery deadline on some machines but not
-# others: `spread`, `common_mode_return_outage` and `a_symmetric_session_should_survive_relayer_loss`.
 run_suite exit_origination
 # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore FAILS
 # against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there. Wiring it in now
@@ -297,6 +290,17 @@ if [ "${PIX_SUITE}" = "1" ]; then
     echo "pix_shapes suite cannot state its geometry. Use a newer hoprd ref." >&2
     suite_rc=1
   fi
+fi
+
+# v4 only until the v5 stack fixes land (branch em/return-path-v5). Last and on a fresh chain: its
+# 5-node cluster leaves nodes 3-4 channelled but offline. Scenarios kill nodes, so one cluster each.
+if [ "${LINE}" = "v4" ]; then
+  chain_stop
+  chain_start
+  scenarios="$(list_scenarios return_path)"
+  for scenario in ${scenarios}; do
+    SCENARIOS="${scenario}" run_suite return_path
+  done
 fi
 
 exit "${suite_rc}"

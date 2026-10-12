@@ -26,14 +26,14 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 | `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved    | yes     | `just exit-origination`     |
 | `pix.rs`                      | PIX settlement with `edgli` as the paying entry                   | v5 only | `LINE=v5 just pix`          |
 | `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)          | v5 only | `LINE=v5 just pix-shapes`   |
-| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies      | no      | `just return-path`          |
+| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies      | v4 only | `just return-path`          |
 | `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line       | no      | see `run.sh`                |
 | `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`) | no      | `just rotsee`               |
 | `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result            | no      | `just profile`              |
 
-`return_path` is excluded from CI because its assertions depend on a random relayer choice, so a
-failure does not point to a bug. CI runs 3 scenarios on v4 and 11 on v5 on one chain per
-`run.sh` invocation, shared by every suite and warm with frozen identities after the first.
+CI runs 3 scenarios on v4 and 11 on v5 on one chain per `run.sh` invocation, shared by every
+suite and warm with frozen identities after the first. `return_path` runs last on v4, on a fresh
+chain and one cluster per scenario; v5 waits on stack fixes (branch `em/return-path-v5`).
 
 Every scenario is `#[ignore]` because it needs external binaries. Thresholds are constants in
 the test files, and there are no settings to change. Shared code is in `integration/src/`:
