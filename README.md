@@ -31,10 +31,11 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 | `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`) | no      | `just rotsee`               |
 | `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result            | no      | `just profile`              |
 
-CI runs 7 scenarios on v4 (4 of them `return_path`) and 11 on v5. Suites share one chain per
+CI runs 6 scenarios on v4 (3 of them `return_path`) and 11 on v5. Suites share one chain per
 `run.sh` invocation, warm with frozen identities after the first. `return_path` runs last on v4,
-on a fresh chain and one cluster per scenario; `common_mode_return_outage` is held out until
-hoprnet#8499, and v5 waits on stack fixes (branch `em/return-path-v5`).
+on a fresh chain and one cluster per scenario. Its `symmetric` and `common_mode_return_outage`
+scenarios are held out until the stack recovers in time, and v5 waits on stack fixes (branch
+`em/return-path-v5`).
 
 Every scenario is `#[ignore]` because it needs external binaries. Thresholds are constants in
 the test files, and there are no settings to change. Shared code is in `integration/src/`:
