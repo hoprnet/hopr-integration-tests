@@ -36,7 +36,7 @@ HOPRD_REF="${HOPRD_REF:-${HOPRD_LINE}}"
 
 # The triggering project overrides its own rev; the other keeps its default above.
 case "${PROJECT:-}" in
-hoprd) HOPRD_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=hoprd}" ;;
+hoprd) HOPRD_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=hoprd}" HOPRD_PR_BASE="" ;;
 edge-client) EDGLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=edge-client}" ;;
 # blokli merge-testing is back on: blokli now gates its own merges to release/0.13,
 # so a dispatch from it must actually build the dispatched rev rather than the
@@ -86,7 +86,9 @@ BLOKLI_SHA="$(resolve_sha hoprnet/blokli "${BLOKLI_REF}")"
 #                       PR head based on it. Accepted: that is precisely the
 #                       label-triggered PR case, which hoprd fires with its PR head.
 #   diverged          — the rev is off the line entirely (a v5 `main` sha). Rejected.
-if [ "${HOPRD_SKIP_LINE_CHECK:-0}" != "1" ] && [ "${HOPRD_REF}" != "${HOPRD_LINE}" ]; then
+# A companion PR that targets the line is skipped: once its base moves on, its head reads `diverged`.
+if [ "${HOPRD_SKIP_LINE_CHECK:-0}" != "1" ] && [ "${HOPRD_REF}" != "${HOPRD_LINE}" ] &&
+  [ "${HOPRD_PR_BASE:-}" != "${HOPRD_LINE}" ]; then
   status="$(gh api "repos/hoprnet/hoprd/compare/${HOPRD_LINE}...${HOPRD_REF}" --jq '.status' 2>/dev/null || true)"
   case "${status}" in
   identical | behind | ahead) ;;
