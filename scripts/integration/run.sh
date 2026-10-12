@@ -42,7 +42,7 @@ edge-client) EDGLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=edge-c
 # so a dispatch from it must actually build the dispatched rev rather than the
 # branch head. Set here and consumed by the BLOKLI_REF default further down.
 blokli) BLOKLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=blokli}" ;;
-"" | manual) echo "no PROJECT override — ${LINE}: hoprd at ${HOPRD_LINE}, edge-client at ${EDGLI_REF}, blokli at ${BLOKLI_REF:-${BLOKLI_DEFAULT}}" ;;
+"" | manual) echo "no PROJECT override — ${LINE}: hoprd at ${HOPRD_REF}, edge-client at ${EDGLI_REF}, blokli at ${BLOKLI_REF:-${BLOKLI_DEFAULT}}" ;;
 *)
   echo "unknown PROJECT '${PROJECT}'" >&2
   exit 2
@@ -298,7 +298,10 @@ if [ "${LINE}" = "v4" ]; then
   chain_stop
   chain_start
   scenarios="$(list_scenarios return_path)"
+  # Once the outage load empties the exit's SURB store, refill takes 80 s+. Back in after hoprnet#8499.
+  held_out=session_should_survive_common_mode_return_outage
   for scenario in ${scenarios}; do
+    [ "${scenario}" = "${held_out}" ] && continue
     SCENARIOS="${scenario}" run_suite return_path
   done
 fi

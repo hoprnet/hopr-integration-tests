@@ -596,6 +596,9 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         &format!("{}-baseline", topology.direction),
     )
     .await?;
+    // The warm-up rate is a burst: delivered after a long first byte it reads several times what the
+    // session sustains. Never offer more than the paced baseline carried.
+    let offered_mbps = offered_mbps.min(baseline.mbps);
 
     let busiest = spread
         .busiest()
@@ -630,9 +633,10 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         (offered_mbps * 1_000_000.0 * SURVIVAL_LOAD_DURATION.as_secs_f64()) as usize;
     tracing::info!(
         "survival phase: offering {:.2} MB at {offered_mbps:.2} MB/s for {SURVIVAL_LOAD_DURATION:?} \
-         (baseline {:.2} MB/s)",
+         (warm-up burst {:.2} MB/s, paced baseline {:.2} MB/s)",
         survival_bytes as f64 / 1_000_000.0,
         before_kill.mbps,
+        baseline.mbps,
     );
     // Counted at the entry's own session, not from the relayers' node-wide `forwarded` counter.
     // That counter includes probes, keep-alives and every other session those nodes carry, so
@@ -797,6 +801,8 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
     let offered_mbps = before.mbps * SURVIVAL_LOAD_FRACTION;
     let baseline =
         measure_paced_baseline(&mut rx, &mut tx, offered_mbps, "common-mode-baseline").await?;
+    // Same cap as the relayer-loss scenarios; overdriving the outage drains the exit's SURBs.
+    let offered_mbps = offered_mbps.min(baseline.mbps);
 
     // Phase 3 — freeze EVERY return relayer at once: the common-mode outage.
     tracing::info!(

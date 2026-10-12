@@ -136,8 +136,8 @@ jobs:
       matrix:
         line: >-
           ${{ fromJSON((github.event_name == 'merge_group' || github.event_name == 'pull_request') && '["v4","v5"]' || format('["{0}"]', inputs.line || github.event.client_payload.line || 'v4')) }}
-    # Per LINE, not per run: ~20 min of tests on v4, ~50 on v5 (3 scenarios there, 11 here; one shared
-    # chain) plus 15-20 min of build on a Cachix miss. Each line is its own job.
+    # Per LINE, not per run: ~30 min of tests on v4 (7 scenarios), ~50 on v5 (11; one shared chain)
+    # plus 15-20 min of build on a Cachix miss. Each line is its own job.
     timeout-minutes: 150
     env:
       # Which branch + dependency set run.sh resolves; the rest override within it.
