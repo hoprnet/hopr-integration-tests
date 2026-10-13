@@ -264,20 +264,6 @@ run_suite() { # target, then any scenarios to HOLD OUT of it
   fi
 }
 
-# DIAG, not for merge: relayer loss only, debug on what decides when the killed relayer leaves the
-# path set. Exits 0 so a red scenario does not page Zulip; read the verdicts in the log.
-if [ "${GITHUB_HEAD_REF:-}" = "em/investigate-flaky" ]; then
-  [ "${LINE}" = "v4" ] || exit 0
-  export RUST_LOG="${RUST_LOG},hopr_transport::path=debug,hopr_transport::protocol::stream=debug,hopr_transport_probe=debug,hopr_transport_p2p=debug,hopr_transport_session=debug"
-  for scenario in session_should_survive_forward_relayer_loss session_should_survive_forward_relayer_loss \
-    session_should_survive_forward_relayer_loss session_should_survive_return_relayer_loss \
-    a_symmetric_session_should_survive_relayer_loss; do
-    SCENARIOS="${scenario}" run_suite return_path
-  done
-  echo "DIAG: suite_rc=${suite_rc}"
-  exit 0
-fi
-
 echo "running integration tests (binary chain) ..."
 run_suite integration
 run_suite exit_origination
