@@ -48,7 +48,8 @@ on:
         required: false
         default: ""
   pull_request:
-    types: [labeled, synchronize, reopened]
+    # `opened` too: without it a new unlabelled PR never reports the required gate below.
+    types: [opened, labeled, synchronize, reopened]
   # The gate for this repo's own changes. Without it a PR here runs the test only
   # when someone applies `run-integration`, so an unlabelled PR could change the
   # harness, the thresholds or the scripts and merge without ever running it.

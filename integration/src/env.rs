@@ -659,10 +659,7 @@ async fn boot_edgli(
         }
     }
     extra_strategies.apply(&mut strat_cfg);
-    let reactor = edgli.run_reactor_from_cfg(strat_cfg)?;
-    // edge-client release/4.1 wraps the handle in `ReactorHandle` (#200); main does not yet.
-    #[cfg(not(feature = "v5"))]
-    let reactor = reactor.abort_handle;
+    let reactor = edgli.run_reactor_from_cfg(strat_cfg)?.abort_handle;
 
     // Require one channel *beyond* any pre-existing genesis channels, so the gate proves the
     // strategy opened a fresh channel to a live peer rather than passing on genesis alone
