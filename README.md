@@ -72,8 +72,19 @@ contracts and starts bloklid, and localcluster connects to it with `--chain-url`
 | `HOPRD_LOCALCLUSTER_BIN` | `hoprd-localcluster` binary                                  |
 | `HOPRD_CHAIN_URL`        | bloklid to connect to (default `http://localhost:8080`)      |
 | `HOPRD_CLUSTER_DATA_DIR` | use an already-running cluster instead of starting one       |
+| `HOPR_LOG_DIR`          | parent directory for retained node/localcluster artifacts (`hoprd-it-*/logs/hoprd_<i>.log`) |
 | `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files after teardown           |
 | `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture` |
+
+To retain node logs under a fixed parent directory:
+
+```bash
+HOPR_LOG_DIR=/path/to/node-logs just integration-binchain
+```
+
+Each cluster gets a unique `hoprd-it-*` subdirectory containing `logs/hoprd_<i>.log`,
+`localcluster.log`, and its state. Without this setting, the existing temporary-directory
+behavior applies. This setting does not affect an attached cluster (`HOPRD_CLUSTER_DATA_DIR`).
 
 anvil, bloklid and deployer logs are always written to `/tmp/hopr-chain/*.log`. `run.sh` sends nix
 build output to `nix-build.log`, so a long build can look like it has stopped.
