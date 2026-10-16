@@ -542,7 +542,15 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         anyhow::anyhow!("HOPRD_CHAIN_URL is not set (start one with lib.sh chain_up)")
     })?;
 
-    let tempdir = tempfile::TempDir::with_prefix("hoprd-it-")?;
+    let log_root = std::env::var_os("HOPR_LOG_DIR").filter(|dir| !dir.is_empty());
+    let tempdir = if let Some(dir) = &log_root {
+        std::fs::create_dir_all(dir).context("creating HOPR_LOG_DIR")?;
+        tempfile::Builder::new()
+            .prefix("hoprd-it-")
+            .tempdir_in(dir)?
+    } else {
+        tempfile::TempDir::with_prefix("hoprd-it-")?
+    };
     let data_dir = tempdir.path().to_path_buf();
 
     let mut cmd = tokio::process::Command::new(&lc_bin);
@@ -647,7 +655,7 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     // Node logs live inside the temp dir, which is removed when the handle drops -- so by the time
     // a failure is worth investigating, the only per-node evidence is already gone. Leaking the
     // handle keeps the whole cluster directory for post-mortem.
-    let tempdir = if std::env::var_os("HOPRD_KEEP_ARTIFACTS").is_some() {
+    let tempdir = if log_root.is_some() || std::env::var_os("HOPRD_KEEP_ARTIFACTS").is_some() {
         tracing::info!(path = %tempdir.path().display(), "keeping cluster artifacts");
         std::mem::forget(tempdir);
         None
