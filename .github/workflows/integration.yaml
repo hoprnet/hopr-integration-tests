@@ -139,8 +139,8 @@ jobs:
       matrix:
         line: >-
           ${{ fromJSON((github.event_name == 'merge_group' || github.event_name == 'pull_request') && '["v4","v5"]' || format('["{0}"]', inputs.line || github.event.client_payload.line || 'v4')) }}
-    # Per LINE, not per run: ~20 min of tests on v4, ~50 on v5 (3 scenarios there, 11 here; one shared
-    # chain) plus 15-20 min of build on a Cachix miss. Each line is its own job.
+    # Per LINE, not per run: ~25 min of tests on v4 (6 scenarios), ~50 on v5 (11; one shared chain)
+    # plus 15-20 min of build on a Cachix miss. Each line is its own job.
     timeout-minutes: 150
     env:
       # Which branch + dependency set run.sh resolves; the rest override within it.
@@ -170,7 +170,7 @@ jobs:
       # per-node hoprd_<i>.log files are gone before the upload step runs — which is
       # exactly what left run 34098266229 undiagnosable.
       HOPRD_KEEP_ARTIFACTS: 1
-      RUST_LOG: warn,hoprd_integration_test=info
+      RUST_LOG: warn,hoprd_integration_test=info,return_path=info
       # Without this libtest captures a PASSING test's output, so a green run would
       # show no measurements at all — the one thing worth reading. Safe to enable
       # only because RUST_LOG above is narrow.

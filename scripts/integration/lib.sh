@@ -90,7 +90,7 @@ companion_refs() {
     [ "${line}" = "${LINE:-v4}" ] || continue
     case "${repo}" in
     edge-client) EDGLI_REF="${sha}" ;;
-    hoprd) HOPRD_REF="${sha}" ;;
+    hoprd) HOPRD_REF="${sha}" HOPRD_PR_BASE="${base}" ;;
     blokli) BLOKLI_REF="${sha}" ;;
     esac
     echo "companion: ${repo} at ${sha} (hoprnet/${repo}#${num}, from #${source_pr})" |
