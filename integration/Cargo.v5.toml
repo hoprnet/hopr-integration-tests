@@ -36,6 +36,8 @@ tokio = { version = "1", features = ["full", "process"] }
 reqwest = { version = "0.13", default-features = false, features = [
   "rustls",
   "json",
+  # The client span exporter (src/telemetry.rs) runs outside any async runtime.
+  "blocking",
 ] }
 tempfile = "3"
 sha2 = "0.11"
@@ -45,6 +47,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = "0.33"
+ctor = "1"
+dtor = "1"
 # Only pulled in by the `prof` feature (executor-starvation profiling); see
 # tests/profiling.rs. Must be built with `--cfg tokio_unstable`.
 console-subscriber = { version = "0.5", optional = true }

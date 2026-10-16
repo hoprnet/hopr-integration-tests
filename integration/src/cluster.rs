@@ -552,6 +552,7 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         tempfile::TempDir::with_prefix("hoprd-it-")?
     };
     let data_dir = tempdir.path().to_path_buf();
+    let control_base = control_base_for(&data_dir)?;
 
     let mut cmd = tokio::process::Command::new(&lc_bin);
     cmd.args([
@@ -606,7 +607,13 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         cmd.arg("--frozen-identities");
     }
     cmd.args(["--chain-url", &chain_url]);
-    cmd.env("HOPRD_USE_OPENTELEMETRY", "false");
+    if let Some(base) = &control_base {
+        cmd.arg("--control-base").arg(base);
+    }
+    let run_id = run_id();
+    for (key, value) in node_telemetry_env(|key| std::env::var(key).ok(), &run_id) {
+        cmd.env(key, value);
+    }
     for (key, value) in REQUESTED_NODE_ENV
         .get()
         .map(Vec::as_slice)
@@ -625,12 +632,16 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     cmd.stdout(std::fs::File::create(&stdout_log).context("creating localcluster log")?);
     cmd.stderr(std::process::Stdio::inherit());
 
+    // Node logs live inside the temp dir, which is removed when the handle drops -- so by the time
+    // a failure is worth investigating, the only per-node evidence is already gone.
+    let keep = log_root.is_some() || std::env::var_os("HOPRD_KEEP_ARTIFACTS").is_some();
     let mut child = cmd.spawn()?;
     tracing::info!(path = %stdout_log.display(), "localcluster output goes to a file");
 
     let summary = match wait_status_running(
         std::path::Path::new(&lc_bin),
         &data_dir,
+        control_base.as_deref(),
         CLUSTER_START_TIMEOUT,
         &mut child,
     )
@@ -646,22 +657,17 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
                 );
             }
             let _ = child.start_kill();
-            return Err(err);
+            // A failed start is when the node and localcluster logs matter most: keep them too.
+            return Err(match keep_cluster_dir(tempdir, keep) {
+                None => err.context(format!("cluster logs kept in {}", data_dir.display())),
+                Some(_dropped) => err,
+            });
         }
     };
 
     tracing::info!(blokli_url = %summary.blokli_url, "cluster up");
 
-    // Node logs live inside the temp dir, which is removed when the handle drops -- so by the time
-    // a failure is worth investigating, the only per-node evidence is already gone. Leaking the
-    // handle keeps the whole cluster directory for post-mortem.
-    let tempdir = if log_root.is_some() || std::env::var_os("HOPRD_KEEP_ARTIFACTS").is_some() {
-        tracing::info!(path = %tempdir.path().display(), "keeping cluster artifacts");
-        std::mem::forget(tempdir);
-        None
-    } else {
-        Some(tempdir)
-    };
+    let tempdir = keep_cluster_dir(tempdir, keep);
 
     Ok(ClusterHandle {
         _child: Some(child),
@@ -670,9 +676,118 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     })
 }
 
+/// This run's id, attached to everything the run exports: `HOPR_RUN_ID` (set by `run-binchain.sh`
+/// to the name of the run's log folder), or one made from the time and process id.
+fn run_id() -> String {
+    std::env::var("HOPR_RUN_ID")
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            format!("it-{secs}-{}", std::process::id())
+        })
+}
+
+/// Telemetry settings for the cluster's `hoprd` nodes, read from the test environment through `get`.
+///
+/// By default span export stays off (`HOPRD_USE_OPENTELEMETRY=false`), so a run never needs a
+/// collector. Setting `HOPRD_USE_OPENTELEMETRY=true` in the test environment opts in and is
+/// passed on as given; an explicit `false` is passed on too. With the opt-in:
+/// - `HOPRD_OTEL_SIGNALS` defaults to `traces` (localcluster would otherwise default it to
+///   `metrics`, which exports no spans);
+/// - `HOPRD_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` are not set here: the nodes inherit them, and
+///   localcluster defaults the endpoint to `http://localhost:4318`;
+/// - `run_id` and `component=hoprd` are added to `HOPRD_OTEL_EXPORT_LABELS`, so every exported span
+///   names the run. hoprd adds the node's address and peer id itself.
+fn node_telemetry_env(get: impl Fn(&str) -> Option<String>, run_id: &str) -> Vec<(String, String)> {
+    let requested = get("HOPRD_USE_OPENTELEMETRY");
+    let opted_in = requested.as_deref().is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    });
+    if !opted_in {
+        return vec![(
+            "HOPRD_USE_OPENTELEMETRY".into(),
+            requested.unwrap_or_else(|| "false".into()),
+        )];
+    }
+
+    let signals = get("HOPRD_OTEL_SIGNALS").unwrap_or_else(|| "traces".into());
+    let labels = [
+        get("HOPRD_OTEL_EXPORT_LABELS").filter(|l| !l.trim().is_empty()),
+        Some(format!("run_id={run_id},component=hoprd")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(",");
+    tracing::info!(
+        run_id,
+        signals,
+        endpoint = get("HOPRD_OTLP_ENDPOINT")
+            .as_deref()
+            .unwrap_or("localcluster default"),
+        "cluster nodes will export telemetry"
+    );
+    vec![
+        (
+            "HOPRD_USE_OPENTELEMETRY".into(),
+            requested.unwrap_or_default(),
+        ),
+        ("HOPRD_OTEL_SIGNALS".into(), signals),
+        ("HOPRD_OTEL_EXPORT_LABELS".into(), labels),
+    ]
+}
+
+/// Longest control socket path used as is. macOS allows 104 bytes for a Unix socket path and
+/// Linux 108; this leaves a little room.
+const MAX_CONTROL_SOCKET_PATH: usize = 100;
+
+/// Where localcluster puts its control socket (`<base>.sock`).
+///
+/// By default that is `<data_dir>/cluster.sock`, and `None` keeps that default. A data dir deep in
+/// `HOPR_LOG_DIR` can make the path too long for a Unix socket, and localcluster then fails at
+/// start-up. In that case the socket goes into a short new folder in `/tmp` instead, kept for the
+/// life of the cluster and removed by `lib.sh clean_tmp` like the other `hoprd-it-*` folders. The
+/// logs stay in the data dir.
+fn control_base_for(data_dir: &std::path::Path) -> anyhow::Result<Option<PathBuf>> {
+    if data_dir.join("cluster.sock").as_os_str().len() <= MAX_CONTROL_SOCKET_PATH {
+        return Ok(None);
+    }
+    let short_root = if cfg!(unix) {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("hoprd-it-")
+        .tempdir_in(short_root)
+        .context("creating a short folder for the localcluster control socket")?
+        .keep();
+    tracing::info!(path = %dir.display(), "cluster data dir is too deep for a socket path; control socket goes here");
+    Ok(Some(dir.join("cluster")))
+}
+
+/// Keeps the cluster directory on disk when `keep` is set (returns `None`); otherwise hands the
+/// handle back, so the directory is removed when it drops.
+fn keep_cluster_dir(tempdir: tempfile::TempDir, keep: bool) -> Option<tempfile::TempDir> {
+    if !keep {
+        return Some(tempdir);
+    }
+    let path = tempdir.keep();
+    tracing::info!(path = %path.display(), "keeping cluster artifacts");
+    None
+}
+
 async fn wait_status_running(
     lc_bin: &std::path::Path,
     data_dir: &std::path::Path,
+    control_base: Option<&std::path::Path>,
     timeout: Duration,
     child: &mut tokio::process::Child,
 ) -> anyhow::Result<ClusterSummary> {
@@ -681,8 +796,12 @@ async fn wait_status_running(
         if let Ok(Some(status)) = child.try_wait() {
             anyhow::bail!("hoprd-localcluster exited prematurely with status {status:?}");
         }
-        let out = tokio::process::Command::new(lc_bin)
-            .args(["status", "--data-dir", data_dir.to_str().unwrap()])
+        let mut status = tokio::process::Command::new(lc_bin);
+        status.args(["status", "--data-dir", data_dir.to_str().unwrap()]);
+        if let Some(base) = control_base {
+            status.arg("--control-base").arg(base);
+        }
+        let out = status
             .output()
             .await
             .context("failed to run `hoprd-localcluster status`")?;
@@ -972,5 +1091,113 @@ mod tests {
     fn rejects_null_node_address() {
         let json = r#"{ "state": "running", "blokli_url": "http://x", "nodes": [ { "id": 0, "address": null, "api_url": "http://x" } ], "extras": [] }"#;
         assert!(parse_summary_json(json).is_err());
+    }
+
+    fn env_from<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn node_span_export_is_off_unless_requested() {
+        assert_eq!(
+            node_telemetry_env(env_from(&[]), "r1"),
+            vec![("HOPRD_USE_OPENTELEMETRY".to_string(), "false".to_string())]
+        );
+        // An explicit "no" is passed on as given, and nothing else is set.
+        assert_eq!(
+            node_telemetry_env(env_from(&[("HOPRD_USE_OPENTELEMETRY", "0")]), "r1"),
+            vec![("HOPRD_USE_OPENTELEMETRY".to_string(), "0".to_string())]
+        );
+    }
+
+    #[test]
+    fn requested_node_span_export_exports_traces_labelled_with_the_run() {
+        let env = node_telemetry_env(env_from(&[("HOPRD_USE_OPENTELEMETRY", "true")]), "run-1");
+        assert_eq!(
+            env,
+            vec![
+                ("HOPRD_USE_OPENTELEMETRY".to_string(), "true".to_string()),
+                ("HOPRD_OTEL_SIGNALS".to_string(), "traces".to_string()),
+                (
+                    "HOPRD_OTEL_EXPORT_LABELS".to_string(),
+                    "run_id=run-1,component=hoprd".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn requested_node_span_export_keeps_the_callers_signals_and_labels() {
+        let env = node_telemetry_env(
+            env_from(&[
+                ("HOPRD_USE_OPENTELEMETRY", "yes"),
+                ("HOPRD_OTEL_SIGNALS", "traces,logs"),
+                ("HOPRD_OTEL_EXPORT_LABELS", "team=core"),
+            ]),
+            "run-2",
+        );
+        assert!(env.contains(&("HOPRD_OTEL_SIGNALS".to_string(), "traces,logs".to_string())));
+        assert!(env.contains(&(
+            "HOPRD_OTEL_EXPORT_LABELS".to_string(),
+            "team=core,run_id=run-2,component=hoprd".to_string()
+        )));
+    }
+
+    #[test]
+    fn a_short_data_dir_keeps_the_default_control_socket() -> anyhow::Result<()> {
+        assert_eq!(
+            control_base_for(std::path::Path::new("/tmp/hoprd-it-abc"))?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_deep_data_dir_gets_a_short_control_socket() -> anyhow::Result<()> {
+        let deep = PathBuf::from("/")
+            .join("deep-folder-name".repeat(8))
+            .join("hoprd-it-abc");
+        let base =
+            control_base_for(&deep)?.context("a deep data dir needs its own control base")?;
+        let socket = socket_of(&base);
+        assert!(
+            socket.as_os_str().len() <= MAX_CONTROL_SOCKET_PATH,
+            "socket path too long: {}",
+            socket.display()
+        );
+        let dir = base.parent().context("control base has a folder")?;
+        assert!(dir.is_dir(), "the short folder must exist");
+        std::fs::remove_dir(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_kept_cluster_dir_survives() -> anyhow::Result<()> {
+        let dir = tempfile::TempDir::with_prefix("hoprd-it-keep-")?;
+        let path = dir.path().to_path_buf();
+        assert!(keep_cluster_dir(dir, true).is_none());
+        assert!(path.is_dir(), "a kept cluster dir must stay on disk");
+        std::fs::remove_dir(&path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_unkept_cluster_dir_is_removed_on_drop() -> anyhow::Result<()> {
+        let dir = tempfile::TempDir::with_prefix("hoprd-it-drop-")?;
+        let path = dir.path().to_path_buf();
+        drop(keep_cluster_dir(dir, false));
+        assert!(!path.exists(), "an unkept cluster dir must be cleaned up");
+        Ok(())
+    }
+
+    /// The socket localcluster makes from a control base: `<base>.sock`.
+    fn socket_of(base: &std::path::Path) -> PathBuf {
+        let mut path = base.as_os_str().to_owned();
+        path.push(".sock");
+        PathBuf::from(path)
     }
 }
