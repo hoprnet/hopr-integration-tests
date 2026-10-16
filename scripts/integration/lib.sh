@@ -428,9 +428,10 @@ cargo_it() {
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
   local held
   for held in ${SKIP_SCENARIOS:-}; do skips+=(--skip "${held}"); done
-  "${wrap[@]}" cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
-    "${cargo_features[@]}" --test "${target}" "$@" \
-    --no-fail-fast -- --include-ignored --test-threads=1 "${skips[@]}" "${test_args[@]}"
+  # Bash 3.2 (macOS /bin/bash) treats empty arrays as unset under `set -u`.
+  ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
+    ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" "$@" \
+    --no-fail-fast -- --include-ignored --test-threads=1 ${skips[@]+"${skips[@]}"} ${test_args[@]+"${test_args[@]}"}
 }
 
 # Ask the binary what it carries, so a new scenario runs the moment it is written.
@@ -440,8 +441,8 @@ list_scenarios() {
   [ -z "${IN_NIX_SHELL:-}" ] && [ "${HOPRNET_SHELL:-}" != none ] &&
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
-  "${wrap[@]}" cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
-    "${cargo_features[@]}" --test "${target}" -- --list |
+  ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
+    ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" -- --list |
     sed -n 's/: test$//p' | tr '\n' ' '
 }
 
