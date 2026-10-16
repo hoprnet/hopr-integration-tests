@@ -86,6 +86,29 @@ Each cluster gets a unique `hoprd-it-*` subdirectory containing `logs/hoprd_<i>.
 `localcluster.log`, and its state. Without this setting, the existing temporary-directory
 behavior applies. This setting does not affect an attached cluster (`HOPRD_CLUSTER_DATA_DIR`).
 
+### TRACE logs
+
+Release builds of hoprd have TRACE logs compiled out (hopr-lib sets
+`tracing/release_max_level_debug`), so `RUST_LOG=...=trace` alone shows nothing more than DEBUG.
+`just integration-trace` builds hoprd and hoprd-localcluster from a local hoprd checkout
+(`HOPRD_SRC`, default `../hoprd`) with debug assertions on, which brings TRACE back while the
+build stays optimised. It then runs the scenarios with the node logs kept under `HOPR_LOG_DIR`
+(default `./logs`):
+
+```bash
+RUST_LOG=info,hopr_protocol_session=trace just integration-trace zero_hop
+```
+
+- The binaries go to `<hoprd>/target/trace/`, apart from a normal release build.
+- `trace-build.txt` (next to the binaries, and copied into `HOPR_LOG_DIR`) records the hoprd
+  branch and revision, the build settings, and every `hopr-*` crate with its exact source.
+- The checkout is built as it is. If it is not on the release line's hoprd branch
+  (`release/4.1` for v4, `main` for v5), the build says so.
+- PIX scenarios need `just pix`, which builds the PIX test strategy; this recipe does not.
+- Debug assertions change the binary: extra checks run, and LTO is off. Use these runs to read
+  logs, never as a performance baseline.
+- If a run asked for TRACE but a binary could not provide it, the recipe says so at the end.
+
 anvil, bloklid and deployer logs are always written to `/tmp/hopr-chain/*.log`. `run.sh` sends nix
 build output to `nix-build.log`, so a long build can look like it has stopped.
 
