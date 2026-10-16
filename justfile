@@ -71,8 +71,9 @@ integration-binchain *scenarios: build build-chain
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
 # Like `integration-binchain`, but hoprd and hoprd-localcluster are built from HOPRD_SRC
-# (default ../hoprd) with TRACE logs compiled in (see `trace_build` in lib.sh), and the logs are
-# kept under HOPR_LOG_DIR (default ./logs). Not a performance baseline: debug assertions are on.
+# (default ../hoprd) with TRACE logs compiled in (see `trace_build` in lib.sh), and each run keeps
+# all its logs in its own folder under HOPR_LOG_DIR (default ./logs). Not a performance baseline:
+# debug assertions are on.
 #   RUST_LOG=info,hopr_protocol_session=trace just integration-trace zero_hop
 integration-trace *scenarios: build-chain
     #!/usr/bin/env bash
@@ -80,15 +81,8 @@ integration-trace *scenarios: build-chain
     source scripts/integration/lib.sh
     trace_build '{{hoprd_src}}' '{{hoprd_ref}}'
     export HOPR_LOG_DIR="${HOPR_LOG_DIR:-$PWD/logs}"
-    mkdir -p "${HOPR_LOG_DIR}"
-    cp "${HOPRD_TRACE_BUILD_INFO}" "${HOPR_LOG_DIR}/"
-    # Marks the start of this run, so the TRACE check ignores older logs in HOPR_LOG_DIR.
-    started="${HOPR_LOG_DIR}/trace-build.txt"
     [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
-    rc=0
-    HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh || rc=$?
-    warn_if_trace_capped "${HOPR_LOG_DIR}" "${started}"
-    exit "${rc}"
+    HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
 # Return-path resilience (binary chain): are replies spread over distinct relayers, and
 # does the stream survive one of them dying? Runs its own 5-node cluster — see
