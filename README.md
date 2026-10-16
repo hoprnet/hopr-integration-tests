@@ -134,8 +134,9 @@ RUST_LOG=info,hopr_protocol_session=trace just integration-trace zero_hop
 
 ### Exporting spans to a collector
 
-Span export from the cluster nodes is off by default, so no run needs a collector. To turn it on,
-start an OTLP collector and set `HOPRD_USE_OPENTELEMETRY=true` and its endpoint for the run:
+Span export from the cluster nodes and the edgli client is off by default, so no run needs a
+collector. To turn it on, start an OTLP collector and set `HOPRD_USE_OPENTELEMETRY=true` and its
+endpoint for the run:
 
 ```bash
 # For example Jaeger, which accepts OTLP over HTTP on 4318 and shows traces on 16686:
@@ -150,10 +151,15 @@ HOPRD_USE_OPENTELEMETRY=true HOPRD_OTLP_ENDPOINT=http://127.0.0.1:4318 \
 - Every node span carries `run_id` (the run folder's name, or `HOPR_RUN_ID`), `component=hoprd`,
   and the node's `node_address` and `node_peer_id`. Extra labels go in `HOPRD_OTEL_EXPORT_LABELS`.
 - `run.env` records these settings, without credentials.
-- Spans are only exported by hoprd nodes. The in-process edgli client logs to the console and
-  `client-<target>.log`, but does not export spans.
+- The edgli client in the test process exports its spans too, with the same switch and endpoint
+  (OTLP over HTTP only), as service `edgli` with `run_id` and `component=edgli`. Its text logs
+  still go to the console and `client-<target>.log` as before. Client and node spans are not
+  joined into one trace, because HOPR packets carry no trace context; match them by `run_id`
+  and time.
 - Spans still waiting to be sent when a node stops can be lost: hoprd does not flush its exporter
   on SIGTERM, and localcluster stops its nodes with SIGKILL.
+- The client sends its last spans when the test process exits. A test process that is killed
+  (for example by Ctrl-C) loses the spans that were not sent yet.
 
 Without `HOPR_LOG_DIR`, anvil, bloklid and deployer logs are written to `/tmp/hopr-chain/*.log`. `run.sh` sends nix
 build output to `nix-build.log`, so a long build can look like it has stopped.
