@@ -606,7 +606,10 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         cmd.arg("--frozen-identities");
     }
     cmd.args(["--chain-url", &chain_url]);
-    cmd.env("HOPRD_USE_OPENTELEMETRY", "false");
+    let run_id = run_id();
+    for (key, value) in node_telemetry_env(|key| std::env::var(key).ok(), &run_id) {
+        cmd.env(key, value);
+    }
     for (key, value) in REQUESTED_NODE_ENV
         .get()
         .map(Vec::as_slice)
@@ -668,6 +671,74 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         summary,
         _tempdir: tempdir,
     })
+}
+
+/// This run's id, attached to everything the run exports: `HOPR_RUN_ID` (set by `run-binchain.sh`
+/// to the name of the run's log folder), or one made from the time and process id.
+fn run_id() -> String {
+    std::env::var("HOPR_RUN_ID")
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            format!("it-{secs}-{}", std::process::id())
+        })
+}
+
+/// Telemetry settings for the cluster's `hoprd` nodes, read from the test environment through `get`.
+///
+/// By default span export stays off (`HOPRD_USE_OPENTELEMETRY=false`), so a run never needs a
+/// collector. Setting `HOPRD_USE_OPENTELEMETRY=true` in the test environment opts in and is
+/// passed on as given; an explicit `false` is passed on too. With the opt-in:
+/// - `HOPRD_OTEL_SIGNALS` defaults to `traces` (localcluster would otherwise default it to
+///   `metrics`, which exports no spans);
+/// - `HOPRD_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` are not set here: the nodes inherit them, and
+///   localcluster defaults the endpoint to `http://localhost:4318`;
+/// - `run_id` and `component=hoprd` are added to `HOPRD_OTEL_EXPORT_LABELS`, so every exported span
+///   names the run. hoprd adds the node's address and peer id itself.
+fn node_telemetry_env(get: impl Fn(&str) -> Option<String>, run_id: &str) -> Vec<(String, String)> {
+    let requested = get("HOPRD_USE_OPENTELEMETRY");
+    let opted_in = requested.as_deref().is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    });
+    if !opted_in {
+        return vec![(
+            "HOPRD_USE_OPENTELEMETRY".into(),
+            requested.unwrap_or_else(|| "false".into()),
+        )];
+    }
+
+    let signals = get("HOPRD_OTEL_SIGNALS").unwrap_or_else(|| "traces".into());
+    let labels = [
+        get("HOPRD_OTEL_EXPORT_LABELS").filter(|l| !l.trim().is_empty()),
+        Some(format!("run_id={run_id},component=hoprd")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(",");
+    tracing::info!(
+        run_id,
+        signals,
+        endpoint = get("HOPRD_OTLP_ENDPOINT")
+            .as_deref()
+            .unwrap_or("localcluster default"),
+        "cluster nodes will export telemetry"
+    );
+    vec![
+        (
+            "HOPRD_USE_OPENTELEMETRY".into(),
+            requested.unwrap_or_default(),
+        ),
+        ("HOPRD_OTEL_SIGNALS".into(), signals),
+        ("HOPRD_OTEL_EXPORT_LABELS".into(), labels),
+    ]
 }
 
 async fn wait_status_running(
@@ -972,5 +1043,59 @@ mod tests {
     fn rejects_null_node_address() {
         let json = r#"{ "state": "running", "blokli_url": "http://x", "nodes": [ { "id": 0, "address": null, "api_url": "http://x" } ], "extras": [] }"#;
         assert!(parse_summary_json(json).is_err());
+    }
+
+    fn env_from<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn node_span_export_is_off_unless_requested() {
+        assert_eq!(
+            node_telemetry_env(env_from(&[]), "r1"),
+            vec![("HOPRD_USE_OPENTELEMETRY".to_string(), "false".to_string())]
+        );
+        // An explicit "no" is passed on as given, and nothing else is set.
+        assert_eq!(
+            node_telemetry_env(env_from(&[("HOPRD_USE_OPENTELEMETRY", "0")]), "r1"),
+            vec![("HOPRD_USE_OPENTELEMETRY".to_string(), "0".to_string())]
+        );
+    }
+
+    #[test]
+    fn requested_node_span_export_exports_traces_labelled_with_the_run() {
+        let env = node_telemetry_env(env_from(&[("HOPRD_USE_OPENTELEMETRY", "true")]), "run-1");
+        assert_eq!(
+            env,
+            vec![
+                ("HOPRD_USE_OPENTELEMETRY".to_string(), "true".to_string()),
+                ("HOPRD_OTEL_SIGNALS".to_string(), "traces".to_string()),
+                (
+                    "HOPRD_OTEL_EXPORT_LABELS".to_string(),
+                    "run_id=run-1,component=hoprd".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn requested_node_span_export_keeps_the_callers_signals_and_labels() {
+        let env = node_telemetry_env(
+            env_from(&[
+                ("HOPRD_USE_OPENTELEMETRY", "yes"),
+                ("HOPRD_OTEL_SIGNALS", "traces,logs"),
+                ("HOPRD_OTEL_EXPORT_LABELS", "team=core"),
+            ]),
+            "run-2",
+        );
+        assert!(env.contains(&("HOPRD_OTEL_SIGNALS".to_string(), "traces,logs".to_string())));
+        assert!(env.contains(&(
+            "HOPRD_OTEL_EXPORT_LABELS".to_string(),
+            "team=core,run_id=run-2,component=hoprd".to_string()
+        )));
     }
 }

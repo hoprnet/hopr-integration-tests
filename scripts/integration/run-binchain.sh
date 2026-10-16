@@ -55,6 +55,12 @@ write_run_env() {
       printf '%s=%s\n' "${v}" "${!v:-}"
     done
     echo "HOPRD_CHAIN_URL=$(without_credentials "${HOPRD_CHAIN_URL:-}")"
+    # Span export (see "Exporting spans" in the README). Endpoint without credentials; headers
+    # (OTEL_EXPORTER_OTLP_HEADERS) are never written.
+    echo "HOPR_RUN_ID=${HOPR_RUN_ID:-}"
+    echo "HOPRD_USE_OPENTELEMETRY=${HOPRD_USE_OPENTELEMETRY:-}"
+    echo "HOPRD_OTEL_SIGNALS=${HOPRD_OTEL_SIGNALS:-}"
+    echo "HOPRD_OTLP_ENDPOINT=$(without_credentials "${HOPRD_OTLP_ENDPOINT:-}")"
     # The resolved path names the exact build: a /nix/store hash, or a trace build's target dir.
     echo "hoprd_bin=$(realpath "${HOPRD_BIN}" 2>/dev/null || echo "${HOPRD_BIN}")"
     echo "localcluster_bin=$(realpath "${HOPRD_LOCALCLUSTER_BIN}" 2>/dev/null || echo "${HOPRD_LOCALCLUSTER_BIN}")"
@@ -84,6 +90,7 @@ chain_log_sizes() {
 
 # Runs on every exit (success, failure, Ctrl-C): stops the chain this run owns, and writes how the
 # run ended next to its logs.
+# shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 finish_run() {
   local code=$?
   [ "${CHAIN_SHARED:-0}" = 1 ] || chain_stop
@@ -110,6 +117,8 @@ if [ -n "${HOPR_LOG_DIR:-}" ]; then
   RUN_DIR="$(mktemp -d "${HOPR_LOG_DIR}/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXX")"
   # The cluster creates its hoprd-it-* folder under HOPR_LOG_DIR (integration/src/cluster.rs).
   export HOPR_LOG_DIR="${RUN_DIR}"
+  # Names the run in exported spans too, so they can be matched to this folder.
+  export HOPR_RUN_ID="${HOPR_RUN_ID:-$(basename "${RUN_DIR}")}"
   # A chain this run starts writes its logs here. A shared chain belongs to the caller.
   [ "${CHAIN_SHARED:-0}" = 1 ] || export CHAIN_DATA_DIR="${RUN_DIR}/chain"
   # Plain text in the files, and the client logs printed for passing tests too.

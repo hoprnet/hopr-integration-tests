@@ -132,6 +132,29 @@ RUST_LOG=info,hopr_protocol_session=trace just integration-trace zero_hop
   logs, never as a performance baseline.
 - If a run asked for TRACE but a binary could not provide it, the runner says so at the end.
 
+### Exporting spans to a collector
+
+Span export from the cluster nodes is off by default, so no run needs a collector. To turn it on,
+start an OTLP collector and set `HOPRD_USE_OPENTELEMETRY=true` and its endpoint for the run:
+
+```bash
+# For example Jaeger, which accepts OTLP over HTTP on 4318 and shows traces on 16686:
+docker run --rm -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one:latest
+
+HOPRD_USE_OPENTELEMETRY=true HOPRD_OTLP_ENDPOINT=http://127.0.0.1:4318 \
+  HOPR_LOG_DIR=$PWD/logs just integration-trace zero_hop
+```
+
+- The harness passes `HOPRD_USE_OPENTELEMETRY` on as given instead of forcing `false`. With it on,
+  `HOPRD_OTEL_SIGNALS` defaults to `traces`; set it to change that.
+- Every node span carries `run_id` (the run folder's name, or `HOPR_RUN_ID`), `component=hoprd`,
+  and the node's `node_address` and `node_peer_id`. Extra labels go in `HOPRD_OTEL_EXPORT_LABELS`.
+- `run.env` records these settings, without credentials.
+- Spans are only exported by hoprd nodes. The in-process edgli client logs to the console and
+  `client-<target>.log`, but does not export spans.
+- Spans still waiting to be sent when a node stops can be lost: hoprd does not flush its exporter
+  on SIGTERM, and localcluster stops its nodes with SIGKILL.
+
 Without `HOPR_LOG_DIR`, anvil, bloklid and deployer logs are written to `/tmp/hopr-chain/*.log`. `run.sh` sends nix
 build output to `nix-build.log`, so a long build can look like it has stopped.
 
