@@ -552,6 +552,7 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         tempfile::TempDir::with_prefix("hoprd-it-")?
     };
     let data_dir = tempdir.path().to_path_buf();
+    let control_base = control_base_for(&data_dir)?;
 
     let mut cmd = tokio::process::Command::new(&lc_bin);
     cmd.args([
@@ -606,6 +607,9 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         cmd.arg("--frozen-identities");
     }
     cmd.args(["--chain-url", &chain_url]);
+    if let Some(base) = &control_base {
+        cmd.arg("--control-base").arg(base);
+    }
     let run_id = run_id();
     for (key, value) in node_telemetry_env(|key| std::env::var(key).ok(), &run_id) {
         cmd.env(key, value);
@@ -634,6 +638,7 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     let summary = match wait_status_running(
         std::path::Path::new(&lc_bin),
         &data_dir,
+        control_base.as_deref(),
         CLUSTER_START_TIMEOUT,
         &mut child,
     )
@@ -741,9 +746,39 @@ fn node_telemetry_env(get: impl Fn(&str) -> Option<String>, run_id: &str) -> Vec
     ]
 }
 
+/// Longest control socket path used as is. macOS allows 104 bytes for a Unix socket path and
+/// Linux 108; this leaves a little room.
+const MAX_CONTROL_SOCKET_PATH: usize = 100;
+
+/// Where localcluster puts its control socket (`<base>.sock`).
+///
+/// By default that is `<data_dir>/cluster.sock`, and `None` keeps that default. A data dir deep in
+/// `HOPR_LOG_DIR` can make the path too long for a Unix socket, and localcluster then fails at
+/// start-up. In that case the socket goes into a short new folder in `/tmp` instead, kept for the
+/// life of the cluster and removed by `lib.sh clean_tmp` like the other `hoprd-it-*` folders. The
+/// logs stay in the data dir.
+fn control_base_for(data_dir: &std::path::Path) -> anyhow::Result<Option<PathBuf>> {
+    if data_dir.join("cluster.sock").as_os_str().len() <= MAX_CONTROL_SOCKET_PATH {
+        return Ok(None);
+    }
+    let short_root = if cfg!(unix) {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("hoprd-it-")
+        .tempdir_in(short_root)
+        .context("creating a short folder for the localcluster control socket")?
+        .keep();
+    tracing::info!(path = %dir.display(), "cluster data dir is too deep for a socket path; control socket goes here");
+    Ok(Some(dir.join("cluster")))
+}
+
 async fn wait_status_running(
     lc_bin: &std::path::Path,
     data_dir: &std::path::Path,
+    control_base: Option<&std::path::Path>,
     timeout: Duration,
     child: &mut tokio::process::Child,
 ) -> anyhow::Result<ClusterSummary> {
@@ -752,8 +787,12 @@ async fn wait_status_running(
         if let Ok(Some(status)) = child.try_wait() {
             anyhow::bail!("hoprd-localcluster exited prematurely with status {status:?}");
         }
-        let out = tokio::process::Command::new(lc_bin)
-            .args(["status", "--data-dir", data_dir.to_str().unwrap()])
+        let mut status = tokio::process::Command::new(lc_bin);
+        status.args(["status", "--data-dir", data_dir.to_str().unwrap()]);
+        if let Some(base) = control_base {
+            status.arg("--control-base").arg(base);
+        }
+        let out = status
             .output()
             .await
             .context("failed to run `hoprd-localcluster status`")?;
@@ -1097,5 +1136,40 @@ mod tests {
             "HOPRD_OTEL_EXPORT_LABELS".to_string(),
             "team=core,run_id=run-2,component=hoprd".to_string()
         )));
+    }
+
+    #[test]
+    fn a_short_data_dir_keeps_the_default_control_socket() -> anyhow::Result<()> {
+        assert_eq!(
+            control_base_for(std::path::Path::new("/tmp/hoprd-it-abc"))?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_deep_data_dir_gets_a_short_control_socket() -> anyhow::Result<()> {
+        let deep = PathBuf::from("/")
+            .join("deep-folder-name".repeat(8))
+            .join("hoprd-it-abc");
+        let base =
+            control_base_for(&deep)?.context("a deep data dir needs its own control base")?;
+        let socket = socket_of(&base);
+        assert!(
+            socket.as_os_str().len() <= MAX_CONTROL_SOCKET_PATH,
+            "socket path too long: {}",
+            socket.display()
+        );
+        let dir = base.parent().context("control base has a folder")?;
+        assert!(dir.is_dir(), "the short folder must exist");
+        std::fs::remove_dir(dir)?;
+        Ok(())
+    }
+
+    /// The socket localcluster makes from a control base: `<base>.sock`.
+    fn socket_of(base: &std::path::Path) -> PathBuf {
+        let mut path = base.as_os_str().to_owned();
+        path.push(".sock");
+        PathBuf::from(path)
     }
 }

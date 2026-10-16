@@ -510,7 +510,11 @@ trace_build() {
   branch="$(git -C "${src}" rev-parse --abbrev-ref HEAD 2>/dev/null)"
   rev="$(git -C "${src}" rev-parse HEAD 2>/dev/null)"
   git -C "${src}" diff --quiet HEAD 2>/dev/null || dirty="-dirty"
-  if [ -n "${expected_ref}" ] && [ "${branch}" != "${expected_ref}" ]; then
+  # A detached checkout (e.g. a worktree of origin/release/4.1) has no branch name; it matches
+  # the line when it is at the tip of the remote branch.
+  [ "${branch}" = HEAD ] && branch="(detached)"
+  if [ -n "${expected_ref}" ] && [ "${branch}" != "${expected_ref}" ] &&
+    [ "${rev}" != "$(git -C "${src}" rev-parse --verify -q "origin/${expected_ref}" 2>/dev/null)" ]; then
     echo "note: ${src} is on '${branch}', not '${expected_ref}' (this line's hoprd branch)." >&2
   fi
   echo "building hoprd + hoprd-localcluster with TRACE logs from ${src} (${branch} ${rev:0:10}${dirty})"
@@ -533,7 +537,8 @@ trace_build() {
     echo "hoprd_branch=${branch}"
     echo "hoprd_rev=${rev}${dirty}"
     echo "profile=release debug-assertions=true lto=false codegen-units=16"
-    echo "rustc=$(cd "${src}" && nix develop -c rustc --version 2>/dev/null)"
+    # The dev shell prints a banner first; keep only rustc's own line.
+    echo "rustc=$(cd "${src}" && nix develop -c rustc --version 2>/dev/null | grep '^rustc ' | tail -1)"
     echo "cargo_lock_sha256=$({ sha256sum "${src}/Cargo.lock" || shasum -a 256 "${src}/Cargo.lock"; } 2>/dev/null | cut -d' ' -f1)"
     echo "# hopr-* crates in Cargo.lock: name version source"
     awk '/^name = "hopr-/ { n = $3; getline; v = $3; getline; s = ($1 == "source") ? $3 : "(workspace)"; gsub(/"/, "", n); gsub(/"/, "", v); gsub(/"/, "", s); print n, v, s }' \

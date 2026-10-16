@@ -165,9 +165,12 @@ for target in ${TARGETS}; do
     chain_start
   fi
   if [ -n "${RUN_DIR}" ]; then
-    # stdout and stderr both. With pipefail, a failing test still fails the pipeline.
+    # stdout and stderr both, through `tee` in a process substitution rather than a pipe. The
+    # test process leaks its cluster on purpose, and the cluster keeps the output open: a pipe
+    # would wait for it to close, which only happens after `reap_nodes` below, so the run would
+    # hang. The test's own exit status is used directly.
     # shellcheck disable=SC2086  # SCENARIOS is a deliberate word-split list of libtest filters
-    cargo_it "${target}" ${SCENARIOS:-} 2>&1 | tee -a "${RUN_DIR}/client-${target}.log" || rc=1
+    cargo_it "${target}" ${SCENARIOS:-} > >(tee -a "${RUN_DIR}/client-${target}.log") 2>&1 || rc=1
   else
     # shellcheck disable=SC2086  # SCENARIOS is a deliberate word-split list of libtest filters
     cargo_it "${target}" ${SCENARIOS:-} || rc=1
