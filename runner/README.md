@@ -265,9 +265,10 @@ change the harness, the thresholds or the scripts and merge without the test eve
 running — the one repo where that matters most. The job already admitted any
 non-`pull_request` event, so only the trigger had to be added.
 
-Merge-queue runs share the non-cancelling `integration` concurrency group with the
-dispatch runs. That is deliberate: cancelling a queue run fails the queue entry, and
-the runner executes one job at a time anyway. The cost is that a candidate can wait
+Merge-queue runs share the `integration` job concurrency group (`queue: max`) with the
+dispatch runs. That is deliberate: cancelling a queue run fails the queue entry, and the
+box runs one integration job at a time. The default `queue: single` is not enough: it
+keeps one pending run and cancels it when the next arrives. The cost is that a candidate can wait
 behind an upstream gate run, so keep the queue's max wait comfortably above the
 ~30-40 minute runtime.
 
@@ -316,8 +317,8 @@ the three v4 branches together. A red night posts to Zulip with the trigger show
 `nightly v4 line` plus the three resolved revisions.
 
 Scheduled runs only ever fire from the default branch, and they share the
-non-cancelling `integration` concurrency group, so a nightly queues behind an
-in-flight run rather than cancelling it.
+`integration` job concurrency group (`queue: max`), so a nightly queues behind
+in-flight runs rather than cancelling them or being cancelled.
 
 ### What the gate runs
 
@@ -381,5 +382,6 @@ stack.
     -f 'client_payload[rev]=<edge-client release/4.1 sha>'
   ```
 
-Concurrency: a new push to a PR cancels that PR's in-progress run; dispatch/manual
-runs share a global group that never cancels, so they stack and run one at a time.
+Concurrency: a new push to a PR cancels that PR's in-progress run; the `integration`
+job of every run, PR or not, shares one group with `queue: max`, so they stack FIFO and
+run one at a time.
