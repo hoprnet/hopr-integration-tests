@@ -66,13 +66,10 @@ on:
 # first one, so an indented continuation would leave real newlines in this string.
 run-name: >-
   ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration {0} ({1} {2})', github.event.client_payload.line || 'v4', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly v4)' || 'Integration throughput test'))) }}
-# PR events: one group per PR, cancel-in-progress (a new push supersedes the
-# previous run of that PR). Dispatch/manual/merge-queue: a single shared group that
-# never cancels, so those runs stack and execute one after another. Merge-queue runs
-# must NOT be cancellable — cancelling one fails the queue entry — and they share the
-# group deliberately, since the runner executes one job at a time anyway.
+# Only lets a new push supersede a PR's previous run; every other run is its own group.
+# Serialising on the box is the `integration` job's concurrency, not this one.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('integration-pr-{0}', github.event.pull_request.number) || 'integration' }}
+  group: ${{ github.event_name == 'pull_request' && format('integration-pr-{0}', github.event.pull_request.number) || format('integration-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # On a hosted runner so `gh` need not exist on the hetzner box. See README "Breaking upstream changes".
@@ -120,6 +117,11 @@ jobs:
     # Dedicated self-hosted machine rather than a hosted VM: the onion encoder is
     # CPU-bound and the throughput thresholds only mean anything on a stable core count.
     runs-on: [self-hosted, hetzner]
+    # One job on the box at a time (shared ports). `queue: max` because the default keeps a single
+    # pending run and cancels it on the next arrival, which fails the upstream merge-queue entry.
+    concurrency:
+      group: integration
+      queue: max
     # `actions: read` lets run.sh find a matching earlier green; the rest is what it used before.
     permissions:
       contents: read
