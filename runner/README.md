@@ -269,8 +269,8 @@ Merge-queue runs share the `integration` job concurrency group (`queue: max`) wi
 dispatch runs. That is deliberate: cancelling a queue run fails the queue entry, and the
 box runs one integration job at a time. The default `queue: single` is not enough: it
 keeps one pending run and cancels it when the next arrives. The cost is that a candidate can wait
-behind an upstream gate run, so keep the queue's max wait comfortably above the
-~30-40 minute runtime.
+behind several queued runs, so keep the queue's max wait comfortably above the combined
+runtime of the runs ahead of it (~30-40 minutes each).
 
 **hopr-integration-tests has no rulesets at all** as of 2026-09-04 — `main` is unprotected, so
 this trigger fires but nothing enforces it. To make it a real gate, create a ruleset
