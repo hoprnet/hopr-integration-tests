@@ -110,6 +110,10 @@ use hoprd_integration_test::{
 /// nothing alike.
 const NODES: usize = 5;
 
+/// Cluster for the two-hop and partition scenarios: seven candidates, so a two-hop path and a
+/// partitioned relayer still leave several distinct routes.
+const LARGE_NODES: usize = 8;
+
 /// Distinct inbound delays per node, so the relayers do **not** all look alike.
 ///
 /// This is load-bearing, not flavour. On an unshaped local cluster every relayer probes at
@@ -142,6 +146,9 @@ per_node:
   2: "110ms"
   3: "170ms"
   4: "260ms"
+  5: "40ms"
+  6: "110ms"
+  7: "170ms"
 "#;
 
 /// Which direction of the session is put on a relay, and therefore which one the kill removes.
@@ -162,6 +169,12 @@ struct Topology {
     direction: &'static str,
     forward_hops: usize,
     return_hops: usize,
+    nodes: usize,
+    /// Cut only the exit's link to the victim instead of killing it: the victim stays up and Edgli
+    /// keeps its own link to it, so only the exit can notice.
+    cut_exit_link: bool,
+    /// Stall the exit's link to the victim instead: it stays connected but trickles.
+    stall_exit_link: bool,
 }
 
 /// Replies travel over one relay; the request path is direct.
@@ -171,6 +184,9 @@ const RETURN_PATH: Topology = Topology {
     direction: "return",
     forward_hops: 0,
     return_hops: 1,
+    nodes: NODES,
+    cut_exit_link: false,
+    stall_exit_link: false,
 };
 
 /// The mirror image: requests travel over one relay, replies come back directly.
@@ -183,6 +199,9 @@ const FORWARD_PATH: Topology = Topology {
     direction: "forward",
     forward_hops: 1,
     return_hops: 0,
+    nodes: NODES,
+    cut_exit_link: false,
+    stall_exit_link: false,
 };
 
 /// One relay in each direction: what a real deployment runs.
@@ -194,6 +213,50 @@ const SYMMETRIC: Topology = Topology {
     direction: "symmetric",
     forward_hops: 1,
     return_hops: 1,
+    nodes: NODES,
+    cut_exit_link: false,
+    stall_exit_link: false,
+};
+
+/// Replies over one relay whose link to the exit is cut while Edgli still reaches it.
+const RETURN_EXIT_CUT: Topology = Topology {
+    direction: "return-exit-cut",
+    forward_hops: 0,
+    return_hops: 1,
+    nodes: LARGE_NODES,
+    cut_exit_link: true,
+    stall_exit_link: false,
+};
+
+/// As [`RETURN_EXIT_CUT`] over two-hop return paths.
+const TWO_HOP_RETURN_EXIT_CUT: Topology = Topology {
+    direction: "two-hop-return-exit-cut",
+    forward_hops: 0,
+    return_hops: 2,
+    nodes: LARGE_NODES,
+    cut_exit_link: true,
+    stall_exit_link: false,
+};
+
+/// Replies over one relay whose link to the exit stalls periodically: alive, connected, too slow.
+const RETURN_EXIT_STALL: Topology = Topology {
+    direction: "return-exit-stall",
+    forward_hops: 0,
+    return_hops: 1,
+    nodes: LARGE_NODES,
+    cut_exit_link: false,
+    stall_exit_link: true,
+};
+
+/// Two relays each way, busiest one killed: the victim can sit anywhere on either path,
+/// including deeper than the exit or Edgli can see.
+const TWO_HOP_SYMMETRIC: Topology = Topology {
+    direction: "two-hop-symmetric",
+    forward_hops: 2,
+    return_hops: 2,
+    nodes: LARGE_NODES,
+    cut_exit_link: false,
+    stall_exit_link: false,
 };
 
 /// Warm-up payload: enough packets to make the relayer histogram unambiguous, no more.
@@ -407,7 +470,7 @@ async fn measure_paced_baseline(
 /// Bring up a cluster sized for return-path work and open a 0-hop-out / 1-hop-back
 /// session, returning the env, the session, and the nodes that can relay replies.
 async fn setup_return_path_env() -> anyhow::Result<(IntegrationEnv, HoprSession, Vec<NodeInfo>)> {
-    setup_env_with_hops(0, 1).await
+    setup_env_with_hops(0, 1, NODES).await
 }
 
 /// As above, with the forward and return hop counts named explicitly.
@@ -418,8 +481,13 @@ async fn setup_return_path_env() -> anyhow::Result<(IntegrationEnv, HoprSession,
 async fn setup_env_with_hops(
     forward_hops: usize,
     return_hops: usize,
+    nodes: usize,
 ) -> anyhow::Result<(IntegrationEnv, HoprSession, Vec<NodeInfo>)> {
-    let size = request_cluster_size(NODES);
+    let nodes = std::env::var("HOPRD_RETURN_PATH_NODES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(nodes);
+    let size = request_cluster_size(nodes);
     request_latency_profile(LATENCY_PROFILE);
     anyhow::ensure!(
         size >= 3,
@@ -548,8 +616,8 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         "relayer-loss scenario"
     );
     // Held for the cluster lifetime; the scenario itself never opens a second session.
-    let (_env, session, candidates) =
-        setup_env_with_hops(topology.forward_hops, topology.return_hops).await?;
+    let (env, session, candidates) =
+        setup_env_with_hops(topology.forward_hops, topology.return_hops, topology.nodes).await?;
 
     // Split once and keep the halves: both phases run over this one session, so what is measured
     // is the *established* stream surviving. A replacement session opened after the kill would
@@ -611,9 +679,33 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         victim = %busiest,
         share_pct = spread.max_share() * 100.0,
         direction = topology.direction,
-        "killing the busiest relayer for the direction under test"
+        cut_exit_link = topology.cut_exit_link,
+        "taking out the busiest relayer for the direction under test"
     );
-    victim.kill()?;
+    if topology.cut_exit_link || topology.stall_exit_link {
+        let cluster = env.cluster()?;
+        let exit = cluster
+            .nodes
+            .iter()
+            .find(|n| candidates.iter().all(|c| c.address != n.address))
+            .ok_or_else(|| anyhow::anyhow!("no exit among the cluster nodes"))?;
+        if topology.cut_exit_link {
+            cluster.cut_link(exit.address, victim.address)?;
+        } else {
+            let ms = |key: &str, fallback: u64| {
+                Duration::from_millis(std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback))
+            };
+            cluster.stall_link(
+                exit.address,
+                victim.address,
+                ms("HOPRD_STALL_PERIOD_MS", 5_000),
+                ms("HOPRD_STALL_MS", 4_000),
+                ms("HOPRD_STALL_DELAY_MS", 3_000),
+            )?;
+        }
+    } else {
+        victim.kill()?;
+    }
 
     // Phase 3 -- settle: let the kill land before any new data is offered.
     //
@@ -699,6 +791,36 @@ async fn session_should_survive_forward_relayer_loss() -> anyhow::Result<()> {
     session_should_survive_relayer_loss(FORWARD_PATH).await
 }
 
+/// The exit loses its link to the busiest return relayer while Edgli keeps its own: Edgli sees no
+/// disconnect and keeps minting SURBs through it, so only the exit can set those SURBs aside.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn a_one_hop_session_should_survive_exit_losing_its_return_relayer() -> anyhow::Result<()> {
+    session_should_survive_relayer_loss(RETURN_EXIT_CUT).await
+}
+
+/// As above over two-hop return paths.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn a_two_hop_session_should_survive_exit_losing_its_return_relayer() -> anyhow::Result<()> {
+    session_should_survive_relayer_loss(TWO_HOP_RETURN_EXIT_CUT).await
+}
+
+/// The exit's link to the busiest return relayer stalls but never drops: no disconnect fires, so
+/// only the exit's own probes to the relayer can see it.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn a_one_hop_session_should_survive_a_stalling_return_relayer() -> anyhow::Result<()> {
+    session_should_survive_relayer_loss(RETURN_EXIT_STALL).await
+}
+
+/// Two relays each way with the busiest one killed.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn a_two_hop_session_should_survive_relayer_loss() -> anyhow::Result<()> {
+    session_should_survive_relayer_loss(TWO_HOP_SYMMETRIC).await
+}
+
 /// Phase tag for the payload offered *while the outage is in effect*.
 ///
 /// A third tag, distinct from [`SURVIVAL_PHASE`], so the bytes offered into the frozen return path
@@ -761,7 +883,7 @@ impl Drop for Thawed<'_> {
 async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()> {
     // 0-hop out / 1-hop back: every reply traverses a cluster relayer, so freezing the relayer set
     // takes the whole return path down while requests still reach the exit directly.
-    let (_env, session, candidates) = setup_env_with_hops(0, 1).await?;
+    let (_env, session, candidates) = setup_env_with_hops(0, 1, NODES).await?;
     let (mut rx, mut tx) = tokio::io::split(session);
 
     // Phase 1 — warm up: baseline rate, and confirm replies actually traverse the relayers we are
