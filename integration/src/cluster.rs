@@ -632,6 +632,9 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     cmd.stdout(std::fs::File::create(&stdout_log).context("creating localcluster log")?);
     cmd.stderr(std::process::Stdio::inherit());
 
+    // Node logs live inside the temp dir, which is removed when the handle drops -- so by the time
+    // a failure is worth investigating, the only per-node evidence is already gone.
+    let keep = log_root.is_some() || std::env::var_os("HOPRD_KEEP_ARTIFACTS").is_some();
     let mut child = cmd.spawn()?;
     tracing::info!(path = %stdout_log.display(), "localcluster output goes to a file");
 
@@ -654,22 +657,17 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
                 );
             }
             let _ = child.start_kill();
-            return Err(err);
+            // A failed start is when the node and localcluster logs matter most: keep them too.
+            return Err(match keep_cluster_dir(tempdir, keep) {
+                None => err.context(format!("cluster logs kept in {}", data_dir.display())),
+                Some(_dropped) => err,
+            });
         }
     };
 
     tracing::info!(blokli_url = %summary.blokli_url, "cluster up");
 
-    // Node logs live inside the temp dir, which is removed when the handle drops -- so by the time
-    // a failure is worth investigating, the only per-node evidence is already gone. Leaking the
-    // handle keeps the whole cluster directory for post-mortem.
-    let tempdir = if log_root.is_some() || std::env::var_os("HOPRD_KEEP_ARTIFACTS").is_some() {
-        tracing::info!(path = %tempdir.path().display(), "keeping cluster artifacts");
-        std::mem::forget(tempdir);
-        None
-    } else {
-        Some(tempdir)
-    };
+    let tempdir = keep_cluster_dir(tempdir, keep);
 
     Ok(ClusterHandle {
         _child: Some(child),
@@ -773,6 +771,17 @@ fn control_base_for(data_dir: &std::path::Path) -> anyhow::Result<Option<PathBuf
         .keep();
     tracing::info!(path = %dir.display(), "cluster data dir is too deep for a socket path; control socket goes here");
     Ok(Some(dir.join("cluster")))
+}
+
+/// Keeps the cluster directory on disk when `keep` is set (returns `None`); otherwise hands the
+/// handle back, so the directory is removed when it drops.
+fn keep_cluster_dir(tempdir: tempfile::TempDir, keep: bool) -> Option<tempfile::TempDir> {
+    if !keep {
+        return Some(tempdir);
+    }
+    let path = tempdir.keep();
+    tracing::info!(path = %path.display(), "keeping cluster artifacts");
+    None
 }
 
 async fn wait_status_running(
@@ -1163,6 +1172,25 @@ mod tests {
         let dir = base.parent().context("control base has a folder")?;
         assert!(dir.is_dir(), "the short folder must exist");
         std::fs::remove_dir(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_kept_cluster_dir_survives() -> anyhow::Result<()> {
+        let dir = tempfile::TempDir::with_prefix("hoprd-it-keep-")?;
+        let path = dir.path().to_path_buf();
+        assert!(keep_cluster_dir(dir, true).is_none());
+        assert!(path.is_dir(), "a kept cluster dir must stay on disk");
+        std::fs::remove_dir(&path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_unkept_cluster_dir_is_removed_on_drop() -> anyhow::Result<()> {
+        let dir = tempfile::TempDir::with_prefix("hoprd-it-drop-")?;
+        let path = dir.path().to_path_buf();
+        drop(keep_cluster_dir(dir, false));
+        assert!(!path.exists(), "an unkept cluster dir must be cleaned up");
         Ok(())
     }
 
