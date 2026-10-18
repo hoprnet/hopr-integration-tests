@@ -30,6 +30,7 @@ pub mod pix;
 // gate has failed. Those tests belong in the default `cargo test --lib`.
 pub mod pix_exit;
 pub mod pump;
+pub mod quic_shaper;
 pub mod relayers;
 pub mod session_metrics;
 // Ungated for the same reason `pix` is: the profile is arithmetic over constants, and its
@@ -42,7 +43,7 @@ pub mod udp_service;
 /// packet count for channel funding (see [`env`]).
 pub const PAYLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
-pub use env::IntegrationEnv;
+pub use env::{IntegrationEnv, request_edgli_egress_timeout};
 
 /// On-chain address type, re-exported so submodules share one definition.
 pub use edgli::hopr_lib::api::types::primitive::prelude::Address;
