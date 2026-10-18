@@ -135,6 +135,20 @@ impl NetTuning {
     }
 }
 
+static REQUESTED_EDGLI_EGRESS_TIMEOUT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+
+/// Ask for edgli's egress stream backpressure timeout to be set, before booting edgli.
+///
+/// In production this default is 2 seconds, which triggers StallGuardSink stream eviction
+/// under sustained write stalls. First call in a test binary wins.
+pub fn request_edgli_egress_timeout(d: Duration) {
+    REQUESTED_EDGLI_EGRESS_TIMEOUT.get_or_init(|| d);
+}
+
+pub fn edgli_egress_timeout() -> Option<Duration> {
+    REQUESTED_EDGLI_EGRESS_TIMEOUT.get().copied()
+}
+
 pub struct IntegrationEnv {
     // Field order matters for drop: edgli first (cancels tasks), then cluster.
     edgli: Edgli,
@@ -142,6 +156,8 @@ pub struct IntegrationEnv {
     targets: Targets,
     /// The binary-wide cluster; `None` for Rotsee (no local process).
     _cluster: Option<&'static ClusterHandle>,
+    _proxy: Option<crate::quic_shaper::BlokliProxy>,
+    _shaper: Option<std::sync::Arc<crate::quic_shaper::QuicShaperPool>>,
 }
 
 impl Drop for IntegrationEnv {
@@ -180,7 +196,63 @@ impl IntegrationEnv {
                 dest_one_hop,
             },
             _cluster: Some(cluster),
+            _proxy: None,
+            _shaper: None,
         })
+    }
+
+    /// As [`Self::setup`], but routing QUIC traffic between Edgli and cluster nodes through
+    /// a userspace UDP shaper pool via a local Blokli reverse proxy.
+    ///
+    /// Sets an initial latency delay of 50 ms (100 ms RTT) on the QUIC links.
+    pub async fn setup_shaped()
+    -> anyhow::Result<(Self, std::sync::Arc<crate::quic_shaper::QuicShaperPool>)> {
+        Self::setup_shaped_with(Duration::from_millis(50)).await
+    }
+
+    /// As [`Self::setup_shaped`], with a specified base one-way delay.
+    pub async fn setup_shaped_with(
+        delay: Duration,
+    ) -> anyhow::Result<(Self, std::sync::Arc<crate::quic_shaper::QuicShaperPool>)> {
+        let cluster = cluster::bring_up_shared().await?;
+        let summary = cluster.summary.clone();
+        let extra = summary.extras[0].clone();
+
+        let shaper_pool = std::sync::Arc::new(
+            crate::quic_shaper::QuicShaperPool::bind(cluster_size(), P2P_PORT_BASE).await?,
+        );
+        shaper_pool.set_delay(delay);
+
+        let proxy = crate::quic_shaper::BlokliProxy::start(
+            &summary.blokli_url,
+            shaper_pool.port_mappings().to_vec(),
+        )
+        .await?;
+
+        let (edgli, reactor) = boot_edgli(
+            &proxy.url(),
+            &extra,
+            &NetTuning::local(),
+            cluster_size(),
+            ExtraStrategies::default(),
+        )
+        .await?;
+
+        let (dest_zero_hop, dest_one_hop) = select_session_targets(&edgli).await?;
+
+        let env = Self {
+            edgli,
+            _reactor: reactor,
+            targets: Targets::Local {
+                dest_zero_hop,
+                dest_one_hop,
+            },
+            _cluster: Some(cluster),
+            _proxy: Some(proxy),
+            _shaper: Some(shaper_pool.clone()),
+        };
+
+        Ok((env, shaper_pool))
     }
 
     /// As [`Self::setup`], but with the cluster configured for PIX and the entry running the PIX
@@ -229,6 +301,8 @@ impl IntegrationEnv {
                 dest_one_hop,
             },
             _cluster: Some(cluster),
+            _proxy: None,
+            _shaper: None,
         })
     }
 
@@ -267,6 +341,8 @@ impl IntegrationEnv {
             _reactor: reactor,
             targets: Targets::Rotsee { exit },
             _cluster: None,
+            _proxy: None,
+            _shaper: None,
         })
     }
 
@@ -662,6 +738,9 @@ async fn boot_edgli(
         }
     }
     extra_strategies.apply(&mut strat_cfg);
+    #[cfg(feature = "v5")]
+    let reactor = edgli.run_reactor_from_cfg(strat_cfg)?;
+    #[cfg(not(feature = "v5"))]
     let reactor = edgli.run_reactor_from_cfg(strat_cfg)?.abort_handle;
 
     // Require one channel *beyond* any pre-existing genesis channels, so the gate proves the
@@ -724,7 +803,8 @@ fn edgli_config(
             // Experiment: hopr-lib 61120e77 reuses this 2 s default as a write-stall timeout that evicts
             // a peer's stream with every queued packet and ack. Raised to test it as the 1-hop regression.
             stream: StreamProtocolConfig {
-                egress_backpressure_timeout: Duration::from_secs(30),
+                egress_backpressure_timeout: edgli_egress_timeout()
+                    .unwrap_or(Duration::from_secs(30)),
                 ..Default::default()
             },
             packet: HoprPacketPipelineConfig {
