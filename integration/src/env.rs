@@ -425,11 +425,18 @@ impl IntegrationEnv {
         forward_hops: usize,
         return_hops: usize,
     ) -> anyhow::Result<(HoprSession, Address)> {
+        // Only the *return* path needs a relay. PIX encrypts a share with the first return
+        // relayer's ticket-challenge solution, so a zero-hop return path is refused outright —
+        // but the forward path is free to be direct, and a scenario that wants to read the
+        // return-relayer histogram needs it to be: with a relay on the way out, that relayer's
+        // forwarded packets land in the same per-node counters and the histogram measures the
+        // forward hop as much as the return one. See `tests/return_path.rs`, which relies on
+        // exactly this.
         anyhow::ensure!(
-            forward_hops >= 1 && return_hops >= 1,
-            "PIX needs at least one relay on each path (got {forward_hops} forward, \
-             {return_hops} return): the share encryption key derives from the first relayer's \
-             acknowledgement, so a zero-hop path is refused"
+            return_hops >= 1,
+            "PIX needs at least one relay on the RETURN path (got {return_hops}): the share \
+             encryption key derives from the first relayer's acknowledgement, so a zero-hop \
+             return path is refused"
         );
         self.open_pix_session_with(
             forward_hops,
@@ -466,11 +473,12 @@ impl IntegrationEnv {
         surb_management: SurbBalancerConfig,
         target: SessionTarget,
     ) -> anyhow::Result<(HoprSession, Address)> {
+        // Return path only — see `open_pix_session`.
         anyhow::ensure!(
-            forward_hops >= 1 && return_hops >= 1,
-            "PIX needs at least one relay on each path (got {forward_hops} forward, \
-             {return_hops} return): the share encryption key derives from the first relayer's \
-             acknowledgement, so a zero-hop path is refused"
+            return_hops >= 1,
+            "PIX needs at least one relay on the RETURN path (got {return_hops}): the share \
+             encryption key derives from the first relayer's acknowledgement, so a zero-hop \
+             return path is refused"
         );
         let dest = self.dest_for(forward_hops)?;
         let base = HoprSessionClientConfig {
