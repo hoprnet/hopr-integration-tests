@@ -219,6 +219,24 @@ fn node_for(env: &IntegrationEnv, address: Address) -> anyhow::Result<NodeInfo> 
 ///
 /// Random rather than patterned so each run's packet ciphertexts are unique and replay tags do not
 /// collide, the same reason `tests/integration.rs` randomises its payload.
+///
+/// **The whole payload is allocated up front.** The buffer is `datagrams_for(budget) × CHUNK`,
+/// which at the default 4 000 packets/s is ~2.6 GB for the happy path ([`TRAFFIC_BUDGET`] =
+/// 464 s → 1 856 000 datagrams × 1 400 B) and ~5.5 GB for the resilience scenario
+/// ([`KILL_TRAFFIC_BUDGET`] + [`KILL_SETTLE`] = 980 s → 3 920 000 datagrams). `pump::pump_halves`
+/// adds a second buffer of the same order — it reserves `Vec::with_capacity(total_bytes)` and
+/// accumulates the return stream into it with `received.extend_from_slice` in its reader loop
+/// (`integration/src/pump.rs`) — so the peak is roughly twice the payload: ~5 GB on the happy
+/// path, ~11 GB for the kill scenario.
+///
+/// It is left unbounded deliberately, because the retention is not local to this scenario.
+/// `pump_halves` is shared by ~10 suites, and both `sha_ok` (a full-payload digest of the returned
+/// bytes) and the exact `received_bytes` count are load-bearing for several of them, so streaming
+/// the digest and dropping the buffer would be a change to shared, heavily unit-tested code rather
+/// than a local one. This scenario is also opt-in: driven by the `just pix-prod` recipe and absent
+/// from `scripts/integration/run.sh`'s suite list, it never runs on the CI box. The consequence for
+/// a reader is to run it on a machine with several GB of headroom and expect the peak to track the
+/// traffic budget — a raised `HOPRD_PROD_PIX_RATE` or a longer budget scales it linearly.
 fn payload_for(budget: Duration) -> Vec<u8> {
     let mut payload = vec![0u8; datagrams_for(budget) as usize * CHUNK];
     rand::rng().fill(&mut payload[..]);
