@@ -29,6 +29,7 @@ pub mod pix;
 // histogram buckets, a numeric `le`, and absent-versus-zero on a label that only exists once the
 // gate has failed. Those tests belong in the default `cargo test --lib`.
 pub mod pix_exit;
+pub mod prod_pix;
 pub mod pump;
 pub mod relayers;
 pub mod session_metrics;
