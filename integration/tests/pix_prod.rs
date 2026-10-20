@@ -906,9 +906,9 @@ async fn the_exit_should_recover_every_cycle_when_half_the_relayers_die() -> any
     anyhow::ensure!(
         (MIN_MEASURED_LOSS..=MAX_MEASURED_LOSS).contains(&measured_loss),
         "INCONCLUSIVE: the killed relayer was carrying {:.1}% of the return traffic, outside the \
-         {:.0}-{:.0}% band this scenario needs. The upper bound is the split's break-even ratio — \
-         above it the cycle is unrecoverable by design and a failure would say nothing about the \
-         surplus. Spread: {}.",
+         {:.0}-{:.0}% band this scenario needs. The upper bound is kept below the split's break-even \
+         ratio — above that ratio the cycle is unrecoverable by design and a failure would say \
+         nothing about the surplus. Spread: {}.",
         measured_loss * 100.0,
         MIN_MEASURED_LOSS * 100.0,
         MAX_MEASURED_LOSS * 100.0,
@@ -977,7 +977,8 @@ async fn the_exit_should_recover_every_cycle_when_half_the_relayers_die() -> any
         )
     });
 
-    // Diagnostics the issue asks for, logged whatever the verdict.
+    // Diagnostics the issue asks for, logged for any run that gets past the pre-kill
+    // conclusiveness check — any conclusive run, pass or fail.
     tracing::info!(
         measured_loss_pct = measured_loss * 100.0,
         useful_fraction_recovered = ?gate.useful_fraction("recovered").map(|h| h.mean()),

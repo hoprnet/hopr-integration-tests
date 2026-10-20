@@ -28,8 +28,8 @@
 //! but a cycle is bounded by *packets*, not by seconds, and a local cluster carries far more than
 //! the deployed network. hoprd's own soak and the PIX demo both measure ~4 000–8 500 datagrams/s
 //! each way on this class of machine, so a cycle lands at ~54–114 s rather than five minutes, and
-//! the three cycles a scenario wants are ~6 min of traffic — which, on top of the ~3 min of cluster
-//! bootstrap, is what puts a whole run at ~10 min rather than under five.
+//! the three cycles a scenario wants are ~6 min of traffic on top of the ~3 min of cluster
+//! bootstrap — a run that lands around ten minutes rather than under five.
 //!
 //! # What is deliberately unlike production
 //!
@@ -174,17 +174,17 @@ pub const QUOTA_RANGE_MAX: u64 = QUOTA_PER_SSA;
 /// buffer deeper than a cycle parks share-less SURBs at the head of the Exit's FIFO that no rate
 /// of fill can get past.
 ///
-/// The ceiling is the ring buffer's `2/3 × rb_capacity` = 66 666 SURBs; the guard below checks the
-/// default rate clears it with room, and [`surb_buffer_target`] is where an override is judged.
+/// The ceiling is the balancer target ceiling, `2/3 × rb_capacity` = 66 666 SURBs; the guard below
+/// checks the default rate clears it with room, and [`surb_buffer_target`] is where an override is
+/// judged.
 pub const SURB_RUNWAY_SECS: u64 = 8;
 
-/// SURBs the Exit's ring buffer will hold before it starts evicting.
+/// The largest SURB buffer *target* a Session may ask for — the balancer's target ceiling.
 ///
-/// The ring's own ceiling, `2/3 × rb_capacity` = 66 666 SURBs, which is what the Exit clamps an
-/// announced buffer target to. It is a hard boundary rather than a tuning knob: a share rides in a
-/// SURB, and a SURB evicted from a full ring is an SSA share that never arrives — a lost share
-/// rather than a merely lost SURB, which the surplus has to absorb. [`surb_buffer_target`] keeps the
-/// target strictly below this so the ring never reaches the point of eviction.
+/// `2/3 × rb_capacity` = 66 666 SURBs, and the value the Exit clamps an announced buffer target to.
+/// It is not the ring's own size: the ring holds the full `rb_capacity` = 100 000 and only evicts
+/// there, well above this. What the ceiling bounds is the *target* the Entry's balancer aims for, so
+/// [`surb_buffer_target`] keeps the target strictly below it and the two sides agree on the depth.
 pub(crate) const SURB_BUFFER_CEILING: u64 = 66_666;
 
 /// SURBs the Entry buffers at the Exit, honouring `HOPRD_PROD_PIX_SURB_RUNWAY`.
@@ -194,12 +194,12 @@ pub(crate) const SURB_BUFFER_CEILING: u64 = 66_666;
 /// and this is `runway × 2 × rate`. Written as the sum anyway, because the identity is a
 /// consequence of the pacing rather than something to rely on silently.
 ///
-/// An override that would cross [`SURB_BUFFER_CEILING`] is clamped to one below it rather than
-/// honoured: the ring buffer holds `2/3 × rb_capacity` SURBs and the Exit clamps a larger announced
-/// target itself, but a target that reaches the ceiling lets the ring evict — and under PIX an
-/// evicted SURB is a *lost SSA share*, not merely a lost SURB, so the surplus is silently charged
-/// for a knob the run believed was a throughput dial. The clamp warns rather than failing, so an
-/// experiment stays runnable while saying what it lost.
+/// An override that would reach [`SURB_BUFFER_CEILING`] is clamped to one below it rather than
+/// honoured: the Exit clamps an announced target to the same 66 666, so a larger target would leave
+/// the Entry's *own* balancer aiming at a depth the Exit never honours, the two sides disagreeing
+/// about the buffer. The clamp aligns the Entry's target with what the Exit will actually use; it is
+/// not a defence against ring eviction, which this knob cannot reach. It warns rather than failing,
+/// so an experiment stays runnable while saying what it lost.
 pub fn surb_buffer_target() -> u64 {
     let runway = std::env::var("HOPRD_PROD_PIX_SURB_RUNWAY")
         .ok()
@@ -212,8 +212,9 @@ pub fn surb_buffer_target() -> u64 {
             target,
             ceiling = SURB_BUFFER_CEILING,
             clamped = SURB_BUFFER_CEILING - 1,
-            "the SURB buffer target reaches the ring-buffer ceiling, so it was clamped below it; \
-             the ring would otherwise evict queued SURBs and with them the SSA shares they carry"
+            "the SURB buffer target reaches the ceiling, so it was clamped below it; a larger \
+             target would have the Entry aiming at a depth the Exit never honours, leaving the two \
+             sides disagreeing about the buffer"
         );
         return SURB_BUFFER_CEILING - 1;
     }
