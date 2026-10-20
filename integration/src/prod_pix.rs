@@ -624,8 +624,8 @@ mod tests {
         );
     }
 
-    /// The SURB buffer must stay well under a cycle, and must clear the ring-buffer ceiling the
-    /// balancer evicts into.
+    /// The SURB buffer must stay well under a cycle, and must clear the balancer target ceiling the
+    /// Exit caps an announced target at.
     ///
     /// The band is 5–15 %, wider than `shapes`' 3–10 %, because the sizing here is hoprd's own
     /// soak formula rather than the traffic-shape profile's: `runway × (share_rate + data_rate)`,
@@ -655,7 +655,8 @@ mod tests {
         );
         assert!(
             surb_buffer_target() < SURB_BUFFER_CEILING,
-            "the balancer would overshoot into a full ring buffer and evict shares"
+            "the balancer target has reached the ceiling the Exit caps an announced target at, so \
+             the two sides no longer agree on the buffer depth"
         );
     }
 

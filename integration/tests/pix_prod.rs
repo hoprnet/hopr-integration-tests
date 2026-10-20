@@ -230,7 +230,7 @@ fn node_for(env: &IntegrationEnv, address: Address) -> anyhow::Result<NodeInfo> 
 /// path, ~11 GB for the kill scenario.
 ///
 /// It is left unbounded deliberately, because the retention is not local to this scenario.
-/// `pump_halves` is shared by ~10 suites, and both `sha_ok` (a full-payload digest of the returned
+/// `pump_halves` is shared by ~9 suites, and both `sha_ok` (a full-payload digest of the returned
 /// bytes) and the exact `received_bytes` count are load-bearing for several of them, so streaming
 /// the digest and dropping the buffer would be a change to shared, heavily unit-tested code rather
 /// than a local one. This scenario is also opt-in: driven by the `just pix-prod` recipe and absent
