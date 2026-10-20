@@ -76,7 +76,7 @@ pub const QUOTA_BYTES_PER_SHARE: u64 = SESSION_MTU as u64;
 
 /// Bytes one cycle costs the Entry — the per-SSA quota the Exit prices its deposit against.
 ///
-/// 4096 × 111 × 1452 = 660 169 728 B = 629.6 MiB, which is exactly hoprnet#8519's headline figure
+/// 4096 × 111 × 1452 = 660 160 512 B = 629.6 MiB, which is exactly hoprnet#8519's headline figure
 /// and exactly the Exit's `DEFAULT_PIX_SSA_QUOTA`.
 pub const QUOTA_PER_SSA: u64 = CYCLE_PACKETS * QUOTA_BYTES_PER_SHARE;
 
@@ -91,9 +91,10 @@ pub const QUOTA_PER_SSA: u64 = CYCLE_PACKETS * QUOTA_BYTES_PER_SHARE;
 /// cannot hold stretches cycles into the Exit's deposit deadline.
 ///
 /// The figure is a *return* packet rate — one share rides on each Exit → Entry reply — so it is
-/// also the share rate, and a cycle takes `CYCLE_PACKETS / rate` seconds: 114 s nominal at 4 000,
-/// measured 145 s at 3 000 (the Exit's egress is shaped by its SURB buffer, so the achieved cycle
-/// runs above nominal). The deployed cycle is 306 s, so this is roughly a third of production's.
+/// also the share rate, and a cycle takes `CYCLE_PACKETS / rate` seconds: 114 s nominal here,
+/// measured ~116 s (the Exit's egress is shaped by its SURB buffer, but at this rate the achieved
+/// cycle lands close to nominal). The deployed cycle is 306 s, so this is roughly a third of
+/// production's.
 pub const DEFAULT_PACKET_RATE: u64 = 4_000;
 
 /// Packets per second the scenario drives, honouring `HOPRD_PROD_PIX_RATE`.
@@ -283,12 +284,14 @@ const _: () = assert!(
 
 /// wxHOPR per byte of quota, on both sides: what the Exit requires and the Entry pays.
 ///
-/// hoprd's own localcluster demo price, which is scaled down from the deployed 5.33e-8 because the
-/// cluster funds each node's Safe from a fixed pot and a run has to afford a handful of 629.6 MiB
-/// cycles out of it. Nothing in the protocol reads the absolute figure — it is the *product* with
-/// the quota that both sides check — so a scaled price measures the same exchange. At this price
-/// one cycle is ~0.000715 × 660 169 728 ≈ 472 wxHOPR, comfortably inside the 1000 wxHOPR a
-/// localcluster identity is funded with and well under [`MAX_SSA_ALLOCATION`].
+/// hoprd's own soak price (`session_pix_soak.rs`'s `PRICE_PER_BYTE`), which is 13x the deployed
+/// 5.33e-8 rather than a fraction of it. The direction is deliberate and it is the *quota* that
+/// carries the scaling: this profile's cycle is 629.6 MiB against the soak's ~30 MB, so a price
+/// held at the soak's level leaves a deposit of the same order as the soak's. Nothing in the
+/// protocol reads the absolute figure — it is the *product* with the quota that both sides check —
+/// so the same product measures the same exchange whatever the factorisation. At this price one
+/// cycle is 0.000000715 × 660 160 512 ≈ 472 wxHOPR, which the entry's Safe is funded to cover many
+/// times over (see [`node_token_target_wxhopr`]) and which is well under [`MAX_SSA_ALLOCATION`].
 pub const PRICE_PER_BYTE_WXHOPR: f64 = 0.000_000_715;
 
 /// Ceiling on a single deposit. Twice one cycle, so a cycle can never be refused for being

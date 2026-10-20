@@ -736,10 +736,11 @@ const KILL_TRAFFIC_BUDGET: Duration = Duration::from_secs(4 * 240);
 ///
 /// **The upper bound is not a preference — it is the surplus's design point.** The deployed
 /// `4096 x (32 + 79)` split tolerates a *sustained* 50 % share loss at 99 % of cycles, and its
-/// break-even ratio is `surplus/(threshold + surplus)` = 79/111 = **71.2 %**: at that loss a
-/// polynomial receives 31.4 of its 111 shares on average against a threshold of 32, so about half
-/// of all polynomials fall short and — because the SSA is the sum of *every* polynomial's constant
-/// term — the cycle cannot be recovered at all. The loss tolerance is a cliff, not a slope.
+/// break-even ratio is `surplus/(threshold + surplus)` = 79/111 = **71.2 %**, which is by
+/// definition the loss at which a polynomial receives *exactly* its threshold on average —
+/// `111 × (1 − 79/111) = 32.0` against a threshold of 32. Half of all polynomials land below that
+/// average and — because the SSA is the sum of *every* polynomial's constant term — the cycle
+/// cannot be recovered at all. The loss tolerance is a cliff, not a slope.
 ///
 /// Measured: a run that killed the 72 % relayer recovered 3 584 of 4 096 polynomials and then
 /// stopped, exactly as that arithmetic predicts, and failed with `reason=RecoveryIdle` at
