@@ -416,9 +416,11 @@ impl IntegrationEnv {
     /// Measured, not reasoned: the same scenario run at 10 MB recovered and swept **1** cycle where
     /// 16 kB recovered and swept **6**, and failed on the deposit-confirmation assertion.
     ///
-    /// Both hop counts must be at least 1. The share encryption key is derived from the first
-    /// relayer's acknowledgement, so a zero-hop path has nothing to derive it from and the Session
-    /// is refused outright.
+    /// Only the **return** path needs a relay. The share encryption key is derived from the first
+    /// *return* relayer's acknowledgement, so a zero-hop return path has nothing to derive it from
+    /// and the Session is refused outright — but the forward path may be direct, and a scenario that
+    /// wants to read the return-relayer histogram needs it to be (see `FORWARD_HOPS` in
+    /// `tests/pix_prod.rs`).
     #[cfg(feature = "v5")]
     async fn open_pix_session(
         &self,

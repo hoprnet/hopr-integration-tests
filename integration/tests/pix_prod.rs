@@ -117,8 +117,8 @@ const CHUNK: usize = 1_400;
 ///
 /// Three: the first is the one the successor gate has to admit on, the second proves the gate
 /// admitted it, and the third gives the run a margin so a single slow cycle is not a failure.
-/// Measured at 3 000 packets/s the achieved cycle is ~145 s against a 152 s nominal, so three
-/// cycles is ~7 min of traffic — which is what sets [`TRAFFIC_BUDGET`], and the ~3 min of cluster
+/// Measured at 4 000 packets/s the achieved cycle is ~116 s against a 114 s nominal, so three
+/// cycles is ~6 min of traffic — which is what sets [`TRAFFIC_BUDGET`], and the ~3 min of cluster
 /// bootstrap is what makes the whole run ~10 min rather than under 5.
 const TARGET_CYCLES: u64 = 3;
 
@@ -139,7 +139,7 @@ const MAX_SSAS_IN_FLIGHT: u64 = 2;
 /// completes, which reads as a broken surplus rather than as a mis-paced writer. Measured: 30 s at
 /// a 3 000/s pace moved ~19 000 segments, i.e. ~620/s.
 ///
-/// Batching 50 segments per sleep puts the step at 16.7 ms at the default rate, three orders of
+/// Batching 50 segments per sleep puts the step at 12.5 ms at the default rate, three orders of
 /// magnitude clear of the floor, and the burst within a step is 50 × 1 400 = 70 kB — well inside
 /// the Entry's inbox, so the reply stream it produces is not dropped for backpressure either.
 const SEGMENTS_PER_STEP: u64 = 50;
@@ -723,7 +723,7 @@ const KILL_IDLE_BUDGET: Duration = Duration::from_secs(90);
 /// Losing half the return path does not halve the Exit's egress — measured, it keeps serving at
 /// the full rate once its gate releases — but it does stretch the achieved cycle, because a share
 /// reaches the Exit only on a reply that *arrives*, and half the replies now do not. Measured:
-/// ~145 s per cycle on the lossless path against ~240 s here, so the 464 s that buys four cycles
+/// ~116 s per cycle on the lossless path against ~240 s here, so the 464 s that buys four cycles
 /// there buys two.
 ///
 /// Sized from that figure for [`TARGET_CYCLES`] plus a whole cycle of margin, so a run that lands
@@ -895,6 +895,25 @@ async fn the_exit_should_recover_every_cycle_when_half_the_relayers_die() -> any
         kill_after = ?kill_after(),
         "killing the quietest return relayer a quarter of the way into the first cycle"
     );
+
+    // Conclusiveness is decided *here*, before the kill, and not after the budget has been spent.
+    // An out-of-band kill is reported as unmeasured rather than as a pass or a failure — the issue
+    // is explicit that the test only means something if the kill removes about half the traffic —
+    // and there is a concrete case in which the run is knowably inconclusive from this figure
+    // alone: `relayers::spread` drops zero-delta relayers, so if only one candidate forwarded
+    // during warm-up `quietest()` returns it with a share of 1.0, above the upper bound. Checking
+    // after the kill would burn the full budget and a `SETTLE_TIMEOUT` before saying so.
+    anyhow::ensure!(
+        (MIN_MEASURED_LOSS..=MAX_MEASURED_LOSS).contains(&measured_loss),
+        "INCONCLUSIVE: the killed relayer was carrying {:.1}% of the return traffic, outside the \
+         {:.0}-{:.0}% band this scenario needs. The upper bound is the split's break-even ratio — \
+         above it the cycle is unrecoverable by design and a failure would say nothing about the \
+         surplus. Spread: {}.",
+        measured_loss * 100.0,
+        MIN_MEASURED_LOSS * 100.0,
+        MAX_MEASURED_LOSS * 100.0,
+        spread_before.summary(),
+    );
     victim.kill()?;
 
     // ── Phase 2: keep traffic flowing across the kill and for the asserted cycles ──
@@ -974,25 +993,9 @@ async fn the_exit_should_recover_every_cycle_when_half_the_relayers_die() -> any
         "PIX diagnostics after the kill"
     );
 
-    // ── Conclusiveness, before the verdict ──
-    //
-    // An out-of-band kill is reported as unmeasured rather than as a pass or a failure: the issue
-    // is explicit that the test only means something if the kill removes about half the traffic.
-    // Asserted *after* the counters are logged so the run's own figures are readable either way.
-    let conclusive = (MIN_MEASURED_LOSS..=MAX_MEASURED_LOSS).contains(&measured_loss);
-    if !conclusive {
-        panic!(
-            "INCONCLUSIVE: the killed relayer was carrying {:.1}% of the return traffic, outside \
-             the {:.0}-{:.0}% band this scenario needs. The upper bound is the split's break-even \
-             ratio — above it the cycle is unrecoverable by design and a failure would say nothing \
-             about the surplus. Spread: {}. \
-             Cycles actually swept: {cycles}.",
-            measured_loss * 100.0,
-            MIN_MEASURED_LOSS * 100.0,
-            MAX_MEASURED_LOSS * 100.0,
-            spread_before.summary(),
-        );
-    }
+    // The conclusiveness band was checked before the kill (see the `ensure!` above the `kill()`),
+    // so the counters are logged here purely as diagnostics before the verdict — deliberately
+    // before the assertion, so the run's own figures are readable whether it passes or fails.
 
     assert!(
         cycles >= TARGET_CYCLES,

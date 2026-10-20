@@ -27,8 +27,9 @@
 //! 454 656 packets is a lot, and it is the reason the deployed cycle is quoted at 306 s nominal —
 //! but a cycle is bounded by *packets*, not by seconds, and a local cluster carries far more than
 //! the deployed network. hoprd's own soak and the PIX demo both measure ~4 000–8 500 datagrams/s
-//! each way on this class of machine, so a cycle lands at 55–110 s rather than five minutes, and
-//! the three cycles a scenario wants fit inside five minutes with room for bootstrap.
+//! each way on this class of machine, so a cycle lands at ~54–114 s rather than five minutes, and
+//! the three cycles a scenario wants are ~6 min of traffic — which, on top of the ~3 min of cluster
+//! bootstrap, is what puts a whole run at ~10 min rather than under five.
 //!
 //! # What is deliberately unlike production
 //!
@@ -177,19 +178,46 @@ pub const QUOTA_RANGE_MAX: u64 = QUOTA_PER_SSA;
 /// default rate clears it with room, and [`surb_buffer_target`] is where an override is judged.
 pub const SURB_RUNWAY_SECS: u64 = 8;
 
+/// SURBs the Exit's ring buffer will hold before it starts evicting.
+///
+/// The ring's own ceiling, `2/3 × rb_capacity` = 66 666 SURBs, which is what the Exit clamps an
+/// announced buffer target to. It is a hard boundary rather than a tuning knob: a share rides in a
+/// SURB, and a SURB evicted from a full ring is an SSA share that never arrives — a lost share
+/// rather than a merely lost SURB, which the surplus has to absorb. [`surb_buffer_target`] keeps the
+/// target strictly below this so the ring never reaches the point of eviction.
+pub(crate) const SURB_BUFFER_CEILING: u64 = 66_666;
+
 /// SURBs the Entry buffers at the Exit, honouring `HOPRD_PROD_PIX_SURB_RUNWAY`.
 ///
 /// The share rate is `CYCLE_PACKETS / nominal_cycle_secs`, which is `packet_rate()` by
 /// construction — a cycle takes `E / rate` seconds and emits `E` shares — so the two terms collapse
 /// and this is `runway × 2 × rate`. Written as the sum anyway, because the identity is a
 /// consequence of the pacing rather than something to rely on silently.
+///
+/// An override that would cross [`SURB_BUFFER_CEILING`] is clamped to one below it rather than
+/// honoured: the ring buffer holds `2/3 × rb_capacity` SURBs and the Exit clamps a larger announced
+/// target itself, but a target that reaches the ceiling lets the ring evict — and under PIX an
+/// evicted SURB is a *lost SSA share*, not merely a lost SURB, so the surplus is silently charged
+/// for a knob the run believed was a throughput dial. The clamp warns rather than failing, so an
+/// experiment stays runnable while saying what it lost.
 pub fn surb_buffer_target() -> u64 {
     let runway = std::env::var("HOPRD_PROD_PIX_SURB_RUNWAY")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|r| *r > 0)
         .unwrap_or(SURB_RUNWAY_SECS);
-    runway * 2 * packet_rate()
+    let target = runway * 2 * packet_rate();
+    if target >= SURB_BUFFER_CEILING {
+        tracing::warn!(
+            target,
+            ceiling = SURB_BUFFER_CEILING,
+            clamped = SURB_BUFFER_CEILING - 1,
+            "the SURB buffer target reaches the ring-buffer ceiling, so it was clamped below it; \
+             the ring would otherwise evict queued SURBs and with them the SSA shares they carry"
+        );
+        return SURB_BUFFER_CEILING - 1;
+    }
+    target
 }
 
 /// Ceiling on SURB production, per second.
@@ -243,7 +271,7 @@ const DEPOSIT_ROUND_TRIP_SECS: u64 = 5;
 ///
 /// Judged at the *default* rate rather than at a `HOPRD_PROD_PIX_RATE` override, because an
 /// override is an experiment and the guard exists to catch the default drifting into the race. At
-/// 3 000 packets/s a cycle is 151 s against a 5 s round trip — 30x — and the achieved cycle is
+/// 4 000 packets/s a cycle is 114 s against a 5 s round trip — 23x — and the achieved cycle is
 /// longer still because the Exit's egress is shaped by its SURB buffer.
 const _: () = assert!(
     CYCLE_PACKETS / DEFAULT_PACKET_RATE >= 3 * DEPOSIT_ROUND_TRIP_SECS,
@@ -291,7 +319,10 @@ const _: () = assert!(
 /// protocol reads the absolute figure — it is the *product* with the quota that both sides check —
 /// so the same product measures the same exchange whatever the factorisation. At this price one
 /// cycle is 0.000000715 × 660 160 512 ≈ 472 wxHOPR, which the entry's Safe is funded to cover many
-/// times over (see [`node_token_target_wxhopr`]) and which is well under [`MAX_SSA_ALLOCATION`].
+/// times over (see [`node_token_target_wxhopr`]) and which is well under
+/// [`max_ssa_allocation_wxhopr`], this profile's own ~944 wxHOPR ceiling of twice one cycle — the
+/// `MAX_SSA_ALLOCATION` the demo profile states is a 10 wxHOPR ceiling and would not admit a
+/// deployed cycle at all.
 pub const PRICE_PER_BYTE_WXHOPR: f64 = 0.000_000_715;
 
 /// Ceiling on a single deposit. Twice one cycle, so a cycle can never be refused for being
@@ -598,7 +629,7 @@ mod tests {
     /// The band is 5–15 %, wider than `shapes`' 3–10 %, because the sizing here is hoprd's own
     /// soak formula rather than the traffic-shape profile's: `runway × (share_rate + data_rate)`,
     /// and at this geometry the two rates are equal by construction, so the buffer lands at
-    /// `2 × runway / cycle_secs` = 10.6 % rather than the 5.2 % the deployed ratio is quoted at.
+    /// `2 × runway / cycle_secs` = 14.1 % rather than the 5.2 % the deployed ratio is quoted at.
     /// A deeper buffer is a longer pipeline between a share being generated and delivered, not a
     /// faster one — the failure mode `shapes::DEFAULT_SURB_BUFFER` documents at length — so the
     /// point of the band is that the buffer stays a fraction of a cycle rather than a multiple of
@@ -608,7 +639,7 @@ mod tests {
         let ratio = surb_buffer_target() as f64 / CYCLE_PACKETS as f64;
         assert!(
             (0.05..0.15).contains(&ratio),
-            "buffer/E is {ratio:.4}, outside the 5-15 % band this sizing lands in (10.6 %)"
+            "buffer/E is {ratio:.4}, outside the 5-15 % band this sizing lands in (14.1 %)"
         );
         // The free credit a recovered cycle's FIFO tail is credited for — `polys × surplus` — must
         // cover the queue, or the egress gate blocks part-way through the very drain that was
@@ -621,7 +652,6 @@ mod tests {
             "the drain ({buffer}) is no longer covered by the free credit ({FREE_CREDIT}), so \
              max_served_without_progress must rise"
         );
-        const SURB_BUFFER_CEILING: u64 = 66_666;
         assert!(
             surb_buffer_target() < SURB_BUFFER_CEILING,
             "the balancer would overshoot into a full ring buffer and evict shares"
