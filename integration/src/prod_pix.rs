@@ -199,11 +199,6 @@ pub fn max_surbs_per_sec() -> u64 {
     4 * packet_rate()
 }
 
-/// Bytes one SURB buffer of the requested depth occupies, for the balancer's byte-denominated knob.
-pub fn surb_buffer_bytes() -> u64 {
-    surb_buffer_target() * SESSION_MTU as u64
-}
-
 /// Packets the Exit serves without a share coming back before its egress gate blocks, honouring
 /// `HOPRD_PROD_PIX_MAX_SERVED`.
 ///

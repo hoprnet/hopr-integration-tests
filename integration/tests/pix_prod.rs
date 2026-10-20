@@ -20,23 +20,27 @@
 //!
 //! ```text
 //!   Entry (edgli, in-process)
-//!      │  forward, 1 hop
+//!      │  forward, direct
 //!      ▼
 //!   relay A ──────► Exit          (one of three cluster nodes)
 //!      ▲              │
 //!      └──────────────┘  return, 1 hop — drawn per packet from {B, C}
 //! ```
 //!
+//! The **forward** path is direct and the **return** path one hop, which is not symmetric for two
+//! independent reasons. PIX requires a relay on the return path — a share is encrypted with the
+//! first return relayer's ticket-challenge solution and carried in a return-path SURB, so a direct
+//! Exit → Entry SURB has no relayer to supply it and share delivery is dead — but the forward
+//! direction has no such constraint, and leaving it direct is what keeps the per-node
+//! `hopr_packets_count{type="forwarded"}` deltas readable as a *return*-relayer histogram. A
+//! forwarded packet does not say which direction it travelled, so a relay on the way out lands in
+//! the same counters. See [`FORWARD_HOPS`].
+//!
 //! A three-node cluster is the minimum at which the Exit has **exactly two** return-relayer
 //! candidates: the full mesh gives every node a channel to the other two, and the Exit is itself
 //! one of the three, so its return path can only start at one of the remaining two. That number is
 //! what makes the second scenario a 50 % loss experiment rather than an approximate one — killing
 //! one of two relayers removes half the return traffic by construction.
-//!
-//! The **forward** path is 1 hop as well, not 0, because PIX refuses a Session whose return path
-//! has no intermediate hop: shares are encrypted with the first return relayer's ticket-challenge
-//! solution and carried in return-path SURBs, so a direct Exit → Entry SURB has no relayer to
-//! supply it and the ongoing share delivery is dead.
 //!
 //! # Running
 //!
@@ -386,7 +390,6 @@ fn geometry_rate_hint(transfer: &Transfer, offered: Duration) -> String {
 ///
 /// Shared by both scenarios: the relayer-kill one differs only in *when* a relayer dies, so
 /// anything that separates them is the protocol behaving differently rather than the measurement.
-#[allow(clippy::too_many_arguments)]
 fn assert_the_deployed_geometry_recovered(
     transfer: &Transfer,
     exit_counters: &PixCounters,
@@ -727,10 +730,9 @@ const KILL_IDLE_BUDGET: Duration = Duration::from_secs(90);
 /// on the target is not one that only just scraped it. This is the scenario's dominant cost.
 const KILL_TRAFFIC_BUDGET: Duration = Duration::from_secs(4 * 240);
 
-/// Share of the return traffic the killed relayer must have been carrying, below which the run is
-/// **inconclusive** rather than a pass or a failure.
-///
 /// How much of the return traffic the killed relayer may have been carrying, as a fraction.
+///
+/// Outside the band the run reports itself **inconclusive** rather than passing or failing.
 ///
 /// **The upper bound is not a preference — it is the surplus's design point.** The deployed
 /// `4096 x (32 + 79)` split tolerates a *sustained* 50 % share loss at 99 % of cycles, and its
@@ -877,7 +879,7 @@ async fn the_exit_should_recover_every_cycle_when_half_the_relayers_die() -> any
         .iter()
         .find(|n| n.address == victim_addr)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("busiest relayer {victim_addr} is not a cluster node"))?;
+        .ok_or_else(|| anyhow::anyhow!("quietest relayer {victim_addr} is not a cluster node"))?;
 
     // The measured loss, read *before* the kill from the baseline histogram. This is the figure
     // the issue asks be reported, and the one that decides whether the run is conclusive at all.
