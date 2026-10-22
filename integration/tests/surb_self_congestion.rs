@@ -545,7 +545,7 @@ async fn outage_scenario(
         tracing::info!(?up, "outage begins: {}", plan.describe());
         let started = sampler.now();
         plan.run(&down).await?;
-        anyhow::Ok(started)
+        anyhow::Ok((started, sampler.now()))
     };
     // The entry keeps sending; little comes back until a re-plan moves the return path onto the
     // survivor.
@@ -564,8 +564,7 @@ async fn outage_scenario(
         ),
         outage,
     );
-    let (during, frozen_at) = (during?, frozen_at?);
-    let outage_end = sampler.now();
+    let (during, (frozen_at, outage_end)) = (during?, frozen_at?);
     drop(thawed);
     let trace = sampler.stop().await?;
     trace.maybe_write_csv(csv);
@@ -1105,11 +1104,13 @@ async fn flapping_arm(
                 ..paced(phase, plan.load_mbps)
             },
         ),
-        plan.run(&down),
+        async {
+            let periods = plan.run(&down).await?;
+            anyhow::Ok((periods, sampler.now()))
+        },
     );
-    let (transfer, periods) = (transfer?, periods?);
+    let (transfer, (periods, outage_to)) = (transfer?, periods?);
     drop(thawed);
-    let outage_to = sampler.now();
 
     // Close, not drop, so the next arm is not measured against this one's leftover balancer.
     let _ = tx.shutdown().await;

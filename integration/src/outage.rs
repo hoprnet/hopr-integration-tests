@@ -176,7 +176,10 @@ impl OutagePlan {
             }
             periods += 1;
             match up {
-                Some(up) => tokio::time::sleep(up).await,
+                Some(up) => {
+                    let left = until.saturating_duration_since(tokio::time::Instant::now());
+                    tokio::time::sleep(up.min(left)).await;
+                }
                 None => break,
             }
         }
@@ -232,6 +235,26 @@ mod tests {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| v.to_string())
         }
+    }
+
+    #[tokio::test]
+    async fn intermittent_outage_should_not_wait_out_an_up_period_past_its_deadline() {
+        let plan = OutagePlan {
+            pattern: Pattern::Intermittent {
+                down: Duration::from_millis(10),
+                up: Duration::from_secs(5),
+            },
+            duration: Duration::from_millis(30),
+            ..TEMPLATE
+        };
+        // No processes needed: exercise the same scheduler with an empty relay set.
+        let result = tokio::time::timeout(Duration::from_secs(1), plan.run(&[])).await;
+        assert_eq!(
+            result
+                .expect("final up period exceeded the outage deadline")
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
