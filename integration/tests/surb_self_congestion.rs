@@ -1,153 +1,56 @@
-//! Does the entry's SURB balancer congest the entry's own uplink?
+//! SURB balancer characterisation and desired-behaviour checks.
 //!
-//! # The incident these reproduce
+//! These scenarios investigate the 2026-09-24 GnosisVPN incident. A failed bound records an
+//! undesirable behaviour; its cause still needs the trace and the experimental controls below.
 //!
-//! On 2026-09-24 a `gnosis_vpn-client` v0.96.0 → v0.96.3 user on macOS connected to the
-//! Netherlands exit three times; every connect succeeded in 5–9 s and every one was ended by the
-//! user after minutes of a bursty, stalling downlink (0–880 KiB/s, tunnel ping 0.17–10.6 s). Probes
-//! to *every* exit slowed down at the same instants while the tunnel was up and were clean while it
-//! was down, so the bottleneck sat at the entry, not at an exit. What it lined up with was the entry's
-//! own SURB production, as printed by `surb balancer state`:
+//! | scenario | measurement | qualification |
+//! | -------- | ----------- | ------------- |
+//! | S1 `surb_refills_should_track_consumption` | zero artificial output below estimated target; budget duty cycle | organic packets can still carry SURBs; initial fill is logged separately |
+//! | S2 `return_outage_should_not_pin_surb_production_at_max` | peak mint rate and budget time during scheduled outage | degraded mode and the refill after it can dominate, independently of planner refresh |
+//! | S3 `dropping_a_session_should_stop_its_balancer` | lifecycle state and minting after dropping both halves | deliberately drops without shutdown; Active is the reliable leak signal, mint count varies with corrections |
+//! | S4 `shaped_uplink_should_not_stall_downstream` | arrival, first byte and longest stall | full-budget unshaped baseline must be healthy before attributing steady-load stalls to shaping |
+//! | S5 `degraded_mode_should_not_pin_surb_production_at_max` | S2 with a 60 s planner refresh | busiest warm-up relay survives; degraded signature must actually occur or the result is inconclusive |
+//! | S6 `shaped_outage_should_not_loop` | full-budget versus capped-budget arrival and repeated budget episodes | repeated episodes or an arrival deficit do not alone prove a congestion feedback loop |
 //!
-//! 1. **Refill bursts.** The PID (`P 0.6 / I 0.7 / D 0.2`, per 100 ms tick, `pid` crate without a
-//!    dt) sat at `output=0` while the level estimate was above target and jumped to the full
-//!    `max_surbs_per_sec` (3797, later 5063 SURB/s) for a second or two whenever it dipped below.
-//!    At two SURBs per ~1.46 kB keep-alive that is ~22–30 Mbit/s of upstream from nothing.
-//! 2. **Degraded mode pinned at the budget.** Late replies read as a dead return path
-//!    (`return path degraded`); with `sustain_on_return_path_loss: true` — which the client sets —
-//!    the controller overwrites the level with 0 and production stays at `max_surbs_per_sec` with
-//!    `consumed` flat (12:04:54 onwards: produced 47k → 204k against 40k consumed).
-//! 3. **It survived the disconnect.** The client dropped the session without closing it (fixed in
-//!    gnosis_vpn-client #830, unreleased at the time); the balancer kept minting ~3.3k SURB/s for the
-//!    30 s until the worker stopped.
+//! All scenarios use five cluster nodes and the client's `gnosis_vpn_client_surb_config`.
+//! S2/S3/S5 use 0-hop forward / 1-hop return so relay forwarding measures return traffic.
+//! Outages resume independently of pump completion; balancer outage windows exclude the pump's
+//! tail grace. Transfer arrival includes that grace and recovery, so it is not outage-only loss.
+//! The degraded signature (level zero, output >=95% of budget) is controller-specific: a fix
+//! changing this signature needs explicit degraded-state telemetry to keep S5 conclusive.
 //!
-//! Full analysis: `claude/2026-09-25-kika-macos-surb-flood-self-congestion.md` in the
-//! "Session stability" project.
-//!
-//! # The scenarios
-//!
-//! Every scenario asserts the **desired** behaviour, as `upload_survival` does: a failure is the bug
-//! reproduced, a pass means the fix reached the line.
-//!
-//! | scenario | needs | reproduces |
-//! | -------- | ----- | ---------- |
-//! | [`surb_refills_should_track_consumption`] | 3 nodes, bursty load | 1 |
-//! | [`return_outage_should_not_pin_surb_production_at_max`] | 5 nodes, SIGSTOP all but one relayer | 2 |
-//! | [`dropping_a_session_should_stop_its_balancer`] | 5 nodes, SIGSTOP all but one relayer | 3 |
-//! | [`shaped_uplink_should_not_stall_downstream`] | 3 nodes + a shaped entry uplink (root) | the user-visible symptom |
-//! | [`degraded_mode_should_not_pin_surb_production_at_max`] | as 2, planner refresh slowed to 60 s | 2, via degraded mode |
-//! | [`shaped_outage_should_not_loop`] | 5 nodes, shaped entry uplink (root), relayers flapping | the loop: 1–3 feeding the symptom |
-//!
-//! The first three need no shaping: they read the balancer's own gauges and SURB counters (see
-//! [`hoprd_integration_test::balancer`]), which show the bursts and the pinning whether or not a link
-//! suffers from them. The fourth is the end-to-end symptom and needs the entry's uplink to be the
-//! bottleneck, which an unshaped loopback never is — see `scripts/shape-edge-uplink.sh`.
-//!
-//! Every balancer here is [`gnosis_vpn_client_surb_config`] — the client's main-session config
-//! including `sustain_on_return_path_loss` — not the throughput tests' `gnosis_main_surb_config`.
-//!
-//! **Thresholds are predicted from the incident log and a model of the control law.** The first
-//! cluster run (2026-10-07) passed scenarios 1–3 vacuously, and taught three things now built in:
-//!
-//! - A steady 0.25 MB/s never drives the PID to the budget: each surplus winds its integral to
-//!   −budget, which caps the next refill (measured: peak 1132 SURB/s at 284 SURB/s consumed). The
-//!   incident's full-budget bursts followed large dips under a bursty 0.1–0.9 MB/s download, so
-//!   scenario 1 now offers bursts.
-//! - Degraded mode never triggers when **every** return relayer is down: hopr-transport marks a
-//!   session degraded only in the refill step, which runs only after a re-plan *moved* traffic
-//!   (`return_path_recovery.rs`), and with no relayer left nothing can move. Scenarios 2 and 3 now
-//!   freeze all relayers but the least used one, and scenario 2 fails as inconclusive if the freeze
-//!   did not take the return path down rather than passing on a balancer that was simply idle.
-//! - An idle leaked balancer produces nothing, so scenario 3 also asserts the session's own
-//!   `hopr_session_lifetime_state` leaves Active.
-//!
-//! The second run (2026-10-07) reproduced 1 and 3 and refined scenario 1:
-//!
-//! - Under bursts the mean mint tracks consumption (438 vs 429 SURB/s) but the 1 s peak (1856)
-//!   sat within 8 % of a 4x bound, so it is now only logged. Scenario 1 asserts the windup itself —
-//!   output 0 with the level > 200 below target, 17 % of samples — and the initial fill at the
-//!   budget (3.5 s).
-//! - The dropped session stayed Active and minted 3532 SURBs, partly at the full budget after the
-//!   level estimate's periodic (~15 s) correction knocked it below target.
-//! - Scenario 2 stayed inconclusive. Not for lack of relayer diversity: the planner's
-//!   `diversity collapsed … distinct_relayers=0` warning is a false positive (it counts first hops
-//!   on paths already moved out by `std::mem::take`, so it always reads 0). The detector needs
-//!   ≥ 20 SURBs minted per second onto a dead pair for 5 s in a row, and the balancer, idling above
-//!   target at 0.25 MB/s, never minted that steadily. Scenario 2 now freezes the relayers into a
-//!   1 MB/s load.
-//!
-//! The third run (2026-10-07, 1 MB/s) reproduced scenario 2 **without** degraded mode:
-//!
-//! - The silence runs reached 3 of 5, then reset: the planner's graph weighting moved minting off
-//!   the frozen relayers within ~4 s (from ~90 to < 20 SURB/s per dead pair, below the detector's
-//!   evidence floor) while all 4 candidates were still cached. Rerouting beats detection, so
-//!   degraded mode is not a precondition any more.
-//! - SURBs already stored for the dead routes kept being spent (69 % arrival), so the level
-//!   estimate ran ~6k high. The 15 s corrections then dropped it by 6763 and 5733 and drove output
-//!   to the full budget for 4.9 s in total — the incident's flood, by another path.
-//! - Scenario 5 reaches degraded mode on purpose. The planner re-weights its cached paths every
-//!   5 s from the same telemetry the detector reads, so with a healthy survivor it always wins the
-//!   race. Slowing its refresh to 60 s (`IntegrationEnv::setup_with_planner_refresh`) models a
-//!   network whose alternatives look no better, which is when the detector is the only way out.
-//!
-//! `SURB_BALANCER_CSV_DIR=<dir>` writes each scenario's balancer series. The scenarios' own summary
-//! lines log under the `surb_self_congestion` target, so include it in `RUST_LOG`:
+//! The review at PR #62 (2026-10-08) measured S4 failing unshaped in debug and passing shaped in
+//! release. The recipe therefore defaults to release and S4 adds an unshaped full-budget arm on
+//! a port outside the shaper's range. Earlier debug timings are not evidence of uplink congestion.
+//! S1's 200-SURB deficit was only 2–8% of target, with organic minting still active; its two-second
+//! fill bound also failed independently of windup and has been removed. S3 tests drop, not close.
 //!
 //! ```bash
-//! RUST_LOG=warn,hoprd_integration_test=info,surb_self_congestion=info,\
-//! hopr_transport_session::balancer::controller=debug,\
-//! hopr_transport=info,hopr_transport::protocol::surb_telemetry=debug
-//! ```
-//!
-//! # Varying the controller
-//!
-//! The PID gains are read from `HOPR_BALANCER_PID_{P,I,D}_GAIN` when each session is created, in this
-//! process (the entry is in-process), so a gain experiment needs no code change:
-//!
-//! ```bash
-//! HOPR_BALANCER_PID_I_GAIN=0.01 just surb-congestion surb_refills_should_track_consumption
-//! ```
-//!
-//! # Running them
-//!
-//! ```bash
-//! just surb-congestion                                       # the unshaped scenarios
-//! sudo bash scripts/shape-edge-uplink.sh up 16 19005         # 5-node cluster: entry on 19005
+//! just surb-congestion                            # S1/S2/S3/S5, release build
+//! sudo bash scripts/shape-edge-uplink.sh up 16 19005
 //! just surb-congestion shaped_uplink_should_not_stall_downstream shaped_outage_should_not_loop
 //! sudo bash scripts/shape-edge-uplink.sh down
 //! ```
 //!
-//! One scenario per invocation — several of them SIGSTOP cluster nodes.
+//! One binary invocation per scenario. `CARGO_TEST_PROFILE=dev` explicitly selects debug for
+//! comparison. `SURB_BALANCER_CSV_DIR=<dir>` saves each exact session's trace; use
+//! `RUST_LOG=warn,hoprd_integration_test=info,surb_self_congestion=info` with `TEST_ARGS=--nocapture`.
 //!
-//! # The loop (scenario 6)
+//! Outage overrides (S4 defaults to no outage; S6 defaults to 6 s down / 2 s up for 45 s):
 //!
-//! Scenario 4 (2026-10-07, 8 Mbit/s) stalled only once, at session start: 5.1 s to first byte
-//! against 0.07 s for the capped control arm — the initial fill queued the data behind it. With a
-//! healthy return path nothing re-triggered the flood afterwards. Scenario 6 adds the disturbance:
-//! after a 20 s warm-up (fill done, every return pair has delivered), three of four return
-//! relays are down 6 s and up 2 s, repeated, for 45 s. A stop outlasts the
-//! entry's 2 s frame age, so to the session it is loss, while the relayers come back often enough
-//! for the planner to keep them as candidates and the SURBs routed through them go stale. Two loops can then close through the shaped uplink: stale SURBs → level correction →
-//! full-budget burst → queued replies → more stale SURBs; and late replies → degraded mode → 10 s
-//! at the budget → late replies again. Each arm runs the same outage; the capped control arm is
-//! the yardstick for the harm, and the count of separate full-budget episodes is the loop.
-//!
-//! # Changing the relay outage
-//!
-//! Scenarios 2, 3, 4, 5 and 6 take return relays down by pausing their `hoprd` processes. Each has
-//! a default outage (S4: none); four environment variables override it without a rebuild — see
-//! [`hoprd_integration_test::outage`]:
-//!
-//! ```bash
-//! SURB_RELAY_OUTAGE=down|<down_s>/<up_s>|none   # whole outage, intermittent, or no outage
-//! SURB_RELAYS_DOWN=all-but-one|all|<n>          # which return relays go down
-//! SURB_LOAD_MBPS=1                              # data rate during the outage
-//! SURB_OUTAGE_SECS=30                           # how long it lasts
+//! ```text
+//! SURB_RELAY_OUTAGE=down|<down_s>/<up_s>|none
+//! SURB_RELAYS_DOWN=all-but-one|all|<n>
+//! SURB_LOAD_MBPS=1
+//! SURB_OUTAGE_SECS=30
+//! SURB_RUN_ORDER=control-first|full-first   # S6
 //! ```
 //!
-//! With its defaults (2026-10-07) scenario 6 never reached the rate limit: at 0.25 MB/s the
-//! buffer-estimate corrections stay small. Scenario 2's conditions — relays down for the whole
-//! outage at 1 MB/s — are what reached it there.
+//! S5's default `all-but-one` keeps the busiest relay to avoid the 10–11% survivor shares that
+//! did not trigger degraded mode in the review; other outage scenarios keep the least used.
+//! Warm-up share is reported, but is not a guarantee of the detector's later evidence. S2 has no
+//! degraded-mode precondition and must not be described as isolating periodic corrections.
+//! `HOPR_BALANCER_PID_{P,I,D}_GAIN` can vary the controller without recompiling.
 
 use std::time::Duration;
 
@@ -202,7 +105,7 @@ const MAX_BURST_OVER_CONSUMPTION: f64 = 4.0;
 /// held to "4x almost nothing".
 const BURST_FLOOR_FRACTION: f64 = 0.25;
 
-/// How far below target (in SURBs) the level must be for a zero output to count as starved.
+/// Estimated deficit (SURBs) for counting samples with zero artificial output.
 const STARVED_MARGIN: f64 = 200.0;
 
 /// Largest share of steady-state samples allowed to sit starved below target.
@@ -214,7 +117,7 @@ const MAX_STARVED_SHARE: f64 = 0.02;
 /// Largest share of steady-state samples allowed at ≥95 % of `max_surbs_per_sec`.
 const MAX_SHARE_AT_BUDGET: f64 = 0.05;
 
-/// Most seconds a fill or a degraded episode may spend producing at the full budget.
+/// Most seconds an outage may spend commanding the full budget.
 const MAX_SECONDS_AT_BUDGET: f64 = 2.0;
 
 /// Phase tags, so a backlog from one phase cannot be counted as the next one arriving.
@@ -343,8 +246,8 @@ async fn surb_refills_should_track_consumption() -> anyhow::Result<()> {
 
     let steady = trace.after(FILL_GRACE);
     let budget = cfg.max_surbs_per_sec as f64;
-    // The initial fill is the incident's stall-at-connect: the whole target requested at the
-    // budget before any traffic needs it.
+    // Initial fill is diagnostic: target / budget is a physical floor, and encoding or
+    // scheduling overhead makes a fixed two-second ceiling independent of windup.
     let fill = trace.window(Duration::ZERO, FILL_GRACE);
     let fill_at_budget = fill.seconds_at_budget(budget);
     tracing::info!(
@@ -363,7 +266,7 @@ async fn surb_refills_should_track_consumption() -> anyhow::Result<()> {
         .share_starved_below_target(STARVED_MARGIN)
         .unwrap_or_default();
     // Reported, not asserted: the 1 s peak depends on burst size and sat within 8 % of any sane
-    // bound, so it flips between runs. `starved` is the threshold-free signature of the same lumps.
+    // bound, so it flips between runs. the inactivity fraction is a separate controller diagnostic.
     tracing::info!(
         arrival_pct = transfer.arrival_pct(),
         longest_stall_s = transfer.longest_stall(),
@@ -385,16 +288,10 @@ async fn surb_refills_should_track_consumption() -> anyhow::Result<()> {
     );
     assert!(
         starved <= MAX_STARVED_SHARE,
-        "integral windup: output 0 while the level was > {STARVED_MARGIN:.0} below target in {:.1}% \
-         of the steady state (max {:.0}%) — the I term, wound negative by the last overshoot, holds \
-         the refill back until the deficit is large, then overshoots again",
+        "controller inactivity: artificial output 0 while the estimated level was > {STARVED_MARGIN:.0} below target in {:.1}% \
+         of the steady state (max {:.0}%) — organic SURB production may continue; inspect the trace before attributing this to windup",
         starved * 100.0,
         MAX_STARVED_SHARE * 100.0,
-    );
-    assert!(
-        fill_at_budget <= MAX_SECONDS_AT_BUDGET,
-        "initial fill requested the full {budget:.0} SURB/s budget for {fill_at_budget:.1} s \
-         (max {MAX_SECONDS_AT_BUDGET:.0} s) — the stall-at-connect",
     );
     assert!(
         at_budget <= MAX_SHARE_AT_BUDGET,
@@ -646,9 +543,7 @@ async fn outage_scenario(
         peak <= allowed && seconds_at_budget <= MAX_SECONDS_AT_BUDGET,
         "SURB production during the return-path outage peaked at {peak:.0} SURB/s (allowed \
          {allowed:.0} against {baseline:.0} SURB/s consumed before it) and spent \
-         {seconds_at_budget:.1}s at the {budget:.0} SURB/s budget (max {MAX_SECONDS_AT_BUDGET}s) — \
-         the level estimate ignores SURBs lost on dead relayers, and each periodic correction (or \
-         degraded mode, if reached) drives production to max_surbs_per_sec",
+         {seconds_at_budget:.1}s at the {budget:.0} SURB/s budget (max {MAX_SECONDS_AT_BUDGET}s) — inspect degraded-mode samples and refill corrections separately before attributing the burst",
     );
     Ok(())
 }
@@ -1307,7 +1202,7 @@ async fn shaped_outage_should_not_loop() -> anyhow::Result<()> {
              rate limit lost more data than the one with the lower limit: {:.1}% arrived, longest \
              stall {:.1}s (allowed {allowed_stall:.1}s; lower limit: {:.1}%, {:.1}s). SURB output \
              reached the {budget:.0} SURB/s rate limit {episodes} times ({seconds:.1}s, \
-             {degraded} of them in degraded mode); the extra SURB packets delay the data on the uplink",
+             {degraded} of them in degraded mode); this comparison alone does not establish a congestion feedback loop",
             prod.arrival_pct(),
             prod.longest_stall(),
             ctl.arrival_pct(),
@@ -1318,8 +1213,7 @@ async fn shaped_outage_should_not_loop() -> anyhow::Result<()> {
     assert!(
         episodes <= MAX_BUDGET_EPISODES,
         "SURB production returned to the {budget:.0} SURB/s budget {episodes} times during one \
-         {}s outage ({seconds:.1}s in total, {degraded} of them degraded mode) — each correction or \
-         degraded episode feeds the congestion that causes the next",
+         {}s outage ({seconds:.1}s in total, {degraded} of them degraded mode) — repeated budget episodes alone do not establish a congestion feedback loop",
         plan.duration.as_secs(),
     );
     Ok(())

@@ -281,9 +281,9 @@ impl Trace {
         Some(outputs.iter().filter(|&&o| o <= 0.0).count() as f64 / outputs.len() as f64)
     }
 
-    /// Share of samples with the level more than `margin` below target while the control output is
-    /// zero — integral windup: the P term alone would command a refill there, so the I term is still
-    /// negative from the previous overshoot. A controller without windup keeps this near 0.
+    /// Share of samples with the estimated level more than `margin` below target and zero
+    /// artificial production. Organic packets may still carry SURBs; this measures controller
+    /// inactivity, not an empty exit buffer or proof of integral windup.
     pub fn share_starved_below_target(&self, margin: f64) -> Option<f64> {
         let judged: Vec<bool> = self
             .samples

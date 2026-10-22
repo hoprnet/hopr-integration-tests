@@ -43,6 +43,22 @@ pump, which returns `Transfer { mbps, arrival_pct(), sha_ok }`), `pix.rs` / `sha
 `pix_exit.rs` (parses the Exit's gate telemetry; ungated, so both lines' unit tests cover it), and
 `balancer.rs` (samples the entry's SURB balancer over time).
 
+The SURB scenarios run with `just surb-congestion` in release mode by default;
+`CARGO_TEST_PROFILE=dev` selects debug for comparison. S4 and S6 require
+`scripts/shape-edge-uplink.sh up 16 19005` first (five cluster nodes). S4 also runs the full
+SURB budget on a port outside the shaped range: an unhealthy unshaped baseline makes the
+steady-load comparison inconclusive. Earlier debug stalls occurred without shaping and do
+not establish uplink congestion.
+
+The [PR #62 review](https://github.com/hoprnet/hopr-integration-tests/pull/62#issuecomment-6061165320)
+qualifies the scenarios' interpretation: S1 measures zero artificial output below an estimated
+target while organic packets can still supply SURBs; initial fill is a separate diagnostic.
+S3 drops the session without closing it and checks whether it remains Active. S5 keeps the
+busiest warm-up relay alive and requires the degraded signature; absence is inconclusive.
+Outage trace windows end when the relay schedule ends, independently of the pump's tail grace.
+Repeated budget episodes in S6 alone do not establish a congestion feedback loop. See
+`integration/tests/surb_self_congestion.rs` for the measurements and remaining limitations.
+
 ## Running locally
 
 ```bash
