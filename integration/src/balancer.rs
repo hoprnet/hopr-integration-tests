@@ -156,42 +156,22 @@ pub struct Trace {
 }
 
 impl Trace {
-    /// Pick the session with the most SURBs produced by the end of the run and keep its series.
-    ///
-    /// A scenario runs one data session, but probe and health sessions may register families too,
-    /// and a session dropped earlier keeps its gauges. "Most produced" is the data session.
-    pub fn from_readings(readings: &[(Duration, Reading)]) -> Self {
-        // The session that produced the most *during* the readings, not the most in total: a
-        // closed or leaked session from an earlier arm stays exported with its final counters
-        // and would otherwise win against the session actually under test (2026-10-07: S6's
-        // production arm was judged on the control arm's frozen trace).
-        let first_produced = |id: &str| {
-            readings
-                .iter()
-                .find_map(|(_, r)| r.0.get(id).and_then(|b| b.produced))
-                .unwrap_or_default()
-        };
-        let Some(session) = readings.last().and_then(|(_, last)| {
-            last.0
-                .iter()
-                .max_by_key(|(id, r)| {
-                    let produced = r.produced.unwrap_or_default();
-                    (produced.saturating_sub(first_produced(id)), produced)
-                })
-                .map(|(id, _)| id.clone())
-        }) else {
-            return Self::default();
-        };
+    /// Keep exactly the requested session, including when another live or leaked session
+    /// produces more SURBs. Missing telemetry stays absent rather than selecting a substitute.
+    pub fn from_readings(readings: &[(Duration, Reading)], session: &str) -> Self {
         let samples = readings
             .iter()
             .filter_map(|(at, r)| {
-                r.0.get(&session).map(|reading| Sample {
+                r.0.get(session).map(|reading| Sample {
                     at: *at,
                     reading: *reading,
                 })
             })
             .collect();
-        Self { session, samples }
+        Self {
+            session: session.to_string(),
+            samples,
+        }
     }
 
     /// Whether the balancer gauges were seen at all (the build has telemetry and a balancer ran).
@@ -443,6 +423,7 @@ impl Trace {
 
 /// Samples [`read`] at a fixed interval on a background task until stopped.
 pub struct Sampler {
+    session: Option<String>,
     started: Instant,
     stop: Arc<AtomicBool>,
     handle: tokio::task::JoinHandle<Vec<(Duration, Reading)>>,
@@ -465,10 +446,17 @@ impl Sampler {
             readings
         });
         Self {
+            session: None,
             started,
             stop,
             handle,
         }
+    }
+
+    /// Bind this sampler to the session under test, before its handle is split or dropped.
+    pub fn for_session(mut self, session: impl Into<String>) -> Self {
+        self.session = Some(session.into());
+        self
     }
 
     /// Time since the sampler started, on the same clock as [`Sample::at`], for marking phases.
@@ -480,7 +468,12 @@ impl Sampler {
     pub async fn stop(self) -> anyhow::Result<Trace> {
         self.stop.store(true, Ordering::Relaxed);
         let readings = self.handle.await?;
-        Ok(Trace::from_readings(&readings))
+        Ok(Trace::from_readings(
+            &readings,
+            &self
+                .session
+                .ok_or_else(|| anyhow::anyhow!("sampler has no session id"))?,
+        ))
     }
 }
 
@@ -555,7 +548,7 @@ hopr_packets_count{type="forwarded"} 5
             ));
             produced += rate / 10;
         }
-        let t = Trace::from_readings(&readings);
+        let t = Trace::from_readings(&readings, "s");
         let mean = t.mint_rate().unwrap();
         let peak = t.peak_mint_rate(Duration::from_secs(1)).unwrap();
         assert!(mean < 700.0, "mean {mean}");
@@ -574,8 +567,8 @@ hopr_packets_count{type="forwarded"} 5
     }
 
     #[test]
-    fn the_trace_should_follow_the_session_that_is_producing() {
-        // "old" has produced more in total but is frozen; "new" is the one under test.
+    fn the_trace_should_follow_the_requested_session_even_when_another_leaks() {
+        // "old" is a leaking session producing faster than the session under test.
         let at = |t: u64, old: u64, new: u64| {
             let mut m = BTreeMap::new();
             for (id, produced) in [("old", old), ("new", new)] {
@@ -589,9 +582,20 @@ hopr_packets_count{type="forwarded"} 5
             }
             (Duration::from_secs(t), Reading(m))
         };
-        let t = Trace::from_readings(&[at(0, 30_000, 0), at(1, 30_000, 500), at(2, 30_000, 900)]);
+        let t = Trace::from_readings(
+            &[at(0, 30_000, 0), at(1, 40_000, 500), at(2, 50_000, 900)],
+            "new",
+        );
         assert_eq!(t.session, "new");
         assert_eq!(t.produced_delta(), Some(900));
+    }
+
+    #[test]
+    fn a_missing_requested_session_should_not_fall_back_to_another() {
+        let trace = Trace::from_readings(&[(Duration::ZERO, reading(5000, 50, 100.0))], "missing");
+        assert_eq!(trace.session, "missing");
+        assert!(!trace.observable());
+        assert_eq!(trace.produced_delta(), None);
     }
 
     #[test]
@@ -602,7 +606,7 @@ hopr_packets_count{type="forwarded"} 5
             .enumerate()
             .map(|(i, &o)| (Duration::from_secs(i as u64), reading(0, 0, o)))
             .collect();
-        let t = Trace::from_readings(&readings);
+        let t = Trace::from_readings(&readings, "s");
         assert_eq!(
             t.episodes_at_budget(5000.0),
             2,
@@ -621,7 +625,7 @@ hopr_packets_count{type="forwarded"} 5
                 (Duration::from_secs(s), reading(0, 0, output))
             })
             .collect();
-        let t = Trace::from_readings(&readings);
+        let t = Trace::from_readings(&readings, "s");
         assert!((t.share_starved_below_target(50.0).unwrap() - 0.75).abs() < 1e-9);
         assert_eq!(
             t.share_starved_below_target(200.0),
@@ -636,7 +640,7 @@ hopr_packets_count{type="forwarded"} 5
         let readings: Vec<_> = (0..10u64)
             .map(|s| (Duration::from_secs(s), reading(s * 10, 0, 0.0)))
             .collect();
-        let t = Trace::from_readings(&readings);
+        let t = Trace::from_readings(&readings, "s");
         let w = t.window(Duration::from_secs(2), Duration::from_secs(5));
         assert_eq!(w.samples.len(), 3);
         assert_eq!(w.produced_delta(), Some(20));

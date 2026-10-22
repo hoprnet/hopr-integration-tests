@@ -317,8 +317,10 @@ async fn surb_refills_should_track_consumption() -> anyhow::Result<()> {
     let (session, _exit) = env
         .open_unreliable_session_with_surbs(1, 1, Some(cfg))
         .await?;
+    let session_id = AsRef::<str>::as_ref(session.id()).to_owned();
     let (mut rx, mut tx) = tokio::io::split(session);
 
+    let sampler = sampler.for_session(session_id);
     let payload = tagged_payload(WARMUP_PHASE, BURST_BYTES * BURSTS);
     let transfer = pump_halves(
         &mut rx,
@@ -444,9 +446,10 @@ async fn warmed_outage_session(
         "{name}: need ≥2 return relay candidates, got {}",
         candidates.len()
     );
+    let session_id = AsRef::<str>::as_ref(session.id()).to_owned();
     let (mut rx, mut tx) = tokio::io::split(session);
 
-    let sampler = Sampler::start(SAMPLE_EVERY);
+    let sampler = Sampler::start(SAMPLE_EVERY).for_session(session_id);
     let forwarded_before = relayers::sample(&candidates).await;
     let warmup = tagged_payload(
         WARMUP_PHASE,
@@ -759,8 +762,9 @@ async fn shaped_arm(
         .open_unreliable_session_with_surbs(1, 1, Some(cfg))
         .await?;
     let candidates = env.relayer_candidates(exit)?;
+    let session_id = AsRef::<str>::as_ref(session.id()).to_owned();
     let (mut rx, mut tx) = tokio::io::split(session);
-    let sampler = Sampler::start(SAMPLE_EVERY);
+    let sampler = Sampler::start(SAMPLE_EVERY).for_session(session_id);
     let load = plan.map_or(OFFERED_MBPS, |p| p.load_mbps);
     let forwarded_before = relayers::sample(&candidates).await;
     let outage = async {
@@ -1049,8 +1053,9 @@ async fn flapping_arm(
         "{name}: need ≥2 return relayer candidates, got {}",
         candidates.len()
     );
+    let session_id = AsRef::<str>::as_ref(session.id()).to_owned();
     let (mut rx, mut tx) = tokio::io::split(session);
-    let sampler = Sampler::start(SAMPLE_EVERY);
+    let sampler = Sampler::start(SAMPLE_EVERY).for_session(session_id);
 
     let forwarded_before = relayers::sample(&candidates).await;
     let warmup = pump_halves(
