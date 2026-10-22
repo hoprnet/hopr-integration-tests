@@ -686,13 +686,36 @@ fn connector_cfg() -> BlockchainConnectorConfig {
     }
 }
 
+/// v5 can resolve either mixer API: CI follows edge-client's lock, while local builds may
+/// already use hoprnet's Poisson mixer. Use the serialized config to avoid naming fields or
+/// constructors that exist in only one revision.
+#[cfg(feature = "v5")]
+fn near_zero_mixer() -> edgli::hopr_lib::config::MixerConfig {
+    use edgli::hopr_lib::config::MixerConfig;
+
+    let mut config = serde_json::to_value(MixerConfig::default()).expect("serialize mixer config");
+    if let Some(mixer_type) = config.get_mut("mixer_type") {
+        *mixer_type = serde_json::json!({
+            "Poisson": {
+                "max_delay": "1ms",
+                "miss_probability": 0.01,
+                "target_occupancy": 0,
+            }
+        });
+    } else {
+        config["min_delay"] = serde_json::json!("0s");
+        config["delay_range"] = serde_json::json!("1ms");
+    }
+    serde_json::from_value(config).expect("deserialize near-zero mixer config")
+}
+
 fn edgli_config(
     safe_address: &Address,
     module_address: &Address,
     tuning: &NetTuning,
 ) -> HoprLibConfig {
     use edgli::hopr_lib::{
-        config::{HoprPacketPipelineConfig, MixerConfig, TransportConfig},
+        config::{HoprPacketPipelineConfig, TransportConfig},
         exports::transport::{
             HoprProtocolConfig,
             config::{StreamProtocolConfig, SurbPopOrder, SurbStoreConfig},
@@ -735,7 +758,11 @@ fn edgli_config(
                 },
                 ..Default::default()
             },
-            mixer: MixerConfig {
+            // Near-zero mixing delay with either revision of the v5 mixer.
+            #[cfg(feature = "v5")]
+            mixer: near_zero_mixer(),
+            #[cfg(not(feature = "v5"))]
+            mixer: edgli::hopr_lib::config::MixerConfig {
                 min_delay: Duration::ZERO,
                 delay_range: Duration::from_millis(1),
                 ..Default::default()
@@ -902,5 +929,33 @@ where
             "timeout ({timeout:?}) waiting for {what}"
         );
         tokio::time::sleep(sleep).await;
+    }
+}
+
+#[cfg(all(test, feature = "v5"))]
+mod tests {
+    #[test]
+    fn mixer_has_near_zero_delay() {
+        let config = super::near_zero_mixer();
+        assert_eq!(
+            config.capacity,
+            edgli::hopr_lib::config::MixerConfig::default().capacity
+        );
+        let config = serde_json::to_value(config).unwrap();
+        if let Some(mixer_type) = config.get("mixer_type") {
+            assert_eq!(
+                mixer_type,
+                &serde_json::json!({
+                    "Poisson": {
+                        "max_delay": "1ms",
+                        "miss_probability": 0.01,
+                        "target_occupancy": 0,
+                    }
+                })
+            );
+        } else {
+            assert_eq!(config["min_delay"], "0s");
+            assert_eq!(config["delay_range"], "1ms");
+        }
     }
 }
