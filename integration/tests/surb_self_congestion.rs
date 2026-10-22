@@ -471,7 +471,27 @@ async fn warmed_outage_session(
     );
     drain_until_quiet(&mut rx, DRAIN_QUIET, "warm-up").await;
     let spread = relayers::spread(&forwarded_before, &relayers::sample(&candidates).await);
-    let (down, up) = plan.pick(&candidates, &spread);
+    let (down, up) = if planner_refresh.is_some() && plan.relays == RelaysDown::AllButOne {
+        let survivor = spread
+            .busiest()
+            .ok_or_else(|| anyhow::anyhow!("{name}: no warm-up relay traffic"))?;
+        let share = spread.max_share();
+        anyhow::ensure!(
+            share >= 0.19,
+            "{name}: inconclusive — survivor warm-up share {share:.3} is below 19%"
+        );
+        tracing::info!(%survivor, survivor_share = share, "degraded-mode survivor");
+        (
+            candidates
+                .iter()
+                .filter(|n| n.address != survivor)
+                .cloned()
+                .collect(),
+            vec![survivor],
+        )
+    } else {
+        plan.pick(&candidates, &spread)
+    };
     anyhow::ensure!(!down.is_empty(), "{name}: the outage takes no relay down");
     tracing::info!(
         ?up,

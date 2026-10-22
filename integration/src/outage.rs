@@ -11,7 +11,7 @@
 //! | Variable | Values | Meaning |
 //! | -------- | ------ | ------- |
 //! | `SURB_RELAY_OUTAGE` | `none`, `down`, `<down_s>/<up_s>` | no outage; relays down for the whole outage; or intermittent: down for `down_s`, up for `up_s`, repeated |
-//! | `SURB_RELAYS_DOWN` | `all-but-one`, `all`, `<n>` | all return relays but the least used one; every one; or the `n` most used |
+//! | `SURB_RELAYS_DOWN` | `all-but-one`, `all`, `<n>` | all return relays but one (S5 keeps the busiest, others the least used); every one; or the `n` most used |
 //! | `SURB_LOAD_MBPS` | MB/s | data rate during the outage |
 //! | `SURB_OUTAGE_SECS` | seconds | how long the outage lasts |
 
