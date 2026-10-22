@@ -431,6 +431,7 @@ cargo_it() {
   # `${a[@]+"${a[@]}"}` rather than `"${a[@]}"`: bash < 4.4 (macOS ships 3.2) treats an empty
   # array as unset under `set -u`, so an unset CARGO_FEATURES aborted every run before cargo.
   ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
+    --profile "${CARGO_TEST_PROFILE:-dev}" \
     ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" "$@" \
     --no-fail-fast -- --include-ignored --test-threads=1 \
     ${skips[@]+"${skips[@]}"} ${test_args[@]+"${test_args[@]}"}
@@ -444,6 +445,7 @@ list_scenarios() {
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
   ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
+    --profile "${CARGO_TEST_PROFILE:-dev}" \
     ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" -- --list |
     sed -n 's/: test$//p' | tr '\n' ' '
 }

@@ -17,6 +17,7 @@
 #   TEST_ARGS     extra libtest args, e.g. "--nocapture" to see a passing scenario's own
 #                 measurements (libtest swallows them otherwise). CI sets this, paired with a
 #                 narrow RUST_LOG — see .github/workflows/integration.yaml.
+#   CARGO_TEST_PROFILE  cargo profile (default dev; the surb-congestion recipe defaults to release)
 #   CARGO_FEATURES  extra cargo flags selecting features, e.g. "--features prof". Test targets
 #                 behind a non-default feature compile to nothing without it, and cargo reports
 #                 that as "no test target named X" rather than as a missing feature.

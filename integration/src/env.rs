@@ -156,6 +156,7 @@ enum Targets {
 /// announces local addresses and always probes them (both the local integration test and
 /// the Rotsee-style test run against a local cluster).
 struct NetTuning {
+    entry_port: Option<u16>,
     connector: BlockchainConnectorConfig,
     announce_local: bool,
     prefer_local: bool,
@@ -168,6 +169,7 @@ struct NetTuning {
 impl NetTuning {
     fn local() -> Self {
         Self {
+            entry_port: None,
             connector: connector_cfg(),
             announce_local: true,
             prefer_local: true,
@@ -206,6 +208,15 @@ impl IntegrationEnv {
     /// the channel strategy, and wait until at least one outgoing channel is open.
     pub async fn setup() -> anyhow::Result<Self> {
         Self::setup_tuned(NetTuning::local()).await
+    }
+
+    /// Boot a local entry on an explicit P2P port, for an unshaped control outside a shaper's
+    /// source-port range. The ordinary per-boot port sequence is preserved.
+    pub async fn setup_with_entry_port(port: u16) -> anyhow::Result<Self> {
+        anyhow::ensure!(port > 0, "entry port must be nonzero");
+        let mut tuning = NetTuning::local();
+        tuning.entry_port = Some(port);
+        Self::setup_tuned(tuning).await
     }
 
     /// As [`Self::setup`], but the entry's path planner re-weights its cached paths only every
@@ -783,10 +794,12 @@ fn edgli_config(
     let pop_order = SurbPopOrder::Fifo;
     #[cfg(not(feature = "v5"))]
     let pop_order = SurbPopOrder::Lifo;
+    let port = tuning.entry_port.unwrap_or_else(edge_p2p_port);
+    LAST_EDGE_PORT.store(port, std::sync::atomic::Ordering::Relaxed);
     HoprLibConfig {
         host: HostConfig {
             address: HostType::IPv4("0.0.0.0".to_string()),
-            port: edge_p2p_port(),
+            port,
         },
         publish: true,
         protocol: HoprProtocolConfig {

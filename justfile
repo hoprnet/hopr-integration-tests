@@ -96,7 +96,8 @@ return-path *scenarios: build build-chain
 # SURB self-congestion (binary chain): refill bursts, degraded-mode production pinned at the budget,
 # a dropped session's balancer outliving it, and -- with the entry uplink shaped -- the downlink
 # stalls of the 2026-09-24 incident. See integration/tests/surb_self_congestion.rs. Optional args =
-# test-name filters.
+# test-name filters. Release by default: debug entry throughput can itself stall first data.
+# CARGO_TEST_PROFILE=dev explicitly selects a debug comparison.
 #
 # One invocation PER SCENARIO, like `return-path`: most scenarios pause cluster nodes. All of them
 # run 5 nodes, so they share one chain and the frozen identities stay warm across them. The two
@@ -108,6 +109,7 @@ surb-congestion *scenarios: build build-chain
     set -euo pipefail
     source scripts/integration/lib.sh
     it_env
+    export CARGO_TEST_PROFILE="${CARGO_TEST_PROFILE:-release}"
     export TEST_TARGET=surb_self_congestion HOPRNET_SHELL='{{hoprnet}}'
     state=/tmp/hopr-it-edge-uplink.env
     if [ -f "${state}" ]; then

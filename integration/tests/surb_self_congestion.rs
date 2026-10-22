@@ -923,7 +923,7 @@ fn shaped_arm_configs() -> (SurbBalancerConfig, SurbBalancerConfig) {
 
 /// 4. The user-visible symptom: with the entry's uplink shaped to a rate that comfortably fits the
 ///    data, does the client's SURB budget stall the downlink? A capped-budget control arm on the
-///    same link proves the link itself is not the cause.
+///    same link and a full-budget unshaped baseline distinguish entry load from shaping.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires a shaped entry uplink (scripts/shape-edge-uplink.sh) + a chain"]
 async fn shaped_uplink_should_not_stall_downstream() -> anyhow::Result<()> {
@@ -938,9 +938,45 @@ async fn shaped_uplink_should_not_stall_downstream() -> anyhow::Result<()> {
     // No outage unless asked for: by default the scenario measures the uplink alone.
     let plan = OutagePlan::configure(None, template)?;
     let mbit = shaped_uplink_mbit(plan.map_or(OFFERED_MBPS, |p| p.load_mbps))?;
+    let (production, control) = shaped_arm_configs();
+    // The full budget can stall a CPU-bound entry even without shaping. Measure that arm
+    // first on a port outside the shaper, with the same build, config and offered load.
+    let (_, last) = shaped_ports();
+    let unshaped_port = last
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("no port above the shaped range for an unshaped control"))?;
+    let (unshaped, _, _) = {
+        let env = IntegrationEnv::setup_with_entry_port(unshaped_port).await?;
+        shaped_arm(
+            &env,
+            "unshaped-production",
+            PRODUCTION_PHASE,
+            production,
+            plan,
+            None,
+        )
+        .await?
+    };
+    tracing::info!(
+        debug_assertions = cfg!(debug_assertions),
+        unshaped_port,
+        arrival_pct = unshaped.arrival_pct(),
+        ttfb_s = unshaped.time_to_first_byte(),
+        longest_stall_s = unshaped.longest_stall(),
+        "full-budget unshaped baseline",
+    );
+    if plan.is_none() {
+        anyhow::ensure!(
+            unshaped.arrival_pct() >= MIN_SHAPED_ARRIVAL_PCT
+                && unshaped.longest_stall() <= MAX_SHAPED_STALL.as_secs_f64(),
+            "inconclusive: the unshaped full-budget arm already stalled ({:.1}% arrived, {:.1}s \
+             longest stall); uplink shaping cannot explain this result. Use the release build",
+            unshaped.arrival_pct(),
+            unshaped.longest_stall(),
+        );
+    }
     let env = IntegrationEnv::setup().await?;
     require_shaped_entry("shaped uplink")?;
-    let (production, control) = shaped_arm_configs();
     if let Some(plan) = plan {
         tracing::info!("shaped uplink with a relay outage: {}", plan.describe());
     }
@@ -1006,13 +1042,13 @@ async fn shaped_uplink_should_not_stall_downstream() -> anyhow::Result<()> {
         ctl.arrival_pct(),
         ctl.longest_stall(),
     );
-    // A stall that starts the transfer is the initial fill (2026-10-07: 5.1 s to first byte against
+    // A stall that starts the transfer is consistent with the initial fill (2026-10-07: 5.1 s to first byte against
     // 0.07 s for the control arm); one later on is a refill.
     let prod_ttfb = prod.time_to_first_byte().unwrap_or_default();
     let cause = if prod_ttfb >= prod.longest_stall() - 0.1 {
-        "the initial fill to target runs at the budget and queues the first data behind it"
+        "the delay coincides with the initial fill; compare the unshaped full-budget baseline"
     } else {
-        "SURB refills congest the entry's own uplink"
+        "the delay occurs after startup; inspect refill timing and the unshaped baseline"
     };
     assert!(
         prod.arrival_pct() >= MIN_SHAPED_ARRIVAL_PCT
