@@ -735,6 +735,12 @@ fn edgli_config(
                 },
                 ..Default::default()
             },
+            // Near-zero mixing delay. hoprnet master replaced the uniform mixer with a Poisson one
+            // (hoprnet#8316), configured by its largest delay; 0.01 is that mixer's default miss
+            // probability.
+            #[cfg(feature = "v5")]
+            mixer: MixerConfig::new_poisson(Duration::from_millis(1), 0.01),
+            #[cfg(not(feature = "v5"))]
             mixer: MixerConfig {
                 min_delay: Duration::ZERO,
                 delay_range: Duration::from_millis(1),
