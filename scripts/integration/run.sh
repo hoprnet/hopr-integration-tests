@@ -36,13 +36,13 @@ HOPRD_REF="${HOPRD_REF:-${HOPRD_LINE}}"
 
 # The triggering project overrides its own rev; the other keeps its default above.
 case "${PROJECT:-}" in
-hoprd) HOPRD_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=hoprd}" ;;
+hoprd) HOPRD_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=hoprd}" HOPRD_PR_BASE="" ;;
 edge-client) EDGLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=edge-client}" ;;
 # blokli merge-testing is back on: blokli now gates its own merges to release/0.13,
 # so a dispatch from it must actually build the dispatched rev rather than the
 # branch head. Set here and consumed by the BLOKLI_REF default further down.
 blokli) BLOKLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=blokli}" ;;
-"" | manual) echo "no PROJECT override — ${LINE}: hoprd at ${HOPRD_LINE}, edge-client at ${EDGLI_REF}, blokli at ${BLOKLI_REF:-${BLOKLI_DEFAULT}}" ;;
+"" | manual) echo "no PROJECT override — ${LINE}: hoprd at ${HOPRD_REF}, edge-client at ${EDGLI_REF}, blokli at ${BLOKLI_REF:-${BLOKLI_DEFAULT}}" ;;
 *)
   echo "unknown PROJECT '${PROJECT}'" >&2
   exit 2
@@ -86,7 +86,9 @@ BLOKLI_SHA="$(resolve_sha hoprnet/blokli "${BLOKLI_REF}")"
 #                       PR head based on it. Accepted: that is precisely the
 #                       label-triggered PR case, which hoprd fires with its PR head.
 #   diverged          — the rev is off the line entirely (a v5 `main` sha). Rejected.
-if [ "${HOPRD_SKIP_LINE_CHECK:-0}" != "1" ] && [ "${HOPRD_REF}" != "${HOPRD_LINE}" ]; then
+# A companion PR that targets the line is skipped: once its base moves on, its head reads `diverged`.
+if [ "${HOPRD_SKIP_LINE_CHECK:-0}" != "1" ] && [ "${HOPRD_REF}" != "${HOPRD_LINE}" ] &&
+  [ "${HOPRD_PR_BASE:-}" != "${HOPRD_LINE}" ]; then
   status="$(gh api "repos/hoprnet/hoprd/compare/${HOPRD_LINE}...${HOPRD_REF}" --jq '.status' 2>/dev/null || true)"
   case "${status}" in
   identical | behind | ahead) ;;
@@ -264,13 +266,6 @@ run_suite() { # target, then any scenarios to HOLD OUT of it
 
 echo "running integration tests (binary chain) ..."
 run_suite integration
-# `return_path` is held out ENTIRELY: its scenarios assert an arrival ratio over an
-# unforced random relayer draw, so a red says nothing. Locally: `just return-path`.
-# Wiring it back in: run it LAST, after `chain_stop; chain_start`. Its 5-node cluster leaves nodes 3-4
-# announced and channelled but offline, and a later 3-node suite routes through them.
-# If it is ever wired back in, three of its five are the flaky ones — `spread` asserts a ratio on a
-# random draw, and the two survival scenarios miss their recovery deadline on some machines but not
-# others: `spread`, `common_mode_return_outage` and `a_symmetric_session_should_survive_relayer_loss`.
 run_suite exit_origination
 # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore FAILS
 # against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there. Wiring it in now
@@ -297,6 +292,23 @@ if [ "${PIX_SUITE}" = "1" ]; then
     echo "pix_shapes suite cannot state its geometry. Use a newer hoprd ref." >&2
     suite_rc=1
   fi
+fi
+
+# v4 only until the v5 stack fixes land (branch em/return-path-v5). Last and on a fresh chain: its
+# 5-node cluster leaves nodes 3-4 channelled but offline. Scenarios kill nodes, so one cluster each.
+if [ "${LINE}" = "v4" ]; then
+  chain_stop
+  chain_start
+  scenarios="$(list_scenarios return_path)"
+  # The 1-hop scenarios only: v4 mitigates a dead relayer one hop deep (hoprnet#8498). Two-hop ones
+  # wait for the v5 fix; `spread` asserts a ratio on a random draw, so a red says nothing.
+  held_out="return_paths_should_spread_across_distinct_relayers"
+  held_out="${held_out} a_two_hop_session_should_survive_exit_losing_its_return_relayer"
+  held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
+  for scenario in ${scenarios}; do
+    case " ${held_out} " in *" ${scenario} "*) continue ;; esac
+    SCENARIOS="${scenario}" run_suite return_path
+  done
 fi
 
 exit "${suite_rc}"
