@@ -108,6 +108,19 @@ async fn await_sweeps(
 /// lags the counter and reading it the instant `await_sweeps` returns undercounts.
 const PAYMENT_SETTLE: Duration = Duration::from_secs(180);
 
+/// How long the upload shape keeps watching the Exit after its sweep, for the cycle's last surplus
+/// run.
+///
+/// The upload stops the moment its cycle is swept, and under the Exit's window rotation
+/// (hoprnet#8560) the one uninterrupted surplus run a cycle produces is its last window's, which
+/// only starts at recovery. Exit fill then delivers it at ~70–80 packets/s, so the 2048 the gate
+/// assertion needs takes ~30 s and the whole 4096 ~55 s. Without the wait, 566 and 424 shares of it
+/// had landed by the sweep, and the first window's run, cut by the rotation at ~1 450, was the longest
+/// seen. See `pix_exit::Trace::longest_surplus_only_run`.
+///
+/// A bound rather than a pause: the wait ends as soon as the run is long enough.
+const LAST_SURPLUS_RUN_BUDGET: Duration = Duration::from_secs(180);
+
 /// Assert the Exit's Safe actually **received** what its counters say it swept.
 ///
 /// Every other assertion in this file reads `hopr_strategy_pix_*`, which is the Exit's own
@@ -956,7 +969,8 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
 
     // Offered and waited on together, for the length of the aim point. Nothing reads the return
     // half at all — there is nothing to read, and that is the shape. The upload stops as soon as
-    // the cycle completes, for the reason the download's drain does.
+    // the cycle completes, for the reason the download's drain does. The trace does not: the
+    // cycle's last surplus run lands after that, delivered by fill — see LAST_SURPLUS_RUN_BUDGET.
     let stop = std::sync::atomic::AtomicBool::new(false);
     let (offered, delta) = tokio::join!(offer_for(&mut tx, aim_point, &stop), async {
         let delta = await_sweeps(&exit, &before, 1, aim_point).await;
@@ -965,7 +979,12 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
     });
     let offered = offered?;
     let delta = delta?;
-    let trace = sampler.finish().await;
+    let trace = sampler
+        .finish_after_surplus_run(
+            shapes::max_served_without_progress(),
+            LAST_SURPLUS_RUN_BUDGET,
+        )
+        .await;
     let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
     tracing::info!(
         offered,

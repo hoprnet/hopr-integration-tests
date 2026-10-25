@@ -491,6 +491,15 @@ impl Trace {
     /// Upstream emits one per window (`protocols/pix/src/generator.rs`: a window emits its entire
     /// surplus before the next starts), so a cycle of 512 polynomials contains two.
     ///
+    /// **The Exit does not necessarily consume them that way.** Since hoprnet#8560 its SURB store
+    /// buckets shares by emission window and rotates its replies across every bucket it holds, so
+    /// once the next window's SURBs reach the buffer, the rest of a window's surplus is interleaved
+    /// with the next window's useful shares. Only a cycle's **last** window reaches the Exit as one
+    /// uninterrupted run, because the store drains the oldest cycle before it serves another. At this
+    /// repo's profile the first window's run measured 1 298–1 502 against the last one's 3 604–4 000.
+    /// A scenario that stops at recovery has therefore not seen the run yet: see
+    /// [`Sampler::finish_after_surplus_run`].
+    ///
     /// Strictness is [`SURPLUS_RUN_USEFUL_TOLERANCE`]'s; see there before relaxing it.
     ///
     /// A step during which the Exit supervised another Session ends the run as a useful share
@@ -626,8 +635,9 @@ impl Trace {
 /// the shape this matters most to is the one already measured dropping its p2p connections when the
 /// host is busy, and a harness that watches the Exit must not become what the Exit has to survive.
 pub struct Sampler {
-    handle: tokio::task::JoinHandle<Trace>,
+    handle: tokio::task::JoinHandle<()>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    samples: std::sync::Arc<std::sync::Mutex<Vec<Sample>>>,
 }
 
 impl Sampler {
@@ -635,28 +645,63 @@ impl Sampler {
     pub fn start(exit: &NodeInfo) -> Self {
         let exit = exit.clone();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = stop.clone();
+        let samples = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (flag, sink) = (stop.clone(), samples.clone());
         let poll = trace_poll();
         let handle = tokio::spawn(async move {
             let started = std::time::Instant::now();
-            let mut samples = Vec::new();
             while !flag.load(std::sync::atomic::Ordering::Relaxed) {
                 match sample(&exit).await {
-                    Ok(reading) => samples.push(Sample::of(started.elapsed(), &reading)),
+                    Ok(reading) => lock(&sink).push(Sample::of(started.elapsed(), &reading)),
                     Err(error) => {
                         tracing::warn!(%error, "PIX telemetry scrape failed; the trace skips this tick")
                     }
                 }
                 tokio::time::sleep(poll).await;
             }
-            Trace { samples }
         });
-        Self { handle, stop }
+        Self {
+            handle,
+            stop,
+            samples,
+        }
+    }
+
+    /// The trace so far, while sampling continues.
+    pub fn snapshot(&self) -> Trace {
+        Trace {
+            samples: lock(&self.samples).clone(),
+        }
+    }
+
+    /// Keep sampling until the trace holds a surplus-only run of at least `run` shares, or `budget`
+    /// runs out, then [`finish`](Self::finish).
+    ///
+    /// For a scenario that stops its traffic at recovery. The run
+    /// [`Trace::longest_surplus_only_run`] measures is, under the Exit's window rotation, only the
+    /// cycle's last window's, and that starts *at* recovery: Exit fill delivers it next, after the
+    /// scenario has stopped looking. This waits for it rather than lowering what is asserted about
+    /// it. The wait ends as soon as the run is long enough, so `budget` is a bound, not a pause; a
+    /// run that never gets there leaves the assertion to report the shortfall as before.
+    pub async fn finish_after_surplus_run(self, run: u64, budget: Duration) -> Trace {
+        let started = tokio::time::Instant::now();
+        let mut seen = self.snapshot().longest_surplus_only_run();
+        while seen < run && started.elapsed() < budget {
+            tokio::time::sleep(trace_poll()).await;
+            seen = self.snapshot().longest_surplus_only_run();
+        }
+        tracing::info!(
+            waited = ?started.elapsed(),
+            longest_surplus_run = seen,
+            wanted = run,
+            "kept sampling the Exit for the cycle's last surplus run"
+        );
+        self.finish().await
     }
 
     /// Stop sampling and collect the trace.
     ///
-    /// Returns an empty trace rather than erroring if the task was cancelled or panicked: a trace
+    /// Returns what was sampled rather than erroring if the task was cancelled or panicked: a trace
     /// is diagnostic, and the assertion that reads it is what names the consequence.
     ///
     /// Logged here, from the library, because CI's `RUST_LOG` admits `hoprd_integration_test` at
@@ -664,12 +709,11 @@ impl Sampler {
     /// used to leave no record of how long its run was, and a failing one no record of its shape.
     pub async fn finish(self) -> Trace {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let trace = match self.handle.await {
-            Ok(trace) => trace,
-            Err(error) => {
-                tracing::warn!(%error, "the PIX telemetry sampler did not finish cleanly");
-                Trace::default()
-            }
+        if let Err(error) = self.handle.await {
+            tracing::warn!(%error, "the PIX telemetry sampler did not finish cleanly");
+        }
+        let trace = Trace {
+            samples: lock(&self.samples).clone(),
         };
         tracing::info!(
             summary = %trace.summary(),
@@ -678,6 +722,13 @@ impl Sampler {
         );
         trace
     }
+}
+
+/// A poisoned lock still holds every sample taken before the panic, and a trace is diagnostic.
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Wait until the Exit supervises at most `at_most` PIX Sessions, or `budget` runs out.
