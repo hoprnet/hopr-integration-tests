@@ -332,11 +332,22 @@ impl ClusterSummary {
         stall: std::time::Duration,
         delay: std::time::Duration,
     ) -> anyhow::Result<()> {
-        let timing = format!(" {} {} {}", period.as_millis(), stall.as_millis(), delay.as_millis());
+        let timing = format!(
+            " {} {} {}",
+            period.as_millis(),
+            stall.as_millis(),
+            delay.as_millis()
+        );
         self.append_link_rule("stalled_links", a, b, &timing)
     }
 
-    fn append_link_rule(&self, file: &str, a: Address, b: Address, rest: &str) -> anyhow::Result<()> {
+    fn append_link_rule(
+        &self,
+        file: &str,
+        a: Address,
+        b: Address,
+        rest: &str,
+    ) -> anyhow::Result<()> {
         let index = |node: Address| {
             self.nodes
                 .iter()
@@ -654,6 +665,10 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     }
     cmd.args(["--chain-url", &chain_url]);
     cmd.env("HOPRD_USE_OPENTELEMETRY", "false");
+    // Nodes inherit RUST_LOG; CI keeps the test's filter narrow, which leaves node logs empty.
+    if let Some(filter) = std::env::var_os("HOPRD_NODE_RUST_LOG") {
+        cmd.env("RUST_LOG", filter);
+    }
     for (key, value) in REQUESTED_NODE_ENV
         .get()
         .map(Vec::as_slice)

@@ -693,7 +693,12 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
             cluster.cut_link(exit.address, victim.address)?;
         } else {
             let ms = |key: &str, fallback: u64| {
-                Duration::from_millis(std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback))
+                Duration::from_millis(
+                    std::env::var(key)
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(fallback),
+                )
             };
             cluster.stall_link(
                 exit.address,

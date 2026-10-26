@@ -164,13 +164,14 @@ jobs:
       # lines to surface ~44 useful ones; the whole hopr-lib/edgli stack narrates
       # every packet. `hoprd_integration_test` is where the measurements live
       # (pump.rs / session_metrics.rs), and `warn` still lets the stack speak up
-      # when something is actually wrong. Node logs are unaffected — localcluster
-      # always writes those to `hoprd_<i>.log`, and they are uploaded on failure.
+      # when something is actually wrong. Nodes inherit RUST_LOG, so they get their
+      # own filter below; their `hoprd_<i>.log` files are uploaded on failure.
       # Without this `cluster.rs` drops the cluster TempDir at teardown and the
       # per-node hoprd_<i>.log files are gone before the upload step runs — which is
       # exactly what left run 34098266229 undiagnosable.
       HOPRD_KEEP_ARTIFACTS: 1
       RUST_LOG: warn,hoprd_integration_test=info,return_path=info
+      HOPRD_NODE_RUST_LOG: info
       # Without this libtest captures a PASSING test's output, so a green run would
       # show no measurements at all — the one thing worth reading. Safe to enable
       # only because RUST_LOG above is narrow.

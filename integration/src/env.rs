@@ -872,10 +872,11 @@ async fn select_session_targets(edgli: &Edgli) -> anyhow::Result<(Address, Addre
         edgli.my_outgoing_channels(),
         edgli.connected_peer_addresses()
     )?;
+    // On a shared chain edgli keeps channels to identities a larger earlier cluster ran, now offline.
     let zero_hop = raw_channels
         .into_iter()
-        .find(|c| c.status == ChannelStatus::Open)
-        .ok_or_else(|| anyhow::anyhow!("no open outgoing channels"))?
+        .find(|c| c.status == ChannelStatus::Open && peers.contains(&c.destination))
+        .ok_or_else(|| anyhow::anyhow!("no open outgoing channel to a connected peer"))?
         .destination;
     let one_hop = peers
         .into_iter()
