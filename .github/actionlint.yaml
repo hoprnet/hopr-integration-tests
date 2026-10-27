@@ -9,3 +9,8 @@ self-hosted-runner:
     # test lands here — the unit tests and the whole integration throughput gate —
     # so results come from one known machine. See runner/README.md.
     - hetzner
+# The pre-commit hook's actionlint (1.7.9, nix-pinned) predates `concurrency.queue`, which GitHub accepts.
+paths:
+  .github/workflows/integration.yaml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'
