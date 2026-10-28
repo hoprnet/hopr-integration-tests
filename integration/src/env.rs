@@ -419,20 +419,29 @@ impl IntegrationEnv {
     /// Measured, not reasoned: the same scenario run at 10 MB recovered and swept **1** cycle where
     /// 16 kB recovered and swept **6**, and failed on the deposit-confirmation assertion.
     ///
-    /// Both hop counts must be at least 1. The share encryption key is derived from the first
-    /// relayer's acknowledgement, so a zero-hop path has nothing to derive it from and the Session
-    /// is refused outright.
+    /// Only the **return** path needs a relay. The share encryption key is derived from the first
+    /// *return* relayer's acknowledgement, so a zero-hop return path has nothing to derive it from
+    /// and the Session is refused outright — but the forward path may be direct, and a scenario that
+    /// wants to read the return-relayer histogram needs it to be (see `FORWARD_HOPS` in
+    /// `tests/pix_prod.rs`).
     #[cfg(feature = "v5")]
     async fn open_pix_session(
         &self,
         forward_hops: usize,
         return_hops: usize,
     ) -> anyhow::Result<(HoprSession, Address)> {
+        // Only the *return* path needs a relay. PIX encrypts a share with the first return
+        // relayer's ticket-challenge solution, so a zero-hop return path is refused outright —
+        // but the forward path is free to be direct, and a scenario that wants to read the
+        // return-relayer histogram needs it to be: with a relay on the way out, that relayer's
+        // forwarded packets land in the same per-node counters and the histogram measures the
+        // forward hop as much as the return one. See `tests/return_path.rs`, which relies on
+        // exactly this.
         anyhow::ensure!(
-            forward_hops >= 1 && return_hops >= 1,
-            "PIX needs at least one relay on each path (got {forward_hops} forward, \
-             {return_hops} return): the share encryption key derives from the first relayer's \
-             acknowledgement, so a zero-hop path is refused"
+            return_hops >= 1,
+            "PIX needs at least one relay on the RETURN path (got {return_hops}): the share \
+             encryption key derives from the first relayer's acknowledgement, so a zero-hop \
+             return path is refused"
         );
         self.open_pix_session_with(
             forward_hops,
@@ -469,11 +478,12 @@ impl IntegrationEnv {
         surb_management: SurbBalancerConfig,
         target: SessionTarget,
     ) -> anyhow::Result<(HoprSession, Address)> {
+        // Return path only — see `open_pix_session`.
         anyhow::ensure!(
-            forward_hops >= 1 && return_hops >= 1,
-            "PIX needs at least one relay on each path (got {forward_hops} forward, \
-             {return_hops} return): the share encryption key derives from the first relayer's \
-             acknowledgement, so a zero-hop path is refused"
+            return_hops >= 1,
+            "PIX needs at least one relay on the RETURN path (got {return_hops}): the share \
+             encryption key derives from the first relayer's acknowledgement, so a zero-hop \
+             return path is refused"
         );
         let dest = self.dest_for(forward_hops)?;
         let base = HoprSessionClientConfig {

@@ -389,8 +389,39 @@ impl ClusterSummary {
             .ok_or_else(|| anyhow::anyhow!("no log file known for node {node}"))?;
         let log = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        Ok(log.contains(needle))
+        Ok(strip_ansi(&log).contains(needle))
     }
+}
+
+/// Removes ANSI SGR sequences from a log line.
+///
+/// **Load-bearing, not cosmetic.** `tracing`'s formatter wraps *field names* in escape codes, so
+/// the bytes on disk for `reason=CommitmentTimeout` are `reason\x1b[0m\x1b[2m=\x1b[0m\x1b[3mCommitmentTimeout`
+/// — a search for the literal `reason=CommitmentTimeout` finds nothing, on a line that plainly
+/// contains it. `tests/return_path.rs` documents the same trap for `grep -c 'sessions=1'`.
+///
+/// Stripping here rather than making every caller responsible means a needle is the text a reader
+/// sees in the file, which is the only form anyone will write.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Consume the CSI introducer and the parameter/intermediate bytes, then the final byte
+            // (`@`..=`~`), which is what ends the sequence.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // ── `hoprd-localcluster status` wire types ────────────────────────────────────
@@ -1028,6 +1059,16 @@ mod tests {
         assert_eq!(s.nodes[2].api_token, None);
         assert_eq!(s.nodes[2].pid, None);
         Ok(())
+    }
+
+    /// `tracing` wraps field names in escape codes, so a needle that reads correctly in the file
+    /// is not a substring of the bytes on disk. Without this the reader reports "no closure
+    /// reason" for a log that names one — measured, on the first relayer-kill run.
+    #[test]
+    fn an_ansi_styled_field_should_still_match_a_plain_needle() {
+        let line = "closing PIX SSA \u{1b}[2mreason\u{1b}[0m\u{1b}[2m=\u{1b}[0m\u{1b}[3mCommitmentTimeout\u{1b}[0m phase";
+        assert!(strip_ansi(line).contains("reason=CommitmentTimeout"));
+        assert!(!line.contains("reason=CommitmentTimeout"));
     }
 
     #[test]

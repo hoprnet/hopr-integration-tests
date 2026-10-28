@@ -83,6 +83,26 @@ impl RelayerSpread {
         self.per_relayer.first().map(|(a, _)| *a)
     }
 
+    /// The relayer that carried the least, if any.
+    ///
+    /// The counterpart of [`Self::busiest`], and the right victim for a scenario that wants to
+    /// remove a *particular* share of the traffic rather than the worst case. Killing the busiest
+    /// removes the largest share available, which on a skewed draw can be far more than the
+    /// surplus was sized to carry — see `tests/pix_prod.rs`, where killing the 72 % relayer put the
+    /// loss past the deployed split's break-even point and the cycle legitimately failed to
+    /// recover. Killing the least-loaded one keeps the loss inside the band the surplus exists for.
+    pub fn quietest(&self) -> Option<Address> {
+        self.per_relayer.last().map(|(a, _)| *a)
+    }
+
+    /// The share of the total carried by `address`, or `None` if it carried nothing.
+    pub fn share_of_relayer(&self, address: Address) -> Option<f64> {
+        self.per_relayer
+            .iter()
+            .find(|(a, _)| *a == address)
+            .map(|(_, n)| self.share_of(*n))
+    }
+
     fn share_of(&self, count: u64) -> f64 {
         if self.total == 0 {
             0.0
