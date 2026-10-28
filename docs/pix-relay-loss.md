@@ -467,6 +467,24 @@ covers its cycle inside its 3600 s). Two fixes to the profile were needed to run
 - No SURB store overflow and no `ring_share` eviction on the Exit in any of these runs (read from the
   node logs then; the scenario now asserts it from the metrics).
 
+On 2026-10-28, with hoprnet#8576's later heads, the same 19 264 run came out both ways, and which way
+depended on how fast the verdict came. With the verdict at +0.6 s the cycle in flight survived, with
+3.8 shares of margin (79 of surplus against 75.2 lost per polynomial). With the verdict at +10.6 s the
+wipe was 19 307 SURBs by then and exceeded what a surplus of 79 tolerates: the Exit's log has `closing
+PIX SSA ssa#1 reason=RecoveryIdle phase=Recovering largest_useful_shares=130774 target=131072
+recovered_polynomials=3955`, 141 polynomials short. The Entry opened ssa#2, which swept, so the Session
+never closed and the scenario passed. At the deployed stock the outcome of a relay's death is therefore
+decided by detection latency, and the stock has to stay near the target for the margin to be wide
+(gnosis/gnosis_vpn-client#958 makes the client's SURB count finite so that hoprnet#8576's gate on the
+balancer target applies to it).
+
+That was a blind spot of the scenario, and it is closed: a sweep and an empty `closures` gate the
+*Session*, and a dead cycle that a successor replaces satisfies both. The same happened in the
+surplus-8 run of that day, where the first closure the gate counted was ssa#2's `commitment_timeout`
+while ssa#1 had died of `RecoveryIdle`. The scenario now also asserts, from `hopr_pix_cycles_total`
+over its window, that exactly one cycle recovered, one successor was requested behind it, and none
+failed.
+
 ## Fidelity limits
 
 - **Transit is a memcpy.** All three nodes are on localhost, so a shallower buffer suffices than a

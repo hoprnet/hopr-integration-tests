@@ -492,6 +492,10 @@ async fn assert_exit_was_paid(
 ///   stream fails as a setup error rather than as a result.
 /// * **A cycle was swept.** The cycle in flight when the relay died reconstructed — every one of
 ///   its 512 polynomials reached threshold despite the burst.
+/// * **The cycle in flight recovered.** One cycle recovered, one successor was requested behind it, and
+///   none failed over the scenario. Without it a dead cycle passes: the Entry opens a replacement, the
+///   replacement sweeps, and neither the Session's closures nor the sweep counter show that the cycle
+///   that was in flight at the kill was lost.
 /// * **The Safe rose.** The sweep moved money, rather than recovering a key against an address the
 ///   deposit never reached.
 /// * **No supervisor closure.** A Session that was torn down and reopened could sweep a *later*
@@ -591,6 +595,9 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
         trace = %trace.summary(),
         closures = ?gate.closure_reasons(),
         ring_share_evictions = gate.ring_share_evictions(),
+        cycles_requested = ?gate.cycles("requested"),
+        cycles_recovered = ?gate.cycles("recovered"),
+        cycles_failed = ?gate.cycles("failed"),
         "relay-loss scenario finished"
     );
 
@@ -645,6 +652,39 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
         relay_loss::expected_burst(relay_loss::surb_buffer_target()),
         relay_loss::surb_buffer_target(),
         swept.summary()
+    );
+
+    // The cycle in flight at the kill has to be the one that recovers. A sweep and an empty `closures`
+    // gate the Session, not that cycle: when it dies (`RecoveryIdle`, polynomials short of their
+    // threshold) the Entry opens a successor, the successor sweeps, and the Session never closes. Two
+    // runs passed that way: a production-dimension run at a 19 264-SURB stock, where the Exit closed
+    // ssa#1 on `RecoveryIdle` 141 polynomials short and ssa#2 swept (RP19264-4), and the surplus-8
+    // run (RLF2 s8), where the first closure counted was ssa#2's `commitment_timeout`.
+    //
+    // The window opens after the Session's first cycle was requested and funded, and the kill falls at
+    // a quarter of it, so the one `requested` inside the window is the successor the Entry asks for at
+    // the early-recovery threshold, and the one `recovered` is the cycle in flight. `failed` is the
+    // discriminator: the supervisor books a cycle that did not recover there, whatever the reason,
+    // and a replacement for a dead cycle reads as one request and one recovery just the same.
+    let (requested, recovered, failed) = (
+        gate.cycles("requested").unwrap_or(0),
+        gate.cycles("recovered").unwrap_or(0),
+        gate.cycles("failed").unwrap_or(0),
+    );
+    assert_eq!(
+        (1, 1, 0),
+        (requested, recovered, failed),
+        "(requested, recovered, failed) cycles over the scenario: the cycle that was {:.0}% complete \
+         at the kill must be the one that recovered, with one successor requested behind it. A failed \
+         cycle means it died and a successor took over, which the Session-level counters do not show: \
+         at surplus {} the cycle tolerates {} contiguous lost shares against the ~{} a death costs at \
+         a {}-SURB buffer, and a late verdict lets the wipe come after more of the stock has gone. {}",
+        100.0 * outage.shares_at_kill as f64 / relay_loss::cycle_packets() as f64,
+        relay_loss::additional_shares(),
+        relay_loss::tolerated_burst(),
+        relay_loss::expected_burst(relay_loss::surb_buffer_target()),
+        relay_loss::surb_buffer_target(),
+        gate.summary()
     );
 
     assert_exit_was_paid(&exit, &paid_before, swept.sweeps().unwrap_or(0)).await?;
