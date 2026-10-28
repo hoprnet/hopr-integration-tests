@@ -36,6 +36,8 @@ pub mod session_metrics;
 // compile-time guards and unit tests are what catch a geometry edited without re-deriving what
 // depends on it. Those should run in the default `cargo test --lib`, on both lines.
 pub mod shapes;
+// Installs itself when the process starts; see the module docs.
+mod telemetry;
 pub mod udp_service;
 
 /// Payload size pumped through each session. Also sizes the strategy's expected

@@ -32,7 +32,8 @@ blokli_ref := env_var_or_default("BLOKLI_REF", if line == "v5" { "release/0.14" 
 # hoprd branch the binaries are built from (override: `just hoprd_ref=… build`, or HOPRD_REF).
 hoprd_ref := env_var_or_default("HOPRD_REF", if line == "v5" { "main" } else { "release/4.1" })
 
-# hoprd checkout to build the PIX binaries from. hoprd's flake does expose
+# hoprd checkout to build the PIX binaries (`just pix`) and the TRACE binaries
+# (`just integration-trace`) from. hoprd's flake does expose
 # `binary-hoprd-pix-test`, but for x86_64-linux only — which is what CI uses and what a darwin
 # workstation cannot build — so `just pix` compiles hoprd from this tree instead.
 hoprd_src := env_var_or_default("HOPRD_SRC", "../hoprd")
@@ -66,6 +67,20 @@ integration-binchain *scenarios: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
     # run-binchain.sh enters the dev shell itself, so no outer wrap.
+    [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
+    HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
+
+# Like `integration-binchain`, but hoprd and hoprd-localcluster are built from HOPRD_SRC
+# (default ../hoprd) with TRACE logs compiled in (see `trace_build` in lib.sh), and each run keeps
+# all its logs in its own folder under HOPR_LOG_DIR (default ./logs). Not a performance baseline:
+# debug assertions are on.
+#   RUST_LOG=info,hopr_protocol_session=trace just integration-trace zero_hop
+integration-trace *scenarios: build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/integration/lib.sh
+    trace_build '{{hoprd_src}}' '{{hoprd_ref}}'
+    export HOPR_LOG_DIR="${HOPR_LOG_DIR:-$PWD/logs}"
     [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 

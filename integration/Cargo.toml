@@ -10,7 +10,7 @@ publish = false
 # The **v4** dependency set (`Cargo.v5.toml` is v5; run.sh swaps it in for LINE=v5 and rewrites
 # the ref). `telemetry` goes through edgli, not a direct hopr-lib dep of ours: without it the
 # per-session counters are absent rather than zero, and a second hopr-lib splits the registry.
-edgli = { git = "https://github.com/hoprnet/edge-client", branch = "release/4.1", default-features = false, features = [
+edgli = { git = "https://github.com/hoprnet/edge-client", rev = "0eac803ef387d88762521556cf165a10000caf2a", default-features = false, features = [
   "runtime-tokio",
   "blokli",
   "telemetry",
@@ -23,6 +23,8 @@ tokio = { version = "1", features = ["full", "process"] }
 reqwest = { version = "0.13", default-features = false, features = [
   "rustls",
   "json",
+  # The client span exporter (src/telemetry.rs) runs outside any async runtime.
+  "blocking",
 ] }
 tempfile = "3"
 sha2 = "0.11"
@@ -32,6 +34,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = "0.33"
+ctor = "1"
+dtor = "1"
 # Only pulled in by the `prof` feature (executor-starvation profiling); see
 # tests/profiling.rs. Must be built with `--cfg tokio_unstable`.
 console-subscriber = { version = "0.5", optional = true }

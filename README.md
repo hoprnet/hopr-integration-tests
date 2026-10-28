@@ -74,21 +74,96 @@ contracts and starts bloklid, and localcluster connects to it with `--chain-url`
 | `HOPRD_LOCALCLUSTER_BIN` | `hoprd-localcluster` binary                                  |
 | `HOPRD_CHAIN_URL`        | bloklid to connect to (default `http://localhost:8080`)      |
 | `HOPRD_CLUSTER_DATA_DIR` | use an already-running cluster instead of starting one       |
-| `HOPR_LOG_DIR`           | parent directory for retained node/localcluster artifacts (`hoprd-it-*/logs/hoprd_<i>.log`) |
-| `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files after teardown           |
+| `HOPR_LOG_DIR`           | keep each run's logs in a folder under it (see below)        |
+| `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files, also when start-up fails |
 | `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture` |
 
-To retain node logs under a fixed parent directory:
+To keep the logs of each run:
 
 ```bash
-HOPR_LOG_DIR=/path/to/node-logs just integration-binchain
+HOPR_LOG_DIR=/path/to/logs just integration-binchain
 ```
 
-Each cluster gets a unique `hoprd-it-*` subdirectory containing `logs/hoprd_<i>.log`,
-`localcluster.log`, and its state. Without this setting, the existing temporary-directory
-behavior applies. This setting does not affect an attached cluster (`HOPRD_CLUSTER_DATA_DIR`).
+Without this setting, the cluster lives in a temporary directory that is removed after the run.
 
-anvil, bloklid and deployer logs are always written to `/tmp/hopr-chain/*.log`. `run.sh` sends nix
+### Logs of a run
+
+With `HOPR_LOG_DIR` set, `run-binchain.sh` (e.g. `just integration-binchain`, `just integration-trace`)
+gives each run its own folder `run-<time>-XXXX` under it, kept on success, failure and Ctrl-C:
+
+| Path                  | Content                                                                   |
+| --------------------- | ------------------------------------------------------------------------- |
+| `hoprd-it-*/`         | node logs (`logs/hoprd_<i>.log`) and `localcluster.log`                   |
+| `chain/`              | `anvil.log`, `bloklid.log`, `deployer.log`                                |
+| `client-<target>.log` | the test output, stdout and stderr, including the edgli client logs       |
+| `run.env`             | the settings the run used, the test repo revision, the exact binaries     |
+| `trace-build.txt`     | with `just integration-trace`: the hoprd build and its `hopr-*` revisions |
+| `run.status`          | `passed`, `failed` or `interrupted`, with the exit code                   |
+
+- `run.env` is written from a fixed list of settings. It never copies the whole environment,
+  API tokens or credentials in URLs.
+- The client output is also printed to the console, and the run keeps the test's exit status.
+  Tests run with `--nocapture`, so passing tests keep their client logs too.
+- `CHAIN_SHARED=1`: the chain belongs to the caller and its logs cover other runs too, so they stay
+  in `CHAIN_DATA_DIR`. `run.env` names that folder, and `chain-slice.txt` gives each log's size at
+  the start and end of this run, so this run's part can be cut out (for example with `tail -c` and
+  `head -c`).
+- `HOPRD_CLUSTER_DATA_DIR` (attached cluster): its node logs stay in that folder, which `run.env`
+  names. The client and chain logs still go to the run folder.
+
+### TRACE logs
+
+Release builds of hoprd have TRACE logs compiled out (hopr-lib sets
+`tracing/release_max_level_debug`), so `RUST_LOG=...=trace` alone shows nothing more than DEBUG.
+`just integration-trace` builds hoprd and hoprd-localcluster from a local hoprd checkout
+(`HOPRD_SRC`, default `../hoprd`) with debug assertions on, which brings TRACE back while the
+build stays optimised. It then runs the scenarios with each run's logs in its own folder under
+`HOPR_LOG_DIR` (default `./logs`, see above):
+
+```bash
+RUST_LOG=info,hopr_protocol_session=trace just integration-trace zero_hop
+```
+
+- The binaries go to `<hoprd>/target/trace/`, apart from a normal release build.
+- `trace-build.txt` (next to the binaries, and copied into the run folder) records the hoprd
+  branch and revision, the build settings, and every `hopr-*` crate with its exact source.
+- The checkout is built as it is. If it is not on the release line's hoprd branch
+  (`release/4.1` for v4, `main` for v5), the build says so.
+- PIX scenarios need `just pix`, which builds the PIX test strategy; this recipe does not.
+- Debug assertions change the binary: extra checks run, and LTO is off. Use these runs to read
+  logs, never as a performance baseline.
+- If a run asked for TRACE but a binary could not provide it, the runner says so at the end.
+
+### Exporting spans to a collector
+
+Span export from the cluster nodes and the edgli client is off by default, so no run needs a
+collector. To turn it on, start an OTLP collector and set `HOPRD_USE_OPENTELEMETRY=true` and its
+endpoint for the run:
+
+```bash
+# For example Jaeger, which accepts OTLP over HTTP on 4318 and shows traces on 16686:
+docker run --rm -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one:latest
+
+HOPRD_USE_OPENTELEMETRY=true HOPRD_OTLP_ENDPOINT=http://127.0.0.1:4318 \
+  HOPR_LOG_DIR=$PWD/logs just integration-trace zero_hop
+```
+
+- The harness passes `HOPRD_USE_OPENTELEMETRY` on as given instead of forcing `false`. With it on,
+  `HOPRD_OTEL_SIGNALS` defaults to `traces`; set it to change that.
+- Every node span carries `run_id` (the run folder's name, or `HOPR_RUN_ID`), `component=hoprd`,
+  and the node's `node_address` and `node_peer_id`. Extra labels go in `HOPRD_OTEL_EXPORT_LABELS`.
+- `run.env` records these settings, without credentials.
+- The edgli client in the test process exports its spans too, with the same switch and endpoint
+  (OTLP over HTTP only), as service `edgli` with `run_id` and `component=edgli`. Its text logs
+  still go to the console and `client-<target>.log` as before. Client and node spans are not
+  joined into one trace, because HOPR packets carry no trace context; match them by `run_id`
+  and time.
+- Spans still waiting to be sent when a node stops can be lost: hoprd does not flush its exporter
+  on SIGTERM, and localcluster stops its nodes with SIGKILL.
+- The client sends its last spans when the test process exits. A test process that is killed
+  (for example by Ctrl-C) loses the spans that were not sent yet.
+
+Without `HOPR_LOG_DIR`, anvil, bloklid and deployer logs are written to `/tmp/hopr-chain/*.log`. `run.sh` sends nix
 build output to `nix-build.log`, so a long build can look like it has stopped.
 
 ## CI

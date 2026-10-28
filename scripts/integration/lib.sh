@@ -483,6 +483,84 @@ pix_build() {
   export HOPRD_LOCALCLUSTER_BIN="${src}/target/release/hoprd-localcluster"
 }
 
+# Build hoprd + hoprd-localcluster from a hoprd checkout with TRACE logs compiled in.
+#
+# hopr-lib turns on `tracing/release_max_level_debug`, which removes every TRACE call from a
+# release build. That cap only applies while debug assertions are off, so this build turns them
+# on (the same trick as `[profile.tracer]` in integration/Cargo.toml). Cargo reads profile
+# settings from the environment, so hoprd needs no change for it.
+#
+# Debug assertions change the binary: `debug_assert!` checks run, and code under
+# `cfg(debug_assertions)` is compiled in. LTO is also off and codegen units are up, to keep the
+# build fast. These binaries are for reading logs, never a performance baseline.
+#
+# They go to `<hoprd>/target/trace/`, apart from a normal release build. The settings and the exact
+# hopr-* dependency revisions are written next to them in `trace-build.txt`.
+#
+# Args: <hoprd-src> [expected-branch]. With an expected branch (the release line's `hoprd_ref`),
+# a checkout on another branch is reported, because the binaries would not match that line.
+trace_build() {
+  local src expected_ref="${2:-}"
+  src="$(cd "${1:?usage: trace_build <hoprd-src> [expected-branch]}" 2>/dev/null && pwd)" || {
+    echo "HOPRD_SRC '${1}' is not a directory — point it at a hoprd checkout." >&2
+    return 2
+  }
+  local target_dir="${src}/target/trace"
+  local branch rev dirty=""
+  branch="$(git -C "${src}" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  rev="$(git -C "${src}" rev-parse HEAD 2>/dev/null)"
+  git -C "${src}" diff --quiet HEAD 2>/dev/null || dirty="-dirty"
+  # A detached checkout (e.g. a worktree of origin/release/4.1) has no branch name; it matches
+  # the line when it is at the tip of the remote branch.
+  [ "${branch}" = HEAD ] && branch="(detached)"
+  if [ -n "${expected_ref}" ] && [ "${branch}" != "${expected_ref}" ] &&
+    [ "${rev}" != "$(git -C "${src}" rev-parse --verify -q "origin/${expected_ref}" 2>/dev/null)" ]; then
+    echo "note: ${src} is on '${branch}', not '${expected_ref}' (this line's hoprd branch)." >&2
+  fi
+  echo "building hoprd + hoprd-localcluster with TRACE logs from ${src} (${branch} ${rev:0:10}${dirty})"
+  (
+    cd "${src}" || exit 1
+    export CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+      CARGO_PROFILE_RELEASE_LTO=false \
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+      CARGO_TARGET_DIR="${target_dir}"
+    # Same package and feature selection as the flake's binary-hoprd and
+    # binary-hoprd-localcluster: default features, no PIX test strategy (see `just pix`).
+    nix develop -c cargo build --release -p hoprd -p hoprd-api &&
+      nix develop -c cargo build --release -p hoprd-localcluster
+  ) || return 1
+  export HOPRD_BIN="${target_dir}/release/hoprd"
+  export HOPRD_LOCALCLUSTER_BIN="${target_dir}/release/hoprd-localcluster"
+  export HOPRD_TRACE_BUILD_INFO="${target_dir}/release/trace-build.txt"
+  {
+    echo "hoprd_src=${src}"
+    echo "hoprd_branch=${branch}"
+    echo "hoprd_rev=${rev}${dirty}"
+    echo "profile=release debug-assertions=true lto=false codegen-units=16"
+    # The dev shell prints a banner first; keep only rustc's own line.
+    echo "rustc=$(cd "${src}" && nix develop -c rustc --version 2>/dev/null | grep '^rustc ' | tail -1)"
+    echo "cargo_lock_sha256=$({ sha256sum "${src}/Cargo.lock" || shasum -a 256 "${src}/Cargo.lock"; } 2>/dev/null | cut -d' ' -f1)"
+    echo "# hopr-* crates in Cargo.lock: name version source"
+    awk '/^name = "hopr-/ { n = $3; getline; v = $3; getline; s = ($1 == "source") ? $3 : "(workspace)"; gsub(/"/, "", n); gsub(/"/, "", v); gsub(/"/, "", s); print n, v, s }' \
+      "${src}/Cargo.lock"
+  } >"${HOPRD_TRACE_BUILD_INFO}"
+  echo "build settings and dependency revisions: ${HOPRD_TRACE_BUILD_INFO}"
+}
+
+# Says so when a run asked for TRACE logs but a binary was built without them. tracing prints
+# "the static max level is `debug`" at start-up in that case, and otherwise nothing changes.
+# With a marker file, only logs written after it are checked, so older runs in the same
+# folder do not count.
+warn_if_trace_capped() {
+  local dir="${1:?usage: warn_if_trace_capped <log-dir> [marker-file]}" marker="${2:-}"
+  local -a newer=()
+  [ -n "${marker}" ] && newer=(-newer "${marker}")
+  find "${dir}" -name '*.log' ${newer[@]+"${newer[@]}"} -exec grep -qs 'the static max level is' {} \; -print |
+    grep -q . || return 0
+  echo "note: RUST_LOG asks for TRACE, but some binaries were built without TRACE logs." >&2
+  echo "      Run \`just integration-trace\` to build hoprd with TRACE logs." >&2
+}
+
 # What "the state" is, in one place. Was four divergent lists.
 clean_tmp() {
   rm -rf /tmp/hopr-chain /tmp/hopr-nodes /tmp/hopr-it /tmp/hoprd-it-* 2>/dev/null || true
