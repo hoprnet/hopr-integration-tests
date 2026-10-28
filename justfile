@@ -145,7 +145,7 @@ pix-shapes *scenarios:
 
 # Run a CI tier locally: the same suites as `run.sh` (lib.sh `run_tier`), from the binaries built
 # here rather than resolved refs. v5 also builds the PIX hoprd + localcluster from HOPRD_SRC, a v5
-# hoprd checkout, since the flake's PIX binary is x86_64-linux only. See docs/v5-test-matrix.md.
+# hoprd git checkout, since the flake's PIX binary is x86_64-linux only. See docs/v5-test-matrix.md.
 #   LINE=v5 HOPRD_SRC=../hoprd-main just tier pr
 #   LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly
 tier name="pr": build build-chain

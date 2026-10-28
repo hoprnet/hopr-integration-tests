@@ -128,14 +128,34 @@ S = strict assertion, w = exercised but weakly or not asserted.
   every suite and each job stays under the 150-minute timeout.
 - The pass marker's fingerprint carries the tier, so a merge gate never reuses a nightly green.
 
+## Measured locally
+
+`just tier` on an Apple-silicon Mac, 2026-10-28. Stack: hoprd `main` (flake) plus the PIX hoprd
+built from `8d9f11a`, edge-client `main` head, blokli `release/0.14`. Each tier ran on one fresh
+chain. Both tiers were green.
+
+| Tier    | Suite            | Tests | Test time | Summary                      |
+| ------- | ---------------- | ----- | --------- | ---------------------------- |
+| pr      | integration      | 1     | 4.6m      |                              |
+| pr      | pix              | 2     | 6.5m      |                              |
+| pr      | pix_shapes mixed | 1     | 15.4m     |                              |
+| pr      | **total**        | 4     |           | 4 passed, 0 failed in 28m57s |
+| nightly | exit_origination | 1     | 5.5m      |                              |
+| nightly | pix_shapes       | 4     | 38.0m     |                              |
+| nightly | **total**        | 5     |           | 5 passed, 0 failed in 44m24s |
+
+The summary time includes the local build checks and the chain start.
+
 ## Running a tier locally
 
 `just tier <pr|nightly>` runs the same suites CI does (`run_tier` in `scripts/integration/lib.sh`,
 shared with `run.sh`) from binaries built on the machine. The flake's PIX hoprd is x86_64-linux
 only, so on v5 the recipe builds the PIX hoprd and the `--pix-config` localcluster from
-`HOPRD_SRC`, a v5 hoprd checkout, and pins edgli to edge-client's line head like CI:
+`HOPRD_SRC`, a v5 hoprd git checkout, and pins edgli to edge-client's line head like CI. It has to
+be a git checkout: nix copies a plain directory into the store whole, `target/` included.
 
 ```bash
+git -C ../hoprd worktree add ../hoprd-main origin/main   # once
 LINE=v5 HOPRD_SRC=../hoprd-main just tier pr
 LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly
 ```

@@ -55,7 +55,8 @@ just ci                         # what CI runs for the v4 line: resolve refs, bu
 just ci-v5                      # the same for v5 (TIER=pr|nightly); PIX suites on x86_64-linux only
 
 # A tier exactly as CI selects it, from binaries built here; works on darwin too. v5 builds the
-# PIX hoprd + localcluster from HOPRD_SRC (a v5 hoprd checkout), since the flake has no darwin one.
+# PIX hoprd + localcluster from HOPRD_SRC (a v5 hoprd git checkout, e.g. a `git worktree` of
+# hoprd main), since the flake has no darwin one.
 LINE=v5 HOPRD_SRC=../hoprd-main just tier pr        # integration, pix, mixed shape (~30 min)
 LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly   # exit_origination, the other shapes (~45 min)
 just tier                                           # v4: every suite
