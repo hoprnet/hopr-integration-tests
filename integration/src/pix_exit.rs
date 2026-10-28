@@ -85,6 +85,8 @@ const EGRESS_PACKETS: &str = "hopr_pix_egress_packets_total";
 /// Cycle lifecycle transitions, by `event`: `requested`, `committed`, `funded`, `recovered`,
 /// `failed`, `retired`.
 const CYCLES: &str = "hopr_pix_cycles_total";
+/// Sessions the PIX supervisor closed, by `reason` (`recovery_idle`, deposit timeouts, ...).
+const CLOSURES: &str = "hopr_pix_closures_total";
 
 /// PIX Sessions the Exit currently supervises, by `gate_mode`: `predeposit` or `funded`.
 ///
@@ -232,6 +234,22 @@ impl ExitTelemetry {
     /// Packets admitted in one gate `mode` — `"predeposit"` or `"funded"`.
     pub fn egress(&self, mode: &str) -> Option<u64> {
         self.counter(EGRESS_PACKETS, "mode", mode)
+    }
+
+    /// Every reason the PIX supervisor closed a Session for, with its count, sorted by reason.
+    /// Empty when no Session was closed, which is the healthy reading.
+    pub fn closure_reasons(&self) -> Vec<(String, u64)> {
+        let prefix = format!("{CLOSURES}{{reason=\"");
+        let mut out: Vec<(String, u64)> = self
+            .counters
+            .iter()
+            .filter_map(|(key, count)| {
+                let reason = key.strip_prefix(&prefix)?.strip_suffix("\"}")?;
+                (*count > 0).then(|| (reason.to_string(), *count))
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     /// Cycle transitions of one `event`.
