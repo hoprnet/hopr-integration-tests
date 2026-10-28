@@ -61,7 +61,7 @@ build-chain:
 
 # Build hoprd + the binary chain, then run the scenarios on one locally-built anvil+bloklid
 # and one cluster (via --chain-url). Optional args = scenarios, e.g.
-# `just integration-binchain zero_hop`.
+# `just integration-binchain zero_one_two_hop`.
 integration-binchain *scenarios: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
@@ -141,18 +141,32 @@ pix-shapes *scenarios:
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
     runner=(bash scripts/integration/with-v5-deps.sh bash scripts/integration/run-binchain.sh)
 
-    # Named scenarios run as asked; the full pass puts the geometry spike in its own invocation
-    # first, because a cluster serves one invocation and a failed spike makes every shape after
-    # it unreadable.
-    if [ -n '{{scenarios}}' ]; then
-      SCENARIOS='{{scenarios}}' "${runner[@]}"
-    else
-      spike=the_profile_geometry_completes_a_cycle
-      SCENARIOS="${spike}" "${runner[@]}"
-      SCENARIOS_EXCEPT="${spike}" "${runner[@]}"
-    fi
+    SCENARIOS='{{scenarios}}' "${runner[@]}"
 
-# Run a single test against a fresh env (e.g. `just scenario zero_hop`).
+# Run a CI tier locally: the same suites as `run.sh` (lib.sh `run_tier`), from the binaries built
+# here rather than resolved refs. v5 also builds the PIX hoprd + localcluster from HOPRD_SRC, a v5
+# hoprd checkout, since the flake's PIX binary is x86_64-linux only. See docs/v5-test-matrix.md.
+#   LINE=v5 HOPRD_SRC=../hoprd-main just tier pr
+#   LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly
+tier name="pr": build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/integration/lib.sh
+    it_env
+    export LINE='{{line}}' TIER='{{name}}' HOPRNET_SHELL='{{hoprnet}}' PIX_BIN=""
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
+    if [ "${LINE}" = v5 ]; then
+      nodes_bin="${HOPRD_BIN}"
+      pix_build '{{hoprd_src}}'
+      pix_check_hoprd "${HOPRD_BIN}"
+      PIX_BIN="${HOPRD_BIN}" HOPRD_BIN="${nodes_bin}"
+    fi
+    chain_start
+    trap chain_stop EXIT
+    # v5 runs against edge-client's line head, like CI: the committed v5 lock trails `main`.
+    {{v5_deps}} bash -c 'source scripts/integration/lib.sh; if [ "${LINE}" = v5 ]; then pin_line_deps; fi; run_tier'
+
+# Run a single test against a fresh env (e.g. `just scenario zero_one_two_hop`).
 scenario name:
     @just integration-binchain '{{name}}'
 
@@ -171,7 +185,7 @@ cluster-up: build build-chain
     wait "${CLUSTER_PID}"
 
 # Run tests against the persistent cluster from `cluster-up` (no bring-up).
-# Optional args = test-name filters (e.g. `just attach one_hop`).
+# Optional args = test-name filters (e.g. `just attach zero_one_two_hop`).
 attach *filter:
     #!/usr/bin/env bash
     set -euo pipefail

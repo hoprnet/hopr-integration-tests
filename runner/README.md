@@ -295,7 +295,7 @@ report on a merge group.
   The older `HOPRD_TEST_DISPATCH_TOKEN` PAT is no longer used and its name predates
   the rename; there is nothing to migrate, but do not re-add it.
 
-### Nightly is the v4 coverage
+### Nightly: v4 coverage and the v5 nightly tier
 
 A **merge queue can only be attached to a repository's default branch.** hoprd,
 edge-client and blokli all develop v4 on `release/*` branches, so none of them can
@@ -303,8 +303,9 @@ gate merges into those branches — the `merge_group` condition in their `pr.yam
 gates can never fire for a release branch, and only their `run-integration` label
 path works on demand.
 
-The nightly `schedule` here fills that hole. It passes no inputs, so `run.sh` falls
-through to its defaults, which are exactly the v4 lines:
+The nightly `schedule` here fills that hole, and runs three jobs one after another:
+v4 (every suite), v5 `pr` tier and v5 `nightly` tier, so a night covers every v5 suite.
+On v4 it falls through to `run.sh`'s defaults, which are exactly the v4 lines:
 
 | Project     | Nightly ref                   |
 | ----------- | ----------------------------- |
@@ -312,9 +313,9 @@ through to its defaults, which are exactly the v4 lines:
 | edge-client | `release/4.1` (`EDGLI_REF`)   |
 | blokli      | `release/0.13` (`BLOKLI_REF`) |
 
-Each is resolved to its current head per run, so the nightly always tests the tips of
-the three v4 branches together. A red night posts to Zulip with the trigger shown as
-`nightly v4 line` plus the three resolved revisions.
+Each is resolved to its current head per run. A red night posts to Zulip with the trigger
+shown as `nightly` plus the line, tier, the three resolved revisions and the failures from
+the end-of-run summary.
 
 Scheduled runs only ever fire from the default branch, and they share the
 `integration` job concurrency group (`queue: max`), so a nightly queues behind
@@ -322,23 +323,22 @@ in-flight runs rather than cancelling them or being cancelled.
 
 ### What the gate runs
 
-Every scenario whose verdict is trustworthy, on every run — 3 on v4, 5 on v5, on one chain
-shared by every suite, ~17 min of test time on v4 (~35 min including build):
+v4 runs every suite on every trigger. v5 is split in two tiers (`TIER`, see
+[docs/v5-test-matrix.md](../docs/v5-test-matrix.md)): the `pr` tier gates PRs, merge queues
+and upstream dispatches, the `nightly` tier runs on the schedule (or a dispatch with
+`tier: nightly`).
 
-| Suite              | Scenarios                                  | Line |
-| ------------------ | ------------------------------------------ | ---- |
-| `integration`      | `zero_hop`, `one_hop`                      | both |
-| `exit_origination` | the unresolvable-return-path repro         | both |
-| `pix`              | deposits swept; session closes when unpaid | v5   |
+| Suite              | Scenarios                                  | v4  | v5 tier |
+| ------------------ | ------------------------------------------ | --- | ------- |
+| `integration`      | `zero_one_two_hop`                         | yes | pr      |
+| `exit_origination` | the unresolvable-return-path repro         | yes | nightly |
+| `pix`              | deposits swept; session closes when unpaid | –   | pr      |
+| `pix_shapes`       | `a_mixed_session_sustains_its_cycles`      | –   | pr      |
+| `pix_shapes`       | browsing, download, idle, upload           | –   | nightly |
+| `return_path`      | the 1-hop relayer-loss scenarios           | yes | –       |
 
-**`return_path` is held out entirely.** Every scenario in it asserts an arrival ratio
-over a relayer draw the test does not force, so the verdict tracks the draw rather than
-the code: `spread` asserts the histogram is spread, and the survival scenarios assert
-≥83% arrival after killing one of three return relayers — reachable only if the victim
-carried roughly its share. A 2026-09-08 v4 run failed at 67.9% with the victim holding
-53% of replies (45/32/23), which is the mechanism rather than a slow machine. Fixing it
-means scaling the gate by the victim's measured share, or forcing the spread before the
-kill. Run them by hand with `just return-path <name>`.
+Every run ends with a pytest-style summary (console and job summary) listing each test,
+and for a failure the step that failed and why.
 
 `rotsee` is excluded (needs a funded Gnosis identity and a reachable public exit) and
 so is `profiling` (emits traces, not a verdict, and needs `--features prof` +

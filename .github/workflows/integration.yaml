@@ -1,5 +1,6 @@
 name: Integration throughput test
-# Runs the 0-hop + 1-hop throughput test (full stack). Triggered by:
+# Runs the integration suites (full stack). v5 is split in a `pr` and a `nightly` tier, see
+# docs/v5-test-matrix.md; v4 runs every suite on either. Triggered by:
 #   * hoprd, blokli or edge-client merging to the branch the chosen line names (via
 #     workflow_dispatch / repository_dispatch from those repos),
 #   * a nightly schedule, which is the ONLY coverage the v4 release lines get: a
@@ -12,7 +13,7 @@ name: Integration throughput test
 #
 # One release line per run; README has the branch table. The dispatching project supplies its
 # rev, everything else resolves to the head of its branch on that line. A dispatch picks the
-# line; runs that gate THIS repo fan out over both through `strategy.matrix.line` below, since
+# line; runs that gate THIS repo fan out over both through `strategy.matrix` below, since
 # the test bodies are shared source.
 on:
   repository_dispatch:
@@ -25,6 +26,12 @@ on:
         type: choice
         default: "v4"
         options: ["v4", "v5"]
+      tier:
+        description: "v5 suites to run: pr (happy paths, gates merges) or nightly (the rest)"
+        required: false
+        type: choice
+        default: "pr"
+        options: ["pr", "nightly"]
       project:
         description: "Triggering project (hoprd | edge-client | blokli); empty = every ref defaults to the head of its branch on the chosen line"
         required: false
@@ -65,7 +72,7 @@ on:
 # Uniform indentation on purpose: `>-` only folds lines at the SAME indent as the
 # first one, so an indented continuation would leave real newlines in this string.
 run-name: >-
-  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration {0} ({1} {2})', github.event.client_payload.line || 'v4', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly v4)' || 'Integration throughput test'))) }}
+  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration {0} ({1} {2})', github.event.client_payload.line || 'v4', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly)' || 'Integration throughput test'))) }}
 # Only lets a new push supersede a PR's previous run; every other run is its own group.
 # Serialising on the box is the `integration` job's concurrency, not this one.
 concurrency:
@@ -109,7 +116,8 @@ jobs:
             echo "tests_sha=${tests_sha}"
           } >>"${GITHUB_OUTPUT}"
   integration:
-    name: Integration throughput (${{ matrix.line }})
+    # The pr tier keeps the bare line name, which is what upstream gates and required checks match.
+    name: Integration throughput (${{ matrix.line }}${{ matrix.tier == 'nightly' && ', nightly' || '' }})
     needs: companions
     # PR runs only when the `run-integration` label is present; dispatch/manual always run.
     if: >-
@@ -127,9 +135,9 @@ jobs:
       contents: read
       pull-requests: read
       actions: read
-    # Both lines for the triggers that gate this repo, one dispatched line otherwise.
-    # `fail-fast: false` so a v5 break still reports the v4 verdict. NOTE the job name
-    # carries the line, so required checks must name "Integration throughput (v4|v5)".
+    # Both lines for the triggers that gate this repo, one dispatched line and tier otherwise; the
+    # nightly adds the v5 nightly tier, so a night covers every suite. `fail-fast: false` so a v5
+    # break still reports the v4 verdict.
     strategy:
       fail-fast: false
       # One line at a time. The box hosts several runner instances sharing these labels, so
@@ -137,14 +145,15 @@ jobs:
       # 13000/19000 and /tmp/hopr-chain — which the hygiene steps also delete under each other.
       max-parallel: 1
       matrix:
-        line: >-
-          ${{ fromJSON((github.event_name == 'merge_group' || github.event_name == 'pull_request') && '["v4","v5"]' || format('["{0}"]', inputs.line || github.event.client_payload.line || 'v4')) }}
-    # Per LINE, not per run: ~45 min of tests on v4 (9 scenarios), ~50 on v5 (11; one shared chain)
-    # plus 15-20 min of build on a Cachix miss. Each line is its own job.
+        include: >-
+          ${{ fromJSON(github.event_name == 'schedule' && '[{"line":"v4","tier":"pr"},{"line":"v5","tier":"pr"},{"line":"v5","tier":"nightly"}]' || ((github.event_name == 'merge_group' || github.event_name == 'pull_request') && '[{"line":"v4","tier":"pr"},{"line":"v5","tier":"pr"}]' || format('[{{"line":"{0}","tier":"{1}"}}]', inputs.line || github.event.client_payload.line || 'v4', inputs.tier || github.event.client_payload.tier || 'pr'))) }}
+    # Per job: ~40 min of tests on v4, ~27 on v5 pr and ~41 on v5 nightly (one shared chain each),
+    # plus 15-20 min of build on a Cachix miss.
     timeout-minutes: 150
     env:
       # Which branch + dependency set run.sh resolves; the rest override within it.
       LINE: ${{ matrix.line }}
+      TIER: ${{ matrix.tier }}
       PROJECT: ${{ inputs.project || github.event.client_payload.project }}
       OVERRIDE_REV: ${{ inputs.rev || github.event.client_payload.rev }}
       # `workflow_dispatch` delivers its arguments under `inputs.*` while
@@ -306,8 +315,7 @@ jobs:
           # that can carry a marker and so be waited on), so switching on the event
           # would have labelled every hoprd merge gate a "manual run".
           if [ "${EVENT}" = "schedule" ]; then
-            # Nightly carries no inputs, so LINE falls through to its v4 default.
-            echo "TRIGGER=nightly v4 line"
+            echo "TRIGGER=nightly"
           elif [ "${EVENT}" = "merge_group" ]; then
             # Fans out over both lines; ${LINE} says which one this job is.
             # This repo's own merge queue: the candidate is this PR merged into main.
@@ -339,8 +347,7 @@ jobs:
       # The marker a later merge-queue run of the same stack, here or upstream, looks up instead of rerunning.
       - name: Record the pass
         if: >-
-          success() && env.IT_FINGERPRINT != '' && (github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.full_name == github.repository)
+          success() && env.IT_FINGERPRINT != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: it-pass-${{ env.IT_FINGERPRINT }}
@@ -380,11 +387,14 @@ jobs:
           # job died before run.sh got as far as resolving them (a runner/setup problem
           # rather than a stack problem), which is itself the useful signal.
           content: |
-            **Integration throughput test FAILED** (${{ env.RESOLVED_LINE || matrix.line }}) — ${{ env.TRIGGER }}${{ env.TESTS_FROM }}
+            **Integration throughput test FAILED** (${{ env.RESOLVED_LINE || matrix.line }}, ${{ matrix.tier }} tier) — ${{ env.TRIGGER }}${{ env.TESTS_FROM }}
             * hoprd `${{ env.RESOLVED_HOPRD || 'unresolved' }}`
             * edge-client `${{ env.RESOLVED_EDGLI || 'unresolved' }}`
             * blokli `${{ env.RESOLVED_BLOKLI || 'unresolved' }}`
             [Run #${{ github.run_number }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) · logs are attached to the run as an artifact.
+            ```
+            ${{ env.IT_SUMMARY || 'no test summary: the run failed before or outside the tests' }}
+            ```
       - name: Post-run hygiene
         if: always()
         run: |
