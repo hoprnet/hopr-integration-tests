@@ -15,6 +15,11 @@
 //! | shares accepted, and whether they advanced recovery | `hopr_pix_shares_total{kind}` |
 //! | packets served, and what paid for them | `hopr_pix_egress_packets_total{mode}` |
 //! | how far each cycle got, once it finalized | `hopr_pix_cycle_{egress_packets,useful_share_fraction,accepted_share_fraction}{outcome}` |
+//! | shares lost to the Exit's SURB store overflowing | `hopr_surb_store_evictions_count{cache="ring_share",cause}` |
+//!
+//! The last row is not a `hopr_pix_*` series. It is read here because it is the only place a share
+//! lost to overflow shows up, and it is kept apart from the rest: it does not count towards
+//! [`ExitTelemetry::observable`], which is about whether the PIX aggregates are exported.
 //!
 //! # Why a separate reader
 //!
@@ -87,6 +92,16 @@ const EGRESS_PACKETS: &str = "hopr_pix_egress_packets_total";
 const CYCLES: &str = "hopr_pix_cycles_total";
 /// Sessions the PIX supervisor closed, by `reason` (`recovery_idle`, deposit timeouts, ...).
 const CLOSURES: &str = "hopr_pix_closures_total";
+
+/// What the Exit's SURB store dropped, by `cache` and `cause` (`hopr-protocol-hopr`). Of its
+/// `cache` values only `ring_share` matters here: a share-bearing SURB a full ring buffer evicted,
+/// whose share reaches the reconstructor only when the SURB is *used* and so is lost for good.
+///
+/// A counter named `*_count`, which the exporter renders with a `_total` suffix on top
+/// ([`EVICTIONS_RENDERED`]); [`classify`] would take the bare name for a histogram's count.
+const EVICTIONS: &str = "hopr_surb_store_evictions_count";
+/// [`EVICTIONS`] as the exporter renders a monotonic counter.
+const EVICTIONS_RENDERED: &str = "hopr_surb_store_evictions_count_total";
 
 /// PIX Sessions the Exit currently supervises, by `gate_mode`: `predeposit` or `funded`.
 ///
@@ -190,6 +205,10 @@ pub struct ExitTelemetry {
     counters: BTreeMap<String, u64>,
     gauges: BTreeMap<String, f64>,
     hists: BTreeMap<String, Histogram>,
+    /// [`EVICTIONS`], keyed like the counters. Its own map because it is not a `hopr_pix_*` series:
+    /// folded into `counters` it would make [`ExitTelemetry::observable`] true for an Exit that
+    /// exports no PIX aggregates at all.
+    evictions: BTreeMap<String, u64>,
 }
 
 impl ExitTelemetry {
@@ -250,6 +269,28 @@ impl ExitTelemetry {
             .collect();
         out.sort();
         out
+    }
+
+    /// Share-bearing SURBs the Exit's store evicted for capacity, over every `cause`.
+    ///
+    /// Each is a PIX share lost for good: the store gives up share-less SURBs first, so one of these
+    /// means it held nothing but shares. Zero is the healthy reading and covers the series being
+    /// absent, since a `MultiCounter` label only materialises when it is first incremented; an Exit
+    /// that exports no telemetry at all is ruled out by [`ExitTelemetry::observable`].
+    ///
+    /// **Not counted: a generation wipe.** A newer SURB generation clears the store; that is no
+    /// overflow, and the store reports it apart from the eviction summary. hoprnet#8576's
+    /// `hopr_surb_generation_bumps_total` counts the bumps that cause it, once the lock carries it.
+    pub fn ring_share_evictions(&self) -> u64 {
+        let prefix = format!("{EVICTIONS}{{cache=\"ring_share\"");
+        self.evictions
+            .iter()
+            .filter(|(key, _)| {
+                key.strip_prefix(&prefix)
+                    .is_some_and(|rest| rest.starts_with(',') || rest.starts_with('}'))
+            })
+            .map(|(_, count)| *count)
+            .sum()
     }
 
     /// Cycle transitions of one `event`.
@@ -323,6 +364,16 @@ impl ExitTelemetry {
                 .map(|(name, h)| {
                     let before = self.hists.get(name).cloned().unwrap_or_default();
                     (name.clone(), before.delta(h))
+                })
+                .collect(),
+            evictions: later
+                .evictions
+                .iter()
+                .map(|(name, &v)| {
+                    (
+                        name.clone(),
+                        v.saturating_sub(self.evictions.get(name).copied().unwrap_or_default()),
+                    )
                 })
                 .collect(),
         }
@@ -778,7 +829,8 @@ fn parse_le(raw: &str) -> Option<f64> {
     }
 }
 
-/// Read every `hopr_pix_*` series out of a Prometheus text exposition.
+/// Read every `hopr_pix_*` series, and the SURB store's eviction counter, out of a Prometheus text
+/// exposition.
 fn parse(body: &str) -> ExitTelemetry {
     let mut out = ExitTelemetry::default();
 
@@ -788,7 +840,8 @@ fn parse(body: &str) -> ExitTelemetry {
         let Some(name) = line.split(['{', ' ']).next() else {
             continue;
         };
-        if !name.starts_with(PREFIX) {
+        let eviction = name == EVICTIONS || name == EVICTIONS_RENDERED;
+        if !name.starts_with(PREFIX) && !eviction {
             continue;
         }
         let labels = line
@@ -803,6 +856,13 @@ fn parse(body: &str) -> ExitTelemetry {
         else {
             continue;
         };
+
+        if eviction {
+            *out.evictions
+                .entry(series_key(EVICTIONS, &without_le(labels)))
+                .or_default() += value.max(0.0) as u64;
+            continue;
+        }
 
         match classify(name) {
             Kind::Bucket(family) => {
@@ -997,6 +1057,57 @@ hopr_pix_cycle_accepted_share_fraction_bucket{outcome=\"recovered\",le=\"+Inf\"}
         let h = d.accepted_fraction("recovered").expect("histogram");
         assert_eq!(2, h.count(), "two cycles finalized in the window");
         assert_eq!(Some(2), h.above(1.0));
+    }
+
+    /// The SURB store's eviction counter is named `*_count`, so on its own name it looks like a
+    /// histogram's count; and the exporter appends `_total` to a monotonic counter. Both spellings
+    /// have to land in the same place, and only the `ring_share` series is a lost share.
+    #[test]
+    fn ring_share_evictions_should_be_read_under_either_spelling_and_summed_over_causes() {
+        let rendered = parse(
+            "hopr_surb_store_evictions_count_total{cache=\"ring_plain\",cause=\"size\"} 900\n\
+             hopr_surb_store_evictions_count_total{cause=\"size\",cache=\"ring_share\"} 5\n\
+             hopr_surb_store_evictions_count_total{cache=\"ring_share\",cause=\"explicit\"} 2\n\
+             hopr_surb_store_evictions_count_total{cache=\"surb_ring\",cause=\"size\"} 7\n",
+        );
+        assert_eq!(7, rendered.ring_share_evictions());
+
+        let bare =
+            parse("hopr_surb_store_evictions_count{cache=\"ring_share\",cause=\"size\"} 3\n");
+        assert_eq!(3, bare.ring_share_evictions());
+        assert!(
+            bare.hists.is_empty(),
+            "the bare name must not be taken for a histogram's `_count`"
+        );
+
+        assert_eq!(
+            0,
+            parse(EXPOSITION).ring_share_evictions(),
+            "absent is the healthy reading"
+        );
+    }
+
+    /// A guard over a scenario compares two readings, so the counter has to difference like the
+    /// others, and a series that only appears mid-scenario counts in full.
+    #[test]
+    fn ring_share_evictions_should_difference_over_a_scenario() {
+        let before =
+            parse("hopr_surb_store_evictions_count_total{cache=\"ring_share\",cause=\"size\"} 4\n");
+        let later = parse(
+            "hopr_surb_store_evictions_count_total{cache=\"ring_share\",cause=\"size\"} 4\n\
+             hopr_surb_store_evictions_count_total{cache=\"ring_share\",cause=\"explicit\"} 6\n",
+        );
+        assert_eq!(0, before.delta(&before).ring_share_evictions());
+        assert_eq!(6, before.delta(&later).ring_share_evictions());
+    }
+
+    /// The eviction counter is not a PIX aggregate. An Exit that exports it and nothing from
+    /// `hopr_pix_*` must still read as unobservable, or the guards built on `observable` would pass.
+    #[test]
+    fn the_eviction_counter_should_not_make_an_exit_observable() {
+        let t =
+            parse("hopr_surb_store_evictions_count_total{cache=\"ring_plain\",cause=\"size\"} 1\n");
+        assert!(!t.observable());
     }
 
     /// A family that disappeared between readings must not underflow into a vast number.

@@ -288,6 +288,18 @@ fn assert_the_gate_served_the_surplus(gate: &ExitTelemetry, trace: &Trace) {
         trace.summary()
     );
 
+    // No share was lost to the Exit's SURB store overflowing. The store gives up share-less SURBs
+    // first, so a `ring_share` eviction means it held nothing but shares: a share lost for good,
+    // which no surplus-run assertion below would name. (A generation advance clears the store
+    // without evicting, and is not counted here.)
+    assert_eq!(
+        0,
+        gate.ring_share_evictions(),
+        "the Exit's SURB store evicted share-bearing SURBs for capacity during the scenario, each \
+         a PIX share lost for good. {}",
+        gate.summary()
+    );
+
     let surplus = gate.shares("surplus").unwrap_or(0);
     assert!(
         surplus >= ceiling,
