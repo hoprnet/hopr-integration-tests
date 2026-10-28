@@ -270,15 +270,14 @@ dispatch runs. That is deliberate: cancelling a queue run fails the queue entry,
 box runs one integration job at a time. The default `queue: single` is not enough: it
 keeps one pending run and cancels it when the next arrives. The cost is that a candidate can wait
 behind several queued runs, so keep the queue's max wait comfortably above the combined
-runtime of the runs ahead of it (~30-40 minutes each).
+runtime of the runs ahead of it. A queue candidate itself takes about 2 hours (v4, v5 and v5
+nightly), against the ruleset's 320-minute check timeout.
 
 **hopr-integration-tests has no rulesets at all** as of 2026-09-04 — `main` is unprotected, so
 this trigger fires but nothing enforces it. To make it a real gate, create a ruleset
-for `main` with a merge queue rule and both `Integration throughput (v4)` and
-`Integration throughput (v5)` among its required status checks. The line is part of the
-job name because a queue candidate runs one job per line; `Integration throughput`
-without a suffix matches neither. Same for `Format + clippy (v4|v5)` and
-`Unit tests (v4|v5)`. Do **not** require `Validate title` — it is PR-only and cannot
+for `main` with a merge queue rule and the fan-in `Integration throughput` among its required
+status checks. It passes only when every job of the run did (v4, v5 and v5 nightly on a queue
+candidate). The same goes for the fan-in `Format + clippy` and `Unit tests`. Do **not** require `Validate title` — it is PR-only and cannot
 report on a merge group.
 
 ### Prerequisites in the upstream repos
@@ -304,7 +303,8 @@ gates can never fire for a release branch, and only their `run-integration` labe
 path works on demand.
 
 The nightly `schedule` here fills that hole, and runs two jobs one after another: v4 (every
-suite) and the v5 `nightly` tier. The v5 `pr` tier is left out: every gate already runs it.
+suite) and the v5 `nightly` tier. The v5 `pr` tier is left out: it runs on every PR label, queue
+and v5 gate.
 On v4 it falls through to `run.sh`'s defaults, which are exactly the v4 lines:
 
 | Project     | Nightly ref                   |
@@ -324,9 +324,9 @@ in-flight runs rather than cancelling them or being cancelled.
 ### What the gate runs
 
 v4 runs every suite on every trigger. v5 is split in two tiers (`TIER`, see
-[docs/v5-test-matrix.md](../docs/v5-test-matrix.md)): the `pr` tier gates PRs, merge queues
-and upstream dispatches, the `nightly` tier runs on the schedule (or a dispatch with
-`tier: nightly`).
+[docs/v5-test-matrix.md](../docs/v5-test-matrix.md)), each its own job. The merge queue and v5
+dispatches run both, the schedule runs `nightly`, and PR labels pick a slice (table in the
+[README](../README.md#ci)).
 
 | Suite              | Scenarios                                  | v4  | v5 tier |
 | ------------------ | ------------------------------------------ | --- | ------- |
@@ -369,8 +369,9 @@ stack.
 
 ## Triggering / validating
 
-- **On a hopr-integration-tests PR:** add the `run-integration` label → the test runs on
-  **both** lines, one job each, back to back on the single runner.
+- **On a hopr-integration-tests PR:** `run-integration` runs the v5 `pr` tier,
+  `run-integration-v4` the v4 suites, `run-integration-v5-nightly` the v5 `nightly` tier. Labels
+  add up; the jobs run back to back on the single runner.
 - **Manual:** `gh workflow run integration.yaml -R hoprnet/hopr-integration-tests`
   then `gh run watch -R hoprnet/hopr-integration-tests --exit-status`.
 - **Simulate a merge trigger:**

@@ -32,8 +32,9 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 | `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no      | `just profile`              |
 
 v5 is split in two tiers, chosen with `TIER` (see [`docs/v5-test-matrix.md`](docs/v5-test-matrix.md)
-for what each test covers and costs): `pr` (integration, pix, the mixed shape) gates PRs, merge
-queues and upstream dispatches; `nightly` runs the rest. v4 runs everything on either tier.
+for what each test covers and costs): `pr` (integration, pix, the mixed shape) is the fast
+happy-path set, `nightly` runs the rest. v4 runs everything on either tier. Which jobs each trigger
+runs is listed under [CI](#ci).
 Every run ends with a summary of each test, naming the step a failed test broke in.
 
 CI runs 8 scenarios on v4 (6 of them `return_path`). Suites share one chain per
@@ -113,10 +114,27 @@ the same way `run.sh` does (see below).
 `hetzner` box. It is triggered by:
 
 - upstream gates (hoprd, edge-client, blokli) through dispatch, on the line they request;
-- this repo's merge queue, and PRs labelled `run-integration`, on both lines;
-- a nightly run at 02:00 UTC: v4 (the only automatic v4 coverage, since merge queues only work on
-  default branches), then the v5 `nightly` tier;
+- this repo's merge queue, and PRs carrying a `run-integration*` label;
+- a nightly run at 02:00 UTC (v4 gets no other automatic coverage, since merge queues only work on
+  default branches);
 - manual runs: `gh workflow run integration.yaml -f line=v5 -f tier=nightly -f project=hoprd -f rev=<sha>`.
+
+Each trigger runs one job per line and tier, one after another on the box:
+
+| Trigger                                   | v4  | v5 `pr` | v5 `nightly` |
+| ----------------------------------------- | --- | ------- | ------------ |
+| this repo's merge queue                   | yes | yes     | yes          |
+| upstream dispatch / manual run, `line=v4` | yes | –       | –            |
+| upstream dispatch / manual run, `line=v5` | –   | yes     | yes          |
+| manual run, `line=v5 tier=pr`             | –   | yes     | –            |
+| manual run, `line=v5 tier=nightly`        | –   | –       | yes          |
+| nightly schedule                          | yes | –       | yes          |
+| PR label `run-integration`                | –   | yes     | –            |
+| PR label `run-integration-v4`             | yes | –       | –            |
+| PR label `run-integration-v5-nightly`     | –   | –       | yes          |
+
+PR labels add up, so `run-integration` plus `run-integration-v4` runs two jobs. The merge queue and
+the upstream gates run every suite of their line, so a new or changed test passes before it lands.
 
 No versions are stored. The project that triggered the run supplies its rev, and every other ref
 is the current head of its branch on the line. `run.sh` builds hoprd, localcluster and the blokli
@@ -126,7 +144,7 @@ A green run records a fingerprint per line. The fingerprint covers the tests tre
 edge-client and blokli trees (trees, not commits: an upstream queue candidate is a new commit with
 the PR head's tree). When a merge queue, this repo's or an upstream's dispatch, sees a fingerprint
 that already passed in a run of the last 7 days, it skips that line. Usually that earlier run is the
-PR's `run-integration` run. If main or any upstream branch moved, the queue batched other PRs, or a
+PR's labelled run. If main or any upstream branch moved, the queue batched other PRs, or a
 companion PR merged, the fingerprint changes and the line runs again.
 
 ### How edgli gets pinned
@@ -150,7 +168,8 @@ Requires: hoprnet/hopr-integration-tests#50   # in the upstream PR
 Requires: hoprnet/edge-client#186             # in the tests PR, one line per upstream PR
 ```
 
-1. Open the tests PR with the adapted code and label it `run-integration`. While an upstream PR
+1. Open the tests PR with the adapted code and label it `run-integration` (add
+   `run-integration-v4` / `run-integration-v5-nightly` for the other jobs). While an upstream PR
    is open, its line (`main` = v5, `release/*` = v4) uses that PR's head, both in `pr.yaml` and in
    the integration run.
 2. Queue the upstream PRs. Each gate sends `tests_pr`, so it runs with the tests from the tests PR.
