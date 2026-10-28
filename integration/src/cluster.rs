@@ -17,7 +17,7 @@ use crate::Address;
 /// Node count used unless `HOPRD_CLUSTER_SIZE` overrides it.
 pub const DEFAULT_CLUSTER_SIZE: usize = 3;
 /// `hoprd-localcluster` only carries this many baked-in node secrets.
-pub const MAX_CLUSTER_SIZE: usize = 5;
+pub const MAX_CLUSTER_SIZE: usize = 10;
 /// Smallest cluster `IntegrationEnv` can actually bring up.
 ///
 /// `boot_edgli` waits for at least two connected peers, so a one-node cluster is accepted by
@@ -316,6 +316,60 @@ pub struct ClusterSummary {
 }
 
 impl ClusterSummary {
+    /// Cuts all traffic between nodes `a` and `b` at the localcluster latency relays, leaving both
+    /// running and every other link (including Edgli's) intact. Needs a latency profile.
+    pub fn cut_link(&self, a: Address, b: Address) -> anyhow::Result<()> {
+        self.append_link_rule("blocked_links", a, b, "")
+    }
+
+    /// Stalls all traffic between `a` and `b`: for `stall` out of every `period` each datagram is
+    /// held an extra `delay`, so the link trickles without ever going silent. Needs a latency profile.
+    pub fn stall_link(
+        &self,
+        a: Address,
+        b: Address,
+        period: std::time::Duration,
+        stall: std::time::Duration,
+        delay: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        let timing = format!(
+            " {} {} {}",
+            period.as_millis(),
+            stall.as_millis(),
+            delay.as_millis()
+        );
+        self.append_link_rule("stalled_links", a, b, &timing)
+    }
+
+    fn append_link_rule(
+        &self,
+        file: &str,
+        a: Address,
+        b: Address,
+        rest: &str,
+    ) -> anyhow::Result<()> {
+        let index = |node: Address| {
+            self.nodes
+                .iter()
+                .position(|n| n.address == node)
+                .ok_or_else(|| anyhow::anyhow!("{node} is not a cluster node"))
+        };
+        let data_dir = self
+            .log_dir
+            .as_ref()
+            .and_then(|d| d.parent())
+            .ok_or_else(|| anyhow::anyhow!("cluster data dir unknown; cannot cut a link"))?;
+        let line = format!("{} {}{rest}\n", index(a)?, index(b)?);
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data_dir.join(file))
+            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()))
+            .with_context(|| format!("writing {file}"))?;
+        tracing::info!(%a, %b, file, rest, "added a link rule between two cluster nodes");
+        Ok(())
+    }
+
     /// Path to `node`'s log file, or `None` when the log directory is not known.
     ///
     /// Node logs are named by position in the cluster, so this maps the address back to its index.
@@ -628,7 +682,11 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     if let Some(yaml) = REQUESTED_LATENCY.get() {
         let path = data_dir.join("latency.yaml");
         std::fs::write(&path, yaml).context("writing latency profile")?;
-        cmd.args(["--latency", &format!("config:{}", path.to_str().unwrap())]);
+        let relay_port = std::env::var("HOPRD_LATENCY_PORT_BASE").unwrap_or_else(|_| "9100".into());
+        cmd.args([
+            "--latency",
+            &format!("config:{}@{relay_port}", path.to_str().unwrap()),
+        ]);
         tracing::info!(?path, "cluster will run with an artificial latency profile");
     }
     // Fixed keys make bring-up idempotent against a chain kept alive across suites: nodes already
@@ -638,6 +696,10 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     }
     cmd.args(["--chain-url", &chain_url]);
     cmd.env("HOPRD_USE_OPENTELEMETRY", "false");
+    // Nodes inherit RUST_LOG; CI keeps the test's filter narrow, which leaves node logs empty.
+    if let Some(filter) = std::env::var_os("HOPRD_NODE_RUST_LOG") {
+        cmd.env("RUST_LOG", filter);
+    }
     for (key, value) in REQUESTED_NODE_ENV
         .get()
         .map(Vec::as_slice)
