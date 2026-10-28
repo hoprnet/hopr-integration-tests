@@ -377,7 +377,12 @@ impl IntegrationEnv {
                             .ok()
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(10_000_000 / SESSION_MTU as u64),
-                        max_surbs_per_sec: 16_000_000 / (8 * SURB_SIZE as u64),
+                        // Experiment knob: HOPRD_SURB_MAX_PER_SEC caps the mint rate (default: the
+                        // 16 Mb/s SURB upstream gnosis_vpn-client provisions).
+                        max_surbs_per_sec: std::env::var("HOPRD_SURB_MAX_PER_SEC")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(16_000_000 / (8 * SURB_SIZE as u64)),
                         // Everything else stays at the default, because that is what the client
                         // does: `to_surb_balancer_config` in gnosis_vpn-lib sets exactly these two
                         // fields from the same formulas and then `..Default::default()`.
@@ -428,11 +433,13 @@ impl IntegrationEnv {
         forward_hops: usize,
         return_hops: usize,
     ) -> anyhow::Result<(HoprSession, Address)> {
+        // Only the *return* path needs a relay: the share encryption key derives from the first
+        // return relayer's acknowledgement. A direct forward path carries no share and needs none.
         anyhow::ensure!(
-            forward_hops >= 1 && return_hops >= 1,
-            "PIX needs at least one relay on each path (got {forward_hops} forward, \
-             {return_hops} return): the share encryption key derives from the first relayer's \
-             acknowledgement, so a zero-hop path is refused"
+            return_hops >= 1,
+            "PIX needs at least one relay on the return path (got {forward_hops} forward, \
+             {return_hops} return): the share encryption key derives from the first return \
+             relayer's acknowledgement, so a zero-hop return path is refused"
         );
         self.open_pix_session_with(
             forward_hops,
@@ -469,11 +476,13 @@ impl IntegrationEnv {
         surb_management: SurbBalancerConfig,
         target: SessionTarget,
     ) -> anyhow::Result<(HoprSession, Address)> {
+        // Only the *return* path needs a relay: the share encryption key derives from the first
+        // return relayer's acknowledgement. A direct forward path carries no share and needs none.
         anyhow::ensure!(
-            forward_hops >= 1 && return_hops >= 1,
-            "PIX needs at least one relay on each path (got {forward_hops} forward, \
-             {return_hops} return): the share encryption key derives from the first relayer's \
-             acknowledgement, so a zero-hop path is refused"
+            return_hops >= 1,
+            "PIX needs at least one relay on the return path (got {forward_hops} forward, \
+             {return_hops} return): the share encryption key derives from the first return \
+             relayer's acknowledgement, so a zero-hop return path is refused"
         );
         let dest = self.dest_for(forward_hops)?;
         let base = HoprSessionClientConfig {
