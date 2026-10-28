@@ -675,6 +675,7 @@ pub async fn pump_halves(
     let mut scan_at = 0usize;
     let mut mine = 0usize;
     let mut foreign = 0usize;
+    let mut foreign_window: (Option<f64>, f64) = (None, 0.0);
     // Records belonging to this phase, in arrival order, so integrity is checked against what
     // this phase actually sent rather than against a stream carrying another phase's backlog.
     let mut mine_buf: Vec<u8> = Vec::new();
@@ -744,6 +745,7 @@ pub async fn pump_halves(
                     let attributed = match opts.phase {
                         Some(phase) => {
                             let before = mine;
+                            let foreign_before = foreign;
                             scan_at = scan_records(
                                 &received,
                                 scan_at,
@@ -754,6 +756,13 @@ pub async fn pump_halves(
                             );
                             if mine > before {
                                 last_mine_at = last_at;
+                            }
+                            if foreign > foreign_before {
+                                let at = last_at
+                                    .saturating_duration_since(pump_started)
+                                    .as_secs_f64();
+                                foreign_window.0.get_or_insert(at);
+                                foreign_window.1 = at;
                             }
                             mine * RECORD_SIZE
                         }
@@ -808,6 +817,10 @@ pub async fn pump_halves(
         Some(_) => mine_buf.len() == total_bytes && sha256_digest(&mine_buf) == expected,
         None => received_bytes == total_bytes && sha256_digest(&received) == expected,
     };
+
+    if let (Some(first), last) = foreign_window {
+        tracing::info!("{label}: foreign records arrived between +{first:.2}s and +{last:.2}s");
+    }
 
     let transfer = Transfer {
         outcome,
