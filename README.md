@@ -20,16 +20,17 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 
 ## Test binaries
 
-| Binary (`integration/tests/`) | What it checks                                                    | In CI   | Local                       |
-| ----------------------------- | ----------------------------------------------------------------- | ------- | --------------------------- |
-| `integration.rs`              | 0-hop and 1-hop UDP loopback: at least 99% arrival, no corruption | yes     | `just integration-binchain` |
-| `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved    | yes     | `just exit-origination`     |
-| `pix.rs`                      | PIX settlement with `edgli` as the paying entry                   | v5 only | `LINE=v5 just pix`          |
-| `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)          | v5 only | `LINE=v5 just pix-shapes`   |
-| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies      | v4 only | `just return-path`          |
-| `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line       | no      | see `run.sh`                |
-| `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`) | no      | `just rotsee`               |
-| `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result            | no      | `just profile`              |
+| Binary (`integration/tests/`) | What it checks                                                    | In CI   | Local                         |
+| ----------------------------- | ----------------------------------------------------------------- | ------- | ----------------------------- |
+| `integration.rs`              | 0-hop and 1-hop UDP loopback: at least 99% arrival, no corruption | yes     | `just integration-binchain`   |
+| `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved    | yes     | `just exit-origination`       |
+| `pix.rs`                      | PIX settlement with `edgli` as the paying entry                   | v5 only | `LINE=v5 just pix`            |
+| `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)          | v5 only | `LINE=v5 just pix-shapes`     |
+| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies      | v4 only | `just return-path`            |
+| `pix_relay_loss.rs`           | a PIX cycle survives half its return relays dying, and is paid    | no      | `LINE=v5 just pix-relay-loss` |
+| `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line       | no      | see `run.sh`                  |
+| `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`) | no      | `just rotsee`                 |
+| `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result            | no      | `just profile`                |
 
 CI runs 9 scenarios on v4 (6 of them `return_path`) and 11 on v5. Suites share one chain per
 `run.sh` invocation, warm with frozen identities after the first. `return_path` runs last on v4,
