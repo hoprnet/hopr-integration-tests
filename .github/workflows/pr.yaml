@@ -209,7 +209,8 @@ jobs:
           LINE: ${{ matrix.line }}
           GH_TOKEN: ${{ github.token }}
         run: nix develop github:hoprnet/hoprnet --command bash -euo pipefail scripts/integration/lib.sh pin_line_deps
-      # 67 tests on v4, 69 on v5 — the extra two are the src/pix.rs Prometheus parser.
+      # 101 tests on v4, 112 on v5 — the extra eleven are the v5-gated ones: the src/pix.rs
+      # Prometheus parser (2) and the src/relay_loss.rs profile arithmetic (9).
       - name: Unit tests
         run: |
           nix develop github:hoprnet/hoprnet --command bash -c '
