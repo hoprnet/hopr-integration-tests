@@ -88,7 +88,7 @@ Without this setting, the cluster lives in a temporary directory that is removed
 
 ### Logs of a run
 
-With `HOPR_LOG_DIR` set, `run-binchain.sh` (`just integration-binchain`, `just integration-trace`)
+With `HOPR_LOG_DIR` set, `run-binchain.sh` (e.g. `just integration-binchain`, `just integration-trace`)
 gives each run its own folder `run-<time>-XXXX` under it, kept on success, failure and Ctrl-C:
 
 | Path                  | Content                                                                   |
