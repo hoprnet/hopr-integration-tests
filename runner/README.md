@@ -303,8 +303,8 @@ gate merges into those branches — the `merge_group` condition in their `pr.yam
 gates can never fire for a release branch, and only their `run-integration` label
 path works on demand.
 
-The nightly `schedule` here fills that hole, and runs three jobs one after another:
-v4 (every suite), v5 `pr` tier and v5 `nightly` tier, so a night covers every v5 suite.
+The nightly `schedule` here fills that hole, and runs two jobs one after another: v4 (every
+suite) and the v5 `nightly` tier. The v5 `pr` tier is left out: every gate already runs it.
 On v4 it falls through to `run.sh`'s defaults, which are exactly the v4 lines:
 
 | Project     | Nightly ref                   |

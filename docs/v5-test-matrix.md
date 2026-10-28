@@ -46,7 +46,7 @@ Not in v5 CI: upload_survival, rotsee, profiling.
 
 | Set (test time, build excluded)                | Before                   | After                    |
 | ---------------------------------------------- | ------------------------ | ------------------------ |
-| v5 gate (PR, merge queue, upstream dispatches) | 75m (~110m with #82/#83) | **pr: ~27m**             |
+| v5 gate (PR, merge queue, upstream dispatches) | 75m (~110m with #82/#83) | **pr: ~29m**             |
 | v5 nightly                                     | –                        | ~41m, ~100m with #82/#83 |
 
 ## Features
@@ -124,8 +124,8 @@ S = strict assertion, w = exercised but weakly or not asserted.
 | `nightly` | `schedule`, or a dispatch with `tier: nightly`                            | exit_origination, the other four pix_shapes; return_path and pix_relay_loss once #82/#83 land |
 
 - `run.sh` picks the suites from `TIER`. v4 ignores it and runs everything, as before.
-- The schedule runs v4, v5 `pr` and v5 `nightly` as three jobs one after another, so a night covers
-  every suite and each job stays under the 150-minute timeout.
+- The schedule runs v4 and v5 `nightly` as two jobs one after another; v5 `pr` is left out because
+  every gate (merge queue, upstream dispatches, labelled PRs) already runs it.
 - The pass marker's fingerprint carries the tier, so a merge gate never reuses a nightly green.
 
 ## Measured locally

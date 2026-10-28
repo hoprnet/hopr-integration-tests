@@ -136,8 +136,8 @@ jobs:
       pull-requests: read
       actions: read
     # Both lines for the triggers that gate this repo, one dispatched line and tier otherwise; the
-    # nightly adds the v5 nightly tier, so a night covers every suite. `fail-fast: false` so a v5
-    # break still reports the v4 verdict.
+    # nightly runs v4 and the v5 nightly tier (the v5 pr tier already runs on every gate).
+    # `fail-fast: false` so a v5 break still reports the v4 verdict.
     strategy:
       fail-fast: false
       # One line at a time. The box hosts several runner instances sharing these labels, so
@@ -146,8 +146,8 @@ jobs:
       max-parallel: 1
       matrix:
         include: >-
-          ${{ fromJSON(github.event_name == 'schedule' && '[{"line":"v4","tier":"pr"},{"line":"v5","tier":"pr"},{"line":"v5","tier":"nightly"}]' || ((github.event_name == 'merge_group' || github.event_name == 'pull_request') && '[{"line":"v4","tier":"pr"},{"line":"v5","tier":"pr"}]' || format('[{{"line":"{0}","tier":"{1}"}}]', inputs.line || github.event.client_payload.line || 'v4', inputs.tier || github.event.client_payload.tier || 'pr'))) }}
-    # Per job: ~40 min of tests on v4, ~27 on v5 pr and ~41 on v5 nightly (one shared chain each),
+          ${{ fromJSON(github.event_name == 'schedule' && '[{"line":"v4","tier":"pr"},{"line":"v5","tier":"nightly"}]' || ((github.event_name == 'merge_group' || github.event_name == 'pull_request') && '[{"line":"v4","tier":"pr"},{"line":"v5","tier":"pr"}]' || format('[{{"line":"{0}","tier":"{1}"}}]', inputs.line || github.event.client_payload.line || 'v4', inputs.tier || github.event.client_payload.tier || 'pr'))) }}
+    # Per job: ~40 min of tests on v4, ~29 on v5 pr and ~44 on v5 nightly (one shared chain each),
     # plus 15-20 min of build on a Cachix miss.
     timeout-minutes: 150
     env:

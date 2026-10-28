@@ -115,7 +115,7 @@ the same way `run.sh` does (see below).
 - upstream gates (hoprd, edge-client, blokli) through dispatch, on the line they request;
 - this repo's merge queue, and PRs labelled `run-integration`, on both lines;
 - a nightly run at 02:00 UTC: v4 (the only automatic v4 coverage, since merge queues only work on
-  default branches), then both v5 tiers;
+  default branches), then the v5 `nightly` tier;
 - manual runs: `gh workflow run integration.yaml -f line=v5 -f tier=nightly -f project=hoprd -f rev=<sha>`.
 
 No versions are stored. The project that triggered the run supplies its rev, and every other ref
