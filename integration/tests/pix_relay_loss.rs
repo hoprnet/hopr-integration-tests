@@ -590,6 +590,7 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
         gate = %gate.summary(),
         trace = %trace.summary(),
         closures = ?gate.closure_reasons(),
+        ring_share_evictions = gate.ring_share_evictions(),
         "relay-loss scenario finished"
     );
 
@@ -607,6 +608,20 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
         relay_loss::additional_shares(),
         relay_loss::tolerated_burst(),
         relay_loss::expected_burst(relay_loss::surb_buffer_target()),
+    );
+
+    // A share-bearing SURB the Exit's store dropped for want of capacity is a share lost for good,
+    // whatever the outage did: the store gives up share-less SURBs first, so a `ring_share`
+    // eviction means it held nothing else. The cycle can sweep with a few of those, which is why a
+    // sweep alone does not rule them out. A generation wipe is *not* an eviction and is not counted
+    // here (the buffer is cleared, not overflowed); hoprnet#8576's `hopr_surb_generation_bumps_total`
+    // is the signal for that once the lock carries it.
+    assert_eq!(
+        0,
+        gate.ring_share_evictions(),
+        "the Exit's SURB store evicted share-bearing SURBs for capacity during the scenario, each \
+         a PIX share lost for good: {}",
+        gate.summary()
     );
 
     assert_eq!(
