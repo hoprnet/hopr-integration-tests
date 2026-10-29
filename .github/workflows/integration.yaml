@@ -54,6 +54,10 @@ on:
         description: "Run the tests from this open hopr-integration-tests PR instead of main (companion of a breaking upstream PR)"
         required: false
         default: ""
+      status_context:
+        description: "Post the verdict as this commit status onto `rev` in `project`; empty = post nothing"
+        required: false
+        default: ""
   pull_request:
     # `opened` too: without it a new unlabelled PR never reports the required gate below.
     types: [opened, labeled, synchronize, reopened]
@@ -467,4 +471,65 @@ jobs:
             exit 0
           fi
           echo "::error::integration result is '${RESULT}'"
+          exit 1
+  # Posts the verdict onto the caller's SHA so it need not poll us past the 1h App token cap.
+  # A sibling of `gate`, never a step in it: a cross-repo token error must not fail our own check.
+  report:
+    name: Report verdict to caller
+    needs: [companions, integration]
+    if: always() && (inputs.status_context || github.event.client_payload.status_context) != ''
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      PROJECT: ${{ inputs.project || github.event.client_payload.project }}
+      REV: ${{ inputs.rev || github.event.client_payload.rev }}
+      STATUS_CONTEXT: ${{ inputs.status_context || github.event.client_payload.status_context }}
+    steps:
+      - name: Validate the callback target
+        run: |
+          set -euo pipefail
+          case "${PROJECT}" in
+          hoprd | edge-client | blokli) ;;
+          *) echo "::error::refusing to report to project '${PROJECT}'" >&2; exit 1 ;;
+          esac
+          if ! [[ ${REV} =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::rev '${REV}' is not a full commit SHA" >&2
+            exit 1
+          fi
+      - name: Generate GitHub App token
+        id: bot-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.GH_APP_HOPRNET_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_HOPRNET_BOT_PRIVATE_KEY }}
+          owner: hoprnet
+          repositories: ${{ env.PROJECT }}
+          permission-statuses: write
+      - name: Post commit status
+        env:
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          RESULT: ${{ needs.integration.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          case "${RESULT}" in
+          success) state=success ;;
+          failure) state=failure ;;
+          *) state=error ;;
+          esac
+          rc=0
+          out=$(gh api "repos/hoprnet/${PROJECT}/statuses/${REV}" \
+                  -f state="${state}" -f context="${STATUS_CONTEXT}" -f target_url="${RUN_URL}" \
+                  -f description="hopr-integration-tests: ${RESULT}" 2>&1) || rc=$?
+          if [ "${rc}" -eq 0 ]; then
+            echo "Posted \`${STATUS_CONTEXT}\` = ${state} on hoprnet/${PROJECT}@\`${REV}\`" >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          # A gh-readonly-queue ref vanishes once its entry merges or is ejected.
+          if [[ ${out} == *"No commit found for SHA"* ]]; then
+            echo "::warning::hoprnet/${PROJECT}@${REV} no longer exists; verdict ${state} not posted"
+            exit 0
+          fi
+          echo "::error::posting the status failed: ${out}" >&2
           exit 1
