@@ -932,6 +932,255 @@ pub async fn pump_continuous(
     Ok(())
 }
 
+/// Time series of a sustained transfer, one entry per [`pump_sustained`] sampling interval.
+///
+/// The rows are `(seconds since the run started, cumulative bytes)`: the writer's every-progress
+/// count and the reader's echo count, taken at the **same** instants. Per-window throughput is the
+/// difference between consecutive rows, which is what turns "fast at the start, low ever after"
+/// into a number a test can assert on.
+#[derive(Debug, Clone, Default)]
+pub struct Sustained {
+    /// Writer samples: `(t, cumulative bytes handed to the session)`. A stalled wire blocks the
+    /// writer, so the derivative is the *send-side* rate the connection actually sustained.
+    pub write_samples: Vec<(f64, u64)>,
+    /// Reader samples: `(t, cumulative bytes echoed back)`.
+    pub read_samples: Vec<(f64, u64)>,
+    /// Bytes handed to the session over the run.
+    pub written: u64,
+    /// Bytes read back (echo).
+    pub received: u64,
+    /// The pacing delay per write, if any.
+    pub pace: Option<Duration>,
+    /// Seconds neither direction moved, up to the moment the run ended.
+    ///
+    /// The whole point of the scenario: over a paced stream that is being echoed, a healthy
+    /// connection keeps both feet moving; a window pinned to its floor makes the writer block and
+    /// the echo stop, and this grows without bound.
+    pub stall_since_last_progress: f64,
+}
+
+impl Sustained {
+    /// Bytes per second achieved in the window ending at `at`, per direction.
+    ///
+    /// `None` before the first sample or after the last, so a caller cannot read a rate off an
+    /// interval it never measured.
+    fn rate_in_window(samples: &[(f64, u64)], before: f64, at: f64) -> Option<f64> {
+        let end = samples
+            .iter()
+            .rev()
+            .find(|&&(t, _)| t <= at + f64::EPSILON)?;
+        let start = samples
+            .iter()
+            .rev()
+            .find(|&&(t, _)| t <= before + f64::EPSILON);
+        // The earliest sample has no predecessor: the first window is measured from 0.
+        let (t0, b0) = start.map_or((0.0, 0), |&(t, b)| (t, b));
+        let dt = end.0 - t0;
+        (dt > 0.0).then(|| end.1.saturating_sub(b0) as f64 / dt)
+    }
+
+    /// Send-side rate over `[at - window, at]`, in bytes/s.
+    pub fn write_rate_at(&self, at: Duration, window: Duration) -> Option<f64> {
+        Self::rate_in_window(
+            &self.write_samples,
+            at.as_secs_f64() - window.as_secs_f64(),
+            at.as_secs_f64(),
+        )
+    }
+
+    /// Echo rate over `[at - window, at]`, in bytes/s.
+    pub fn read_rate_at(&self, at: Duration, window: Duration) -> Option<f64> {
+        Self::rate_in_window(
+            &self.read_samples,
+            at.as_secs_f64() - window.as_secs_f64(),
+            at.as_secs_f64(),
+        )
+    }
+
+    /// Highest send-side rate over any single window in the run.
+    pub fn peak_write_rate(&self, window: Duration) -> Option<f64> {
+        self.write_samples
+            .iter()
+            .filter_map(|&(t, _)| self.write_rate_at(Duration::from_secs_f64(t), window))
+            .fold(None, |acc: Option<f64>, r| {
+                Some(acc.map_or(r, |a| a.max(r)))
+            })
+    }
+
+    /// Highest echo rate over any single window in the run.
+    pub fn peak_read_rate(&self, window: Duration) -> Option<f64> {
+        self.read_samples
+            .iter()
+            .filter_map(|&(t, _)| self.read_rate_at(Duration::from_secs_f64(t), window))
+            .fold(None, |acc: Option<f64>, r| {
+                Some(acc.map_or(r, |a| a.max(r)))
+            })
+    }
+}
+
+/// How long neither direction moved, measured back from the end of the run.
+///
+/// `at` is the run's own elapsed time in seconds and `last_progress_ms` is the last movement stamp,
+/// which is kept on that same clock — so the difference *is* the trailing silence. Clamped at zero,
+/// because a progress mark can land marginally after the sample that closes the run.
+///
+/// Pure so the one number the "wedged connection" assertion rests on can be exercised without a
+/// session or a cluster. This is the same reasoning as [`stop_reason`]: getting the clock wrong here
+/// reads as a *healthy* run — the metric collapses to zero and the assertion above it stops
+/// asserting anything — so it needs a test that fails when the clock is wrong, not just when the
+/// session is.
+fn trailing_stall_secs(at: f64, last_progress_ms: i64) -> f64 {
+    (at * 1000.0 - last_progress_ms as f64).max(0.0) / 1000.0
+}
+
+/// Drive a session for `duration`, writing a paced, tagged stream and reading the echo back while
+/// sampling both directions on `sample_every`.
+///
+/// Unlike [`pump_halves`] this does not have a payload to exhaust: it runs for wall-clock time and
+/// reports how the rate moved. That is the shape a "throughput collapsed and did not come back"
+/// finding needs, since a finite payload only ever shows the average.
+///
+/// `pace` is the per-write delay, so `pace_for_rate(target)` offers `target` MB/s. The writer
+/// blocks on the session when the wire is slower than the pace, which is why the writer's own
+/// progress is the send-side measurement.
+///
+/// Borrows the session halves, so the same session can be measured more than once. Writer and
+/// reader are joined in this task rather than spawned, so the borrowed halves never leave the
+/// caller's scope.
+pub async fn pump_sustained(
+    rx: &mut tokio::io::ReadHalf<HoprSession>,
+    tx: &mut tokio::io::WriteHalf<HoprSession>,
+    duration: Duration,
+    pace: Option<Duration>,
+    sample_every: Duration,
+    chunk: usize,
+    label: &str,
+) -> anyhow::Result<Sustained> {
+    use std::sync::atomic::{AtomicI64, AtomicU64};
+
+    let chunk = chunk.max(1);
+    let started = std::time::Instant::now();
+    let deadline = started + duration;
+
+    let written = std::sync::Arc::new(AtomicU64::new(0));
+    let received = std::sync::Arc::new(AtomicU64::new(0));
+    // Milliseconds since the run started at which either direction last moved. Its distance from
+    // the end of the run is the stall: a wedged connection stops updating it.
+    let last_progress_ms = std::sync::Arc::new(AtomicI64::new(0));
+
+    let mark = |stamp: &AtomicI64| {
+        stamp.store(
+            started.elapsed().as_millis() as i64,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+    };
+
+    let writer = async {
+        let tx = tx;
+        let mut block = tagged_payload(0, chunk);
+        while std::time::Instant::now() < deadline {
+            let record = written.load(std::sync::atomic::Ordering::Relaxed) / RECORD_SIZE as u64;
+            for (i, rec) in block.chunks_exact_mut(RECORD_SIZE).enumerate() {
+                rec[8..16].copy_from_slice(&(record + i as u64).to_le_bytes());
+            }
+            if tx.write_all(&block).await.is_err() {
+                break;
+            }
+            written.fetch_add(chunk as u64, std::sync::atomic::Ordering::Relaxed);
+            mark(&last_progress_ms);
+            if let Some(d) = pace {
+                tokio::time::sleep(d).await;
+            }
+        }
+        let _ = tx.flush().await;
+    };
+
+    let mut write_samples: Vec<(f64, u64)> = Vec::new();
+    let mut read_samples: Vec<(f64, u64)> = Vec::new();
+    let mut buf = vec![0u8; IO_CHUNK];
+    let mut read_total: u64 = 0;
+    let mut next_sample = started + sample_every;
+
+    let reader = async {
+        loop {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let budget = next_sample
+                .saturating_duration_since(now)
+                .max(Duration::from_millis(1));
+            match tokio::time::timeout(budget, rx.read(&mut buf)).await {
+                Ok(Ok(0)) => {
+                    tracing::warn!("{label}: the counterparty closed the session mid-run");
+                    break;
+                }
+                Ok(Ok(just_read)) => {
+                    read_total += just_read as u64;
+                    received.fetch_add(just_read as u64, std::sync::atomic::Ordering::Relaxed);
+                    mark(&last_progress_ms);
+                }
+                Ok(Err(e)) => {
+                    // Not fatal: the stall measurement already treats "the echo stopped coming"
+                    // as the fault it is, and bailing here would hide the rest of the series.
+                    tracing::warn!("{label}: read error: {e}");
+                    break;
+                }
+                Err(_) => {
+                    // Sampled when the tick elapses, not on arrival, so a silent window still
+                    // records its own (zero-delta) row and the stall stays visible in the series.
+                }
+            }
+            if std::time::Instant::now() >= next_sample {
+                write_samples.push((
+                    next_sample.saturating_duration_since(started).as_secs_f64(),
+                    written.load(std::sync::atomic::Ordering::Relaxed),
+                ));
+                read_samples.push((
+                    next_sample.saturating_duration_since(started).as_secs_f64(),
+                    read_total,
+                ));
+                next_sample += sample_every;
+            }
+        }
+    };
+
+    tokio::join!(writer, reader);
+
+    // Final row at the run's end, so the last window is measured to the moment we stopped.
+    let end = std::time::Instant::now();
+    let at = end.saturating_duration_since(started).as_secs_f64();
+    let written_total = written.load(std::sync::atomic::Ordering::Relaxed);
+    write_samples.push((at, written_total));
+    read_samples.push((at, read_total));
+
+    // Anchored on the run's own clock, not on `end`: `end.elapsed()` is the few microseconds since
+    // the stamp above, so measuring against it would pin the stall to 0 and make the assertion
+    // that reads it vacuous. `last_progress_ms` is `started.elapsed()`, so the difference is the
+    // time since the last byte moved in either direction.
+    let stall = trailing_stall_secs(
+        at,
+        last_progress_ms.load(std::sync::atomic::Ordering::Relaxed),
+    );
+
+    let result = Sustained {
+        written: written_total,
+        received: read_total,
+        pace,
+        stall_since_last_progress: stall,
+        write_samples,
+        read_samples,
+    };
+
+    tracing::info!(
+        "{label}: sustained {at:.1}s, wrote {:.2} MB, echoed {:.2} MB, stall at end {stall:.2}s",
+        result.written as f64 / 1e6,
+        result.received as f64 / 1e6,
+    );
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1553,5 +1802,113 @@ mod tests {
             Shape::Constant,
             PumpOpts::default().shape.unwrap_or_default()
         );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Sustained: the rate series a collapse assertion reads, and the stall beside it.
+    // -------------------------------------------------------------------------------------
+
+    /// A run whose send side held a rate to the end must not read as collapsed.
+    ///
+    /// The vacuity guard for the collapse assertion in `tests/quic_congestion.rs`: if the window
+    /// arithmetic were wrong in the other direction — reading every last window as slow — the
+    /// scenario would fail on a perfectly healthy connection and the signal would be worthless.
+    #[test]
+    fn a_sustained_rate_should_read_as_holding_to_the_end() {
+        let window = Duration::from_secs(5);
+        // 1 MB every 2 s from the start to t=60: 500 kB/s throughout.
+        let samples: Vec<(f64, u64)> = (1..=30)
+            .map(|i| (i as f64 * 2.0, i as u64 * 1_000_000))
+            .collect();
+        let run = Sustained {
+            write_samples: samples.clone(),
+            read_samples: samples,
+            ..Default::default()
+        };
+
+        let peak = run.peak_write_rate(window).expect("a rate is measurable");
+        let tail = run
+            .write_rate_at(Duration::from_secs(60), window)
+            .expect("tail window");
+        assert_eq!(
+            peak, tail,
+            "a rate held to the end must not read as a collapse"
+        );
+        assert!(
+            tail >= peak * 0.9,
+            "the tail window must be within 10% of the peak, got {tail} against {peak}"
+        );
+    }
+
+    /// A stream that bursts and then stops must read as a collapse in the tail windows.
+    ///
+    /// This is the shape the scenario is looking for — fast early, low ever after — so the same
+    /// arithmetic has to move in *this* direction too, or the test could never fail.
+    #[test]
+    fn a_burst_then_a_floor_should_read_as_a_collapse() {
+        let window = Duration::from_secs(5);
+        // 5 MB/s for the first 10 s, then ~50 kB/s for the rest: two orders of magnitude down.
+        let mut samples = vec![(5.0, 25_000_000u64), (10.0, 50_000_000)];
+        let mut bytes = 50_000_000u64;
+        for i in 3..=12 {
+            bytes += 250_000;
+            samples.push((i as f64 * 5.0, bytes));
+        }
+
+        let run = Sustained {
+            write_samples: samples,
+            ..Default::default()
+        };
+
+        let peak = run.peak_write_rate(window).expect("a rate is measurable");
+        let tail = run
+            .write_rate_at(Duration::from_secs(60), window)
+            .expect("tail window");
+        assert!(
+            tail < peak * 0.35,
+            "a collapse to 50 kB/s against a 5 MB/s peak must fall below the 35% floor, got {tail} \
+             against {peak}"
+        );
+    }
+
+    /// A window whose end falls past every sampled row is still measured, not skipped.
+    ///
+    /// The scenario measures the window ending at `RUN_DURATION`, and the loop samples on its own
+    /// tick, so the closing row can land marginally before it. Returning `None` there would silently
+    /// drop the tail assertion — the measurement could not fail and so could not catch anything.
+    #[test]
+    fn a_window_past_the_last_sampled_row_should_still_measure() {
+        let run = Sustained {
+            write_samples: vec![(5.0, 10_000_000), (10.0, 20_000_000), (12.0, 24_000_000)],
+            ..Default::default()
+        };
+
+        // Ending at t=15, past every row: the rate is taken over the 2 s the rows do cover, which
+        // is 4 MB.
+        let rate = run
+            .write_rate_at(Duration::from_secs(15), Duration::from_secs(5))
+            .expect("a window past the last row must still measure");
+        assert!((rate - 2_000_000.0).abs() < 1.0, "got {rate}");
+    }
+
+    /// The stall must be the silence since the last movement, not the microseconds since the end.
+    ///
+    /// The bug this pins: the value was computed against an `Instant` stamped a few lines earlier,
+    /// so `elapsed()` was ~0 and every run reported a 0 s stall — the "wedged connection" assertion
+    /// in `tests/quic_congestion.rs` passed unconditionally. A healthy run and a dead one have to
+    /// come out different.
+    #[test]
+    fn the_stall_should_measure_silence_and_not_the_instant_it_was_read() {
+        // 120 s run whose last movement was at 118 s: two seconds of silence.
+        assert!((trailing_stall_secs(120.0, 118_000) - 2.0).abs() < 1e-9);
+
+        // A run that died at t=30 and was sampled at t=120: 90 s of silence, not 0.
+        assert!(
+            (trailing_stall_secs(120.0, 30_000) - 90.0).abs() < 1e-9,
+            "a wedged connection must report its whole silence"
+        );
+
+        // A progress mark landing marginally after the closing sample clamps to 0, never negative.
+        assert_eq!(0.0, trailing_stall_secs(120.0, 120_001));
     }
 }
