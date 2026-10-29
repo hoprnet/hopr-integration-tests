@@ -43,19 +43,24 @@
 //! wrong instrument here anyway, because this loss is not a rate: it is one burst.
 //!
 //! What matters for a burst is that emission is **round-robin over
-//! [`hopr_protocol_pix::SHARE_EMISSION_WINDOW`] = 256 polynomials advancing in lockstep**. A
-//! contiguous run of `L` lost shares is therefore spread across 256 polynomials, costing each of
-//! them `L / 256`, and each can afford to lose exactly `surplus`:
+//! [`hopr_protocol_pix::SHARE_EMISSION_WINDOW`] = 512 polynomials advancing in lockstep**. A
+//! contiguous run of `L` lost shares is therefore spread across 512 polynomials, costing each of
+//! them `L / 512`, and each can afford to lose exactly `surplus`:
 //!
 //! ```text
-//! tolerated burst  =  256 · surplus
+//! tolerated burst  =  512 · surplus
 //! ```
 //!
 //! That is the whole design rule, and [`burst_margin`] is it stated as a ratio:
 //!
 //! ```text
-//! 256 · surplus  ≥  margin · (B + ½ · R_e · T_d)
+//! 512 · surplus  ≥  margin · (B + ½ · R_e · T_d)
 //! ```
+//!
+//! The window is 512 since hoprnet's window PR (hoprnet#8585); it was 256 before, and the
+//! measurements in `docs/pix-relay-loss.md` up to 2026-10-28 were taken at 256. [`SHARE_EMISSION_WINDOW`]
+//! is restated here, not read, so a hopr-lib that still has 256 makes every tolerance in this
+//! profile twice what a cycle really survives.
 //!
 //! # The second parameter, which is not a PIX one
 //!
@@ -85,7 +90,7 @@
 //!
 //! [`additional_shares`] reads `HOPRD_PIX_ADDITIONAL_SHARES`, so the control run — the shipped
 //! surplus, which this profile predicts is too thin — needs no recompile. At the default
-//! dimensions the accepted quota window is sized to hold the whole `8..=64` sweep, so the Exit's
+//! dimensions the accepted quota window is sized to hold the whole `4..=64` sweep, so the Exit's
 //! admission policy does not move between runs and a failure can never be an admission failure
 //! wearing a disguise. `HOPRD_PIX_POLYS`, `HOPRD_PIX_THRESHOLD` and `HOPRD_PIX_RATE` move the whole
 //! geometry to production's (4096 polynomials, threshold 32), and `HOPRD_PIX_SURB_BUFFER` the
@@ -99,8 +104,8 @@ use edgli::hopr_lib::exports::transport::{SESSION_MTU, SURB_SIZE};
 
 /// Polynomials per SSA.
 ///
-/// A whole number of emission windows (512 = 2 x 256), so every block the generator walks is
-/// full-width and a burst is spread over the full 256. A count that is not a multiple narrows the
+/// A whole number of emission windows (512 = exactly one of 512), so every block the generator walks
+/// is full-width and a burst is spread over the full 512. A count that is not a multiple narrows the
 /// last window, which concentrates the same burst onto fewer polynomials — the one geometry choice
 /// here that changes the tolerance rather than merely the duration.
 pub const PIX_POLYS: usize = 512;
@@ -112,8 +117,9 @@ pub const PIX_SHARES: usize = 64;
 /// override.
 ///
 /// Twice what upstream derives when `additional_shares` is left unset, and chosen by the
-/// inequality in the module docs rather than by doubling: `256 x 32` = 8192 against an expected
-/// burst of about 3000 at this profile's buffer and rate, i.e. [`burst_margin`] ≈ 2.7.
+/// inequality in the module docs rather than by doubling: `512 x 32` = 16 384 against an expected
+/// burst of about 3000 at this profile's buffer and rate, i.e. [`burst_margin`] ≈ 5.5. (At the
+/// window of 256 it was 8192 and ≈ 2.7, which is what 32 was chosen for.)
 ///
 /// Not larger, for two reasons that both cost money. The surplus is billed on purchase — it rides
 /// in the negotiated `PixParams` and the per-SSA quota counts it — so every extra share is paid
@@ -121,12 +127,16 @@ pub const PIX_SHARES: usize = 64;
 /// inside one peer deferral bucket (`MAX_DEFERRED_ACKS_PER_POLYNOMIAL`, 128), which 96 does.
 pub const DEFAULT_ADDITIONAL_SHARES: usize = 32;
 
-/// Smallest surplus the sweep accepts.
+/// Smallest surplus the sweep accepts, and the negative control.
 ///
 /// Below this the quota leaves the window [`QUOTA_RANGE_MIN`] opens, and the Session would be
 /// refused with `UnacceptablePixParams` before a byte moved — a failure that looks nothing like
 /// the one under test.
-pub const MIN_ADDITIONAL_SHARES: usize = 8;
+///
+/// Four because that is the surplus the emission window of 512 leaves as a negative control:
+/// `512 x 4` = 2048 is less than the 2400 SURBs the Exit's buffer holds, which a wipe discards in
+/// one burst, while `512 x 8` = 4096 now survives it. At the window of 256 the control was 8.
+pub const MIN_ADDITIONAL_SHARES: usize = 4;
 
 /// Largest surplus of the default-dimension sweep: the threshold.
 ///
@@ -138,11 +148,16 @@ pub const MAX_ADDITIONAL_SHARES: usize = PIX_SHARES;
 
 /// Polynomials the generator advances in lockstep, from `hopr-protocol-pix`.
 ///
+/// Hard-coded to 512 by decision, and it follows hoprnet's window PR (hoprnet#8585, which widens
+/// `SHARE_EMISSION_WINDOW` from 256 to 512). Against a hopr-lib that is still at 256 the suite's
+/// tolerance arithmetic overstates what a cycle survives, by a factor of two: every figure in
+/// this profile, and the surplus-4 negative control among them, is stated for 512.
+///
 /// Restated rather than imported because the constant is not re-exported through edgli's
 /// dependency surface, and [`the_window_matches_upstream`](tests::the_window_matches_upstream)
 /// documents how to re-check it. It is the whole reason a burst is survivable at all: it is the
 /// divisor in `tolerated burst = window x surplus`.
-pub const SHARE_EMISSION_WINDOW: u64 = 256;
+pub const SHARE_EMISSION_WINDOW: u64 = 512;
 
 /// Return packets per second the scenario offers, and therefore the Exit's egress rate.
 ///
@@ -301,7 +316,8 @@ pub const DEPLOYED_SURB_BUFFER: u64 = 19_264;
 /// bound by the threshold.
 pub const PRODUCTION_ADDITIONAL_SHARES: u64 = 79;
 
-/// Margin the shipped configuration is expected to fall below, and this profile to clear.
+/// Margin this profile is chosen to clear, and the negative control ([`MIN_ADDITIONAL_SHARES`]) to
+/// fall well below.
 ///
 /// Stated so the log line can say which side of it a run sits on without the reader doing the
 /// arithmetic. Two rather than one because the burst is an estimate built on three upstream
@@ -618,13 +634,17 @@ mod tests {
     }
 
     /// The headline claim: the tolerance clears the expected burst by the stated margin, and the
-    /// shipped surplus does not.
+    /// negative control does not.
     ///
     /// This is the one test that would have to change if the recommendation changed, which is why
     /// it names both sides. It asserts the *arithmetic*, not the outcome — whether the arithmetic
     /// predicts the cluster is what `tests/pix_relay_loss.rs` is for.
+    ///
+    /// The control used to be the shipped surplus of 16. At the window of 512 that tolerates 8192
+    /// against a burst of about 3000, a margin of 2.7, which clears the floor: the shipped surplus
+    /// is a positive case now, and the control is the smallest surplus the sweep accepts.
     #[test]
-    fn the_surplus_clears_the_burst_and_the_shipped_one_does_not() {
+    fn the_surplus_clears_the_burst_and_the_negative_control_does_not() {
         if !at_default_surplus() {
             return;
         }
@@ -638,15 +658,31 @@ mod tests {
             burst_margin(),
         );
 
-        // The shipped surplus, evaluated by hand against the same burst. `default_surplus_for`
-        // derives 16 at threshold 64.
-        let shipped_tolerance = SHARE_EMISSION_WINDOW * 16;
+        // The negative control, evaluated by hand against the same burst. It is below the floor, and
+        // below one: the Exit's buffer alone, which a wipe discards in one burst, outruns it.
+        let control_tolerance = SHARE_EMISSION_WINDOW * MIN_ADDITIONAL_SHARES as u64;
         assert!(
-            (shipped_tolerance as f64 / burst as f64) < BURST_MARGIN_FLOOR,
-            "the shipped surplus of 16 tolerates {shipped_tolerance} against a burst of {burst}, \
-             which already clears the floor — the premise of this profile is gone and the control \
-             run has nothing to show"
+            (control_tolerance as f64 / burst as f64) < 1.0,
+            "the control surplus of {MIN_ADDITIONAL_SHARES} tolerates {control_tolerance} against a burst of \
+             {burst}, which does not outrun it — the control run has nothing to show"
         );
+        assert!(
+            control_tolerance < surb_buffer_target(),
+            "the control surplus of {MIN_ADDITIONAL_SHARES} tolerates {control_tolerance}, which clears the \
+             {} SURBs a wipe discards from the Exit's buffer alone",
+            surb_buffer_target()
+        );
+
+        // And the old control, the next one up the sweep (8) and the shipped surplus (16), now
+        // survive the wipe: they are positive cases at this window.
+        for surplus in [8u64, 16] {
+            assert!(
+                SHARE_EMISSION_WINDOW * surplus >= surb_buffer_target(),
+                "surplus {surplus} tolerates {} against the {} SURBs a wipe discards",
+                SHARE_EMISSION_WINDOW * surplus,
+                surb_buffer_target()
+            );
+        }
     }
 
     /// Every surplus the sweep admits must land inside the one quota window the Exit is given, or
@@ -714,27 +750,31 @@ mod tests {
         assert_eq!(2048, max_served_without_progress());
     }
 
-    /// **A deployed Exit's whole SURB buffer is covered by production's surplus, by three shares.**
+    /// **A deployed Exit's whole SURB buffer is covered by production's surplus, by forty-one
+    /// shares.**
     ///
-    /// The tolerance is `256 · surplus`. Since hoprnet#8519 lifted the bound on the surplus by the
-    /// threshold, production ships 79 against a threshold of 32, so it tolerates `256 × 79` = 20 224
+    /// The tolerance is `512 · surplus`. Since hoprnet#8519 lifted the bound on the surplus by the
+    /// threshold, production ships 79 against a threshold of 32, so it tolerates `512 × 79` = 40 448
     /// lost shares, and a deployed Exit holds ~19 264 SURBs, all of which a generation advance
-    /// discards. Per polynomial that is 19 264 / 256 = 75.25, so 76 shares against a surplus of 79:
-    /// a margin of **three**.
+    /// discards. Per polynomial that is 19 264 / 512 = 37.6, so 38 shares against a surplus of 79:
+    /// a margin of **forty-one**. (At the window of 256 it was 76 shares and a margin of three, and
+    /// the model's detection term did not fit; the measured margins were 3.8 to 3.9 at 256 and 41.4
+    /// at 512, in `docs/pix-relay-loss.md`.)
     ///
-    /// Three is the whole point, not a comfortable figure. The wipe alone fits; the model's
-    /// detection term does not (`½ · R_e · T_d` at 400 packets/s over the profile's 8 s is another
-    /// 1 600 shares), so the production-dimension run that survived did so because the dead verdict
-    /// landed within a second, not the eight the model budgets for. A margin that thin is why the
-    /// Exit's stock has to be kept near its target rather than let up to its capacity (hoprnet#8576).
+    /// With the model's detection term, `½ · R_e · T_d` at 400 packets/s over the profile's 8 s,
+    /// another 1 600 shares, the burst is 20 864 and still fits: 41 shares per polynomial, a margin of
+    /// thirty-eight. The production-dimension runs at 256 survived because the dead verdict landed
+    /// within a second, not the eight the model budgets for; at 512 they would have survived a verdict
+    /// at the eight too. The Exit's stock still has to be kept near its target rather than let up to
+    /// its capacity (hoprnet#8576).
     ///
     /// Derived, not measured here — a three-node local cluster cannot hold a deployed buffer; the
     /// measured runs are in `docs/pix-relay-loss.md`. Written as a test so the claim is checked
     /// against the same constants the rest of the profile uses and cannot quietly drift away.
     #[test]
-    fn the_deployed_buffer_is_covered_by_the_production_surplus_with_three_shares_to_spare() {
+    fn the_deployed_buffer_is_covered_by_the_production_surplus_with_forty_one_shares_to_spare() {
         let tolerated = SHARE_EMISSION_WINDOW * PRODUCTION_ADDITIONAL_SHARES;
-        assert_eq!(20_224, tolerated);
+        assert_eq!(40_448, tolerated);
         assert!(
             DEPLOYED_SURB_BUFFER <= tolerated,
             "a deployed buffer of {DEPLOYED_SURB_BUFFER} outruns the {tolerated} that surplus \
@@ -742,20 +782,26 @@ mod tests {
         );
 
         let per_polynomial = DEPLOYED_SURB_BUFFER.div_ceil(SHARE_EMISSION_WINDOW);
-        assert_eq!(76, per_polynomial);
+        assert_eq!(38, per_polynomial);
         assert_eq!(
-            3,
+            41,
             PRODUCTION_ADDITIONAL_SHARES - per_polynomial,
             "the margin between the shipped surplus and what a deployed buffer's wipe costs each \
              polynomial is the number the docs quote"
         );
 
-        // The model's own detection term does not fit in the margin, at production's 400 packets/s.
+        // The model's own detection term fits in the margin too, at production's 400 packets/s.
         let detection = 400 * DETECTION_SECS / 2;
         assert!(
-            DEPLOYED_SURB_BUFFER + detection > tolerated,
-            "with the model's {detection}-share detection term the burst no longer exceeds what \
-             production tolerates, so the docs' caveat about detection time can go"
+            DEPLOYED_SURB_BUFFER + detection <= tolerated,
+            "with the model's {detection}-share detection term the burst outruns what production \
+             tolerates, so the docs' caveat about detection time is back"
+        );
+        assert_eq!(
+            38,
+            PRODUCTION_ADDITIONAL_SHARES
+                - (DEPLOYED_SURB_BUFFER + detection).div_ceil(SHARE_EMISSION_WINDOW),
+            "and what it leaves of the surplus"
         );
     }
 
@@ -764,11 +810,12 @@ mod tests {
     ///
     /// `rg 'pub const SHARE_EMISSION_WINDOW' protocols/pix/src/generator.rs` in a hoprnet checkout.
     /// If it moves, [`tolerated_burst`] moves with it and this whole profile has to be re-derived —
-    /// the surplus is sized against the divisor.
+    /// the surplus is sized against the divisor. 512 is hoprnet's window PR (hoprnet#8585); a hopr-lib
+    /// that still says 256 makes the suite's tolerances twice what a cycle survives.
     #[test]
     fn the_window_matches_upstream() {
         assert_eq!(
-            256, SHARE_EMISSION_WINDOW,
+            512, SHARE_EMISSION_WINDOW,
             "hopr-protocol-pix's SHARE_EMISSION_WINDOW is the divisor in `tolerated burst = \
              window x surplus`; re-derive the surplus if it has changed"
         );

@@ -22,12 +22,14 @@
 //!   the ones naming the *surviving* relay that the Entry's re-plan throws away when its generation
 //!   bump makes the Exit clear its whole buffer, plus whatever is spent into the void during the
 //!   ~8 s the silence takes to detect;
-//! * emission is round-robin over 256 polynomials, so a burst of `L` costs each of them `L / 256`,
-//!   and each can afford `surplus`. **A cycle survives a burst of `256 x surplus`.**
+//! * emission is round-robin over 512 polynomials, so a burst of `L` costs each of them `L / 512`,
+//!   and each can afford `surplus`. **A cycle survives a burst of `512 x surplus`.** (The window was
+//!   256 until hoprnet's window PR, hoprnet#8585, and the suite assumes the new one; against a
+//!   hopr-lib still at 256 its tolerances are twice what a cycle survives.)
 //!
 //! So the parameter that decides this is `additional_shares`, and it has to be sized against the
 //! Exit's *SURB buffer depth* rather than against a packet-loss percentage. The profile picks 32
-//! against a buffer of 2400 and a rate of 150/s: 8192 tolerated against ~3000 expected.
+//! against a buffer of 2400 and a rate of 150/s: 16 384 tolerated against ~3000 expected.
 //!
 //! One further parameter is not about PIX at all and is just as load-bearing: the Entry's
 //! balancer has to learn that the Exit emptied. Left to `produced - consumed` it reads the silence
@@ -43,17 +45,23 @@
 //! so 32 buys margin rather than survival *here*, and the generation bump fired in only one of the
 //! four.
 //!
-//! On a prototype of hoprnet#8576 (2026-10-27) the wipe became deterministic, and so did its
-//! price: a cycle survives it iff `256 x surplus` covers the Exit's stock. Surplus 32 and 16
-//! pass, surplus 8 ends in `recovery_idle` (the negative control), and at production dimensions
-//! (4096 x (32 + 79)) a 7000-SURB and a 19 264-SURB stock were both wiped, swept and paid, the
-//! second with three shares of margin. `docs/pix-relay-loss.md` has the figures.
+//! On a prototype of hoprnet#8576 (2026-10-27), at the window of 256, the wipe became deterministic,
+//! and so did its price: a cycle survives it iff `window x surplus` covers the Exit's stock. Surplus
+//! 32 and 16 pass, surplus 8 ends in `recovery_idle` (the negative control), and at production
+//! dimensions (4096 x (32 + 79)) a 7000-SURB and a 19 264-SURB stock were both wiped, swept and
+//! paid, the second with three shares of margin (41 at 512). `docs/pix-relay-loss.md` has the
+//! figures.
+//!
+//! At 512 the same stock costs half as much per polynomial, so surplus 8 (4096) now survives the
+//! 2400-SURB wipe, and the negative control is surplus 4 (2048): `HOPRD_PIX_ADDITIONAL_SHARES=4`,
+//! expected to end in `recovery_idle`. It has not been run at 512.
 //!
 //! # Running
 //!
 //! ```text
 //! LINE=v5 HOPRD_SRC=../hoprd just pix-relay-loss                      # the three scenarios
 //! HOPRD_PIX_ADDITIONAL_SHARES=16 LINE=v5 … just pix-relay-loss        # the shipped surplus
+//! HOPRD_PIX_ADDITIONAL_SHARES=4  LINE=v5 … just pix-relay-loss        # the negative control
 //! LINE=v5 … just pix-relay-loss a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe
 //! ```
 //!
@@ -643,11 +651,12 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
         swept.sweeps().unwrap_or(0) >= 1,
         "no cycle was swept after half the return relayers died. The cycle that was {:.0}% \
          complete at the kill never reconstructed: at surplus {} a polynomial absorbs {} lost \
-         shares and the emission window spreads a burst over 256 of them, so the cycle tolerates \
+         shares and the emission window spreads a burst over {} of them, so the cycle tolerates \
          {} contiguous lost shares against the ~{} a death costs at a {}-SURB buffer. {}",
         100.0 * outage.shares_at_kill as f64 / relay_loss::cycle_packets() as f64,
         relay_loss::additional_shares(),
         relay_loss::additional_shares(),
+        relay_loss::SHARE_EMISSION_WINDOW,
         relay_loss::tolerated_burst(),
         relay_loss::expected_burst(relay_loss::surb_buffer_target()),
         relay_loss::surb_buffer_target(),
