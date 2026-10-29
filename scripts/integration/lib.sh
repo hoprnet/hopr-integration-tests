@@ -417,32 +417,38 @@ cluster_wait() {
 # The one cargo invocation. Skips the dev-shell wrap when already inside one — `just ci` and CI
 # both enter it before calling the runner, which used to open a second shell per scenario.
 # Extra args after the target are libtest filters; SKIP_SCENARIOS names tests to hold out.
+# TEST_PROFILE=release builds and runs the test binary in release: timing-sensitive suites
+# (return_path at three hops) run the test process at about 1800 % CPU in debug, and the
+# measurement is then of the test process. `list_scenarios` takes the same profile, so listing and
+# running share one binary.
 cargo_it() {
   local target="${1:?usage: cargo_it <test-target> [filter...]}"
   shift
   local -a wrap=()
   [ -z "${IN_NIX_SHELL:-}" ] && [ "${HOPRNET_SHELL:-}" != none ] &&
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
-  local -a test_args cargo_features skips=()
+  local -a test_args cargo_features profile=() skips=()
+  [ "${TEST_PROFILE:-}" = release ] && profile=(--release)
   read -r -a test_args <<<"${TEST_ARGS:-}"
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
   local held
   for held in ${SKIP_SCENARIOS:-}; do skips+=(--skip "${held}"); done
   # Bash 3.2 (macOS /bin/bash) treats empty arrays as unset under `set -u`.
   ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
-    ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" "$@" \
+    ${profile[@]+"${profile[@]}"} ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" "$@" \
     --no-fail-fast -- --include-ignored --test-threads=1 ${skips[@]+"${skips[@]}"} ${test_args[@]+"${test_args[@]}"}
 }
 
 # Ask the binary what it carries, so a new scenario runs the moment it is written.
 list_scenarios() {
   local target="${1:?usage: list_scenarios <test-target>}"
-  local -a wrap=() cargo_features
+  local -a wrap=() cargo_features profile=()
   [ -z "${IN_NIX_SHELL:-}" ] && [ "${HOPRNET_SHELL:-}" != none ] &&
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
+  [ "${TEST_PROFILE:-}" = release ] && profile=(--release)
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
   ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
-    ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" -- --list |
+    ${profile[@]+"${profile[@]}"} ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" -- --list |
     sed -n 's/: test$//p' | tr '\n' ' '
 }
 

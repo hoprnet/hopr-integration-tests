@@ -82,6 +82,7 @@ contracts and starts bloklid, and localcluster connects to it with `--chain-url`
 | `HOPR_LOG_DIR`           | parent directory for retained node/localcluster artifacts (`hoprd-it-*/logs/hoprd_<i>.log`) |
 | `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files after teardown           |
 | `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture` |
+| `TEST_PROFILE=release`   | build and run the test binary in release; timing-sensitive suites such as `return_path` at 3 hops run the test process at ~1800 % CPU in debug |
 
 To retain node logs under a fixed parent directory:
 
