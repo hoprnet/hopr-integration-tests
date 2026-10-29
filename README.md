@@ -20,18 +20,24 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 
 ## Test binaries
 
-| Binary (`integration/tests/`) | What it checks                                                    | In CI   | Local                       |
-| ----------------------------- | ----------------------------------------------------------------- | ------- | --------------------------- |
-| `integration.rs`              | 0-hop and 1-hop UDP loopback: at least 99% arrival, no corruption | yes     | `just integration-binchain` |
-| `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved    | yes     | `just exit-origination`     |
-| `pix.rs`                      | PIX settlement with `edgli` as the paying entry                   | v5 only | `LINE=v5 just pix`          |
-| `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)          | v5 only | `LINE=v5 just pix-shapes`   |
-| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies      | v4 only | `just return-path`          |
-| `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line       | no      | see `run.sh`                |
-| `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`) | no      | `just rotsee`               |
-| `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result            | no      | `just profile`              |
+| Binary (`integration/tests/`) | What it checks                                                     | In CI   | Local                       |
+| ----------------------------- | ------------------------------------------------------------------ | ------- | --------------------------- |
+| `integration.rs`              | 0-, 1- and 2-hop UDP loopback: at least 99% arrival, no corruption | yes     | `just integration-binchain` |
+| `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved     | yes     | `just exit-origination`     |
+| `pix.rs`                      | PIX settlement with `edgli` as the paying entry                    | v5 only | `LINE=v5 just pix`          |
+| `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)           | v5 only | `LINE=v5 just pix-shapes`   |
+| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies       | v4 only | `just return-path`          |
+| `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line        | no      | see `run.sh`                |
+| `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`)  | no      | `just rotsee`               |
+| `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no      | `just profile`              |
 
-CI runs 9 scenarios on v4 (6 of them `return_path`) and 11 on v5. Suites share one chain per
+v5 is split in two tiers, chosen with `TIER` (see [`docs/v5-test-matrix.md`](docs/v5-test-matrix.md)
+for what each test covers and costs): `pr` (integration, pix, the mixed shape) is the fast
+happy-path set, `nightly` runs the rest. v4 runs everything on either tier. Which jobs each trigger
+runs is listed under [CI](#ci).
+Every run ends with a summary of each test, naming the step a failed test broke in.
+
+CI runs 8 scenarios on v4 (6 of them `return_path`). Suites share one chain per
 `run.sh` invocation, warm with frozen identities after the first. `return_path` runs last on v4,
 on a fresh chain and one cluster per scenario, and only its 1-hop scenarios: the two-hop ones wait
 for the v5 fix and `spread` is held out for asserting a ratio on a random draw. v5 waits on stack
@@ -47,14 +53,21 @@ pump, which returns `Transfer { mbps, arrival_pct(), sha_ok }`), `pix.rs` / `sha
 
 ```bash
 just ci                         # what CI runs for the v4 line: resolve refs, build, run every suite
-just ci-v5                      # the same for v5, PIX included
+just ci-v5                      # the same for v5 (TIER=pr|nightly); PIX suites on x86_64-linux only
+
+# A tier exactly as CI selects it, from binaries built here; works on darwin too. v5 builds the
+# PIX hoprd + localcluster from HOPRD_SRC (a v5 hoprd git checkout, e.g. a `git worktree` of
+# hoprd main), since the flake has no darwin one.
+LINE=v5 HOPRD_SRC=../hoprd-main just tier pr        # integration, pix, mixed shape (~30 min)
+LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly   # exit_origination, the other shapes (~45 min)
+just tier                                           # v4: every suite
 
 just build build-chain          # hoprd + localcluster, bloklid + deployer + anvil (nix, cached)
 just integration-binchain       # integration.rs on a fresh chain
-just integration-binchain zero_hop
+just integration-binchain zero_one_two_hop
 
 just cluster-up                 # terminal 1: a long-running cluster
-just attach one_hop             # terminal 2: run tests against it
+just attach zero_one_two_hop    # terminal 2: run tests against it
 just unit                       # unit tests, no cluster
 just lint                       # fmt --check + clippy -D warnings
 just clean                      # kill leftover processes, remove temp state
@@ -68,15 +81,15 @@ local hoprnet checkout for the dev shell. `just pix` builds hoprd from `HOPRD_SR
 The chain does not need docker: `scripts/integration/lib.sh chain_up` starts anvil, deploys the
 contracts and starts bloklid, and localcluster connects to it with `--chain-url`.
 
-| Env var                  | Meaning                                                      |
-| ------------------------ | ------------------------------------------------------------ |
-| `HOPRD_BIN`              | `hoprd` binary (default `result-hoprd/bin/hoprd`)            |
-| `HOPRD_LOCALCLUSTER_BIN` | `hoprd-localcluster` binary                                  |
-| `HOPRD_CHAIN_URL`        | bloklid to connect to (default `http://localhost:8080`)      |
-| `HOPRD_CLUSTER_DATA_DIR` | use an already-running cluster instead of starting one       |
+| Env var                  | Meaning                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------- |
+| `HOPRD_BIN`              | `hoprd` binary (default `result-hoprd/bin/hoprd`)                                           |
+| `HOPRD_LOCALCLUSTER_BIN` | `hoprd-localcluster` binary                                                                 |
+| `HOPRD_CHAIN_URL`        | bloklid to connect to (default `http://localhost:8080`)                                     |
+| `HOPRD_CLUSTER_DATA_DIR` | use an already-running cluster instead of starting one                                      |
 | `HOPR_LOG_DIR`           | parent directory for retained node/localcluster artifacts (`hoprd-it-*/logs/hoprd_<i>.log`) |
-| `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files after teardown           |
-| `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture` |
+| `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files after teardown                                          |
+| `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture`                                |
 
 To retain node logs under a fixed parent directory:
 
@@ -101,10 +114,27 @@ the same way `run.sh` does (see below).
 `hetzner` box. It is triggered by:
 
 - upstream gates (hoprd, edge-client, blokli) through dispatch, on the line they request;
-- this repo's merge queue, and PRs labelled `run-integration`, on both lines;
-- a nightly run at 02:00 UTC on v4, which is the only automatic v4 coverage, since merge queues
-  only work on default branches;
-- manual runs: `gh workflow run integration.yaml -f line=v5 -f project=hoprd -f rev=<sha>`.
+- this repo's merge queue, and PRs carrying a `run-integration*` label;
+- a nightly run at 02:00 UTC (v4 gets no other automatic coverage, since merge queues only work on
+  default branches);
+- manual runs: `gh workflow run integration.yaml -f line=v5 -f tier=nightly -f project=hoprd -f rev=<sha>`.
+
+Each trigger runs one job per line and tier, one after another on the box:
+
+| Trigger                                   | v4  | v5 `pr` | v5 `nightly` |
+| ----------------------------------------- | --- | ------- | ------------ |
+| this repo's merge queue                   | yes | yes     | yes          |
+| upstream dispatch / manual run, `line=v4` | yes | –       | –            |
+| upstream dispatch / manual run, `line=v5` | –   | yes     | yes          |
+| manual run, `line=v5 tier=pr`             | –   | yes     | –            |
+| manual run, `line=v5 tier=nightly`        | –   | –       | yes          |
+| nightly schedule                          | yes | –       | yes          |
+| PR label `run-integration`                | –   | yes     | –            |
+| PR label `run-integration-v4`             | yes | –       | –            |
+| PR label `run-integration-v5-nightly`     | –   | –       | yes          |
+
+PR labels add up, so `run-integration` plus `run-integration-v4` runs two jobs. The merge queue and
+the upstream gates run every suite of their line, so a new or changed test passes before it lands.
 
 No versions are stored. The project that triggered the run supplies its rev, and every other ref
 is the current head of its branch on the line. `run.sh` builds hoprd, localcluster and the blokli
@@ -114,7 +144,7 @@ A green run records a fingerprint per line. The fingerprint covers the tests tre
 edge-client and blokli trees (trees, not commits: an upstream queue candidate is a new commit with
 the PR head's tree). When a merge queue, this repo's or an upstream's dispatch, sees a fingerprint
 that already passed in a run of the last 7 days, it skips that line. Usually that earlier run is the
-PR's `run-integration` run. If main or any upstream branch moved, the queue batched other PRs, or a
+PR's labelled run. If main or any upstream branch moved, the queue batched other PRs, or a
 companion PR merged, the fingerprint changes and the line runs again.
 
 ### How edgli gets pinned
@@ -138,7 +168,8 @@ Requires: hoprnet/hopr-integration-tests#50   # in the upstream PR
 Requires: hoprnet/edge-client#186             # in the tests PR, one line per upstream PR
 ```
 
-1. Open the tests PR with the adapted code and label it `run-integration`. While an upstream PR
+1. Open the tests PR with the adapted code and label it `run-integration` (add
+   `run-integration-v4` / `run-integration-v5-nightly` for the other jobs). While an upstream PR
    is open, its line (`main` = v5, `release/*` = v4) uses that PR's head, both in `pr.yaml` and in
    the integration run.
 2. Queue the upstream PRs. Each gate sends `tests_pr`, so it runs with the tests from the tests PR.

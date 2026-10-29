@@ -6,10 +6,8 @@
 //! [`IntegrationEnv`](env::IntegrationEnv), then pumps a payload through a UDP
 //! session to the exit node's built-in loopback and measures goodput + loss.
 //!
-//! Each hop count is its own `#[test]` (see `tests/integration.rs`) so 0-hop and
-//! 1-hop are reported independently; every test owns its cluster (bring up →
-//! run → tear down). There are no tuning knobs — thresholds are hardcoded in the
-//! test.
+//! One cluster serves every test in a binary (see [`cluster`]); a test that runs several
+//! phases names each with [`step`], so a failure says which phase broke.
 //!
 //! ## Modes
 //! - **Managed** (default): set `HOPRD_LOCALCLUSTER_BIN`, `HOPRD_BIN` and
@@ -44,6 +42,66 @@ pub const PAYLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
 pub use env::IntegrationEnv;
 
+/// Runs one named phase of a test. A panic or error inside it fails the test with the step's
+/// name, and with `IT_STEP_LOG` set the outcome is appended there for the end-of-run summary.
+pub async fn step<T>(
+    name: &str,
+    body: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    use anyhow::Context as _;
+    use futures::FutureExt as _;
+
+    tracing::info!(step = name, "step started");
+    let result = match std::panic::AssertUnwindSafe(body).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => Err(anyhow::anyhow!(
+            panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panicked".into())
+        )),
+    };
+    match &result {
+        Ok(_) => tracing::info!(step = name, "step passed"),
+        Err(e) => tracing::error!(step = name, "step failed: {e:#}"),
+    }
+    record_step(name, result.as_ref().err());
+    result.with_context(|| format!("step `{name}` failed"))
+}
+
+fn record_step(name: &str, error: Option<&anyhow::Error>) {
+    use std::io::Write as _;
+
+    let Some(path) = std::env::var_os("IT_STEP_LOG") else {
+        return;
+    };
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("unknown")
+        .to_string();
+    let (status, error) = match error {
+        None => ("passed", String::new()),
+        Some(e) => (
+            "failed",
+            format!("{e:#}")
+                .replace(['\t', '\n', '\r'], " ")
+                .chars()
+                .take(300)
+                .collect(),
+        ),
+    };
+    let line = format!("{test}\t{name}\t{status}\t{error}\n");
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+    if let Err(e) = written {
+        tracing::warn!(%e, "could not record the step outcome");
+    }
+}
+
 /// On-chain address type, re-exported so submodules share one definition.
 pub use edgli::hopr_lib::api::types::primitive::prelude::Address;
 
@@ -63,3 +121,59 @@ pub use edgli::hopr_lib::exports::transport::HoprSession;
 /// and `TcpStream` variants point at an ordinary socket on the Exit's host, which is how a shape
 /// gets traffic that is *not* symmetric — see `env::IntegrationEnv::open_pix_session_with`.
 pub use edgli::hopr_lib::exports::transport::SessionTarget;
+
+#[cfg(test)]
+mod tests {
+    use super::step;
+
+    #[tokio::test]
+    async fn a_failing_step_names_itself() {
+        let err = step("phase one", async {
+            anyhow::bail!("broke") as anyhow::Result<()>
+        })
+        .await
+        .unwrap_err();
+        assert_eq!("step `phase one` failed: broke", format!("{err:#}"));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_step_becomes_an_error() {
+        let err = step("phase two", async {
+            let arrival = std::hint::black_box(40);
+            assert!(arrival > 50, "only {arrival}% came back");
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            "step `phase two` failed: only 40% came back",
+            format!("{err:#}")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_passing_step_returns_its_value() {
+        assert_eq!(7, step("phase three", async { Ok(7) }).await.unwrap());
+    }
+
+    #[test]
+    fn the_step_log_carries_the_test_name() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        // SAFETY: nothing else in this crate reads IT_STEP_LOG; concurrent step tests may append
+        // their own lines, so only this test's line is checked.
+        unsafe { std::env::set_var("IT_STEP_LOG", log.path()) };
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(step("logged", async {
+                anyhow::bail!("x") as anyhow::Result<()>
+            }))
+            .unwrap_err();
+        unsafe { std::env::remove_var("IT_STEP_LOG") };
+        let log = std::fs::read_to_string(log.path()).unwrap();
+        assert!(
+            log.lines()
+                .any(|l| l == "tests::the_step_log_carries_the_test_name\tlogged\tfailed\tx"),
+            "{log}"
+        );
+    }
+}

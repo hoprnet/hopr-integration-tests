@@ -49,6 +49,14 @@ if [ -n "${SCENARIOS_EXCEPT:-}" ]; then
 fi
 export SKIP_SCENARIOS="${SCENARIOS_EXCEPT:-}"
 
+# A caller running several suites (run.sh) owns the result files and prints one summary at the end.
+OWN_SUMMARY=0
+if [ -z "${IT_RESULTS:-}" ]; then
+  OWN_SUMMARY=1
+  IT_RESULTS="$(mktemp)" IT_STEP_LOG="$(mktemp)"
+  export IT_RESULTS IT_STEP_LOG
+fi
+
 # CHAIN_SHARED=1: the caller owns one chain for every suite (run.sh), so neither start nor stop it.
 [ "${CHAIN_SHARED:-0}" = 1 ] || trap chain_stop EXIT INT TERM
 
@@ -60,11 +68,17 @@ for target in ${TARGETS}; do
     echo "═══ ${target}${SCENARIOS:+ (${SCENARIOS})}: fresh chain ═══"
     chain_start
   fi
+  out="$(mktemp)"
+  # Not a `| tee` pipeline: the leaked cluster inherits the pipe, so tee would never see EOF and the
+  # reap below would never run. Read the copy only after the reap has closed it.
   # shellcheck disable=SC2086  # SCENARIOS is a deliberate word-split list of libtest filters
-  cargo_it "${target}" ${SCENARIOS:-} || rc=1
+  if cargo_it "${target}" ${SCENARIOS:-} > >(tee "${out}") 2>&1; then cargo_rc=0; else cargo_rc=1 rc=1; fi
   # Reaped before the chain stops: the test process leaks its cluster on purpose
   # (integration/src/cluster.rs), so nothing else will clear it.
   reap_nodes
+  record_results "${target}" "${out}" "${cargo_rc}"
+  rm -f "${out}"
   [ "${CHAIN_SHARED:-0}" = 1 ] || chain_stop
 done
+[ "${OWN_SUMMARY}" = 1 ] && print_summary
 exit "${rc}"
