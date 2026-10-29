@@ -502,8 +502,9 @@ at 512 (`512 × 4` = 2048 is below the 2400 SURBs a wipe discards, while `512 ×
 survives it), and the margin test states the 512 arithmetic (`19 264.div_ceil(512)` = 38, a margin
 of 41). Against a hopr-lib still at 256 the suite's tolerance arithmetic overstates what a cycle
 survives. The runs below are the evidence for the change: the deep scenario at production dimensions,
-two runs per window. The test-scale profile (512 × (64 + 32), a 2 400-SURB buffer) has not been re-run
-at 512, and the surplus-4 control has not been run at all.
+two runs per window. The test-scale profile and the surplus-4 control ran on 2026-10-29 on the window
+PR's own head: see "Rerun on the window PR's head" at the end of this section, including the one
+result the arithmetic does not predict (surplus 8).
 
 **Question.** At the deployed worst case (the Exit holds 19 264 SURBs, production dimensions 4096 x (32 + 79)) the generation wipe loses ~19.2k shares in one burst. Emission is round-robin over `SHARE_EMISSION_WINDOW` polynomials, so the burst costs each polynomial of the active window `wipe / window` of its 79 surplus shares: ~75 with the current 256, ~38 with 512. What does 512 cost in Exit memory, in time to the Exit's `early recovery threshold reached`, and in shares lost?
 
@@ -523,6 +524,32 @@ at 512, and the surplus-4 control has not been run at all.
 **What this does not show.** Both 256 runs also recovered on this head, so the study cannot show 512 rescuing a cycle that 256 loses; the case for it is the margin arithmetic (3.8-3.9 against 41.4 shares) plus four clean runs. A 256 run with a slow verdict is the missing comparison.
 
 **Recommendation.** Widening the window to 512 is worth proposing upstream: it multiplies the contiguous loss a cycle absorbs by 2 (`512 x 79 = 40 448` SURBs instead of `256 x 79 = 20 224`, against a deployed worst-case stock of 19 264), moves the margin from ~4 to ~41 shares, and cost nothing measurable in Exit memory or recovery time here (the generator's own comment prices the window at `polys_in_window x threshold` shares, ~0.5 MB at 256, so ~1 MB at 512, well under the noise of the RSS samples). The change is Entry-side only (the Exit needs no update, which keeps it deployable independently), but it touches a constant that tests pin (one generator unit test hard-codes 256) and that bounds how many parts the Exit keeps live, so it deserves a short upstream discussion of the Exit-memory bound at the largest deployed polynomial counts before it is changed.
+
+### Rerun on the window PR's head (2026-10-29)
+
+hoprnet#8585 at `0cf60ff7c7` (the constant itself, on top of hoprnet#8581 with the paced initial
+fill), hoprd rebuilt on it, this suite at `886efc6` (the 512 profile). Margin is
+`surplus − wipe / 512`.
+
+| run | geometry, stock | surplus (tolerated burst) | verdict / bump | wipe | margin | arrival | in-flight cycle | result |
+|---|---|---|---|---|---|---|---|---|
+| RP19264-H1 | 4096 × (32 + 79), 19 264 | 79 (40 448) | +0.6 s / +0.8 s, probation +60.6 s | 19 252 | 41.4 | 94.4 % | recovered | pass, cycles 1/1, Safe +0.660160512, 1359 s |
+| RP19264-H2 | 4096 × (32 + 79), 19 264 | 79 (40 448) | +0.6 s / +0.8 s, probation +60.6 s | 19 282 | 41.4 | 94.7 % | recovered | pass, cycles 1/1, Safe +0.660160512, 1355 s |
+| RLH s32 | 512 × (64 + 32), 2400 | 32 (16 384) | +0.5 s / +0.6 s | ~2400 | 27.3 | 97.0 % | recovered | pass, cycles 1/1 |
+| RLH s8 | 512 × (64 + 8), 2400 | 8 (4096) | +0.3 s / +0.4 s | ~2400 | 3.3 | 59.5 % | **LOST**: `RecoveryIdle`, 483 of 512 polynomials, 40 shares short; the successor 4 short | FAIL |
+| RLH s4 | 512 × (64 + 4), 2400 | 4 (2048) | +0.4 s / +0.5 s | ~2400 | −0.7 | 28.1 % | LOST: `RecoveryIdle` 31 656/32 768 | FAIL, the negative control as designed |
+
+The production runs confirm the E figures on the real constant: one wipe, a margin of 41.4, and no
+re-verdict (the dead relayer lapses into probation at +60.6 s and stays there). Surplus 8 is the
+result the arithmetic does not predict: the wipe costs each polynomial about 4.7 of its 8 surplus
+shares, which it survives, and the cycle still died 40 shares short. After the verdict lapses into
+probation the planner's exploration keeps drawing the dead relayer as a return hop, and a share is
+revealed to the reconstructor only when the first return relayer acknowledges, so every probe SURB
+whose first hop is the dead relayer takes its share with it (about 5 SURBs per second in the
+balancer's `invalid` count). At surplus 79 that is noise; at surplus 8 it is the margin. Until
+hoprnet decides how probation probes are priced (a lower probe rate, aging probation out, or
+documenting), the positive case at test scale is surplus 32 and the negative control surplus 4;
+surplus 8 is marginal and not a gate.
 
 ## Fidelity limits
 
