@@ -90,7 +90,7 @@ companion_refs() {
     [ "${line}" = "${LINE:-v4}" ] || continue
     case "${repo}" in
     edge-client) EDGLI_REF="${sha}" ;;
-    hoprd) HOPRD_REF="${sha}" ;;
+    hoprd) HOPRD_REF="${sha}" HOPRD_PR_BASE="${base}" ;;
     blokli) BLOKLI_REF="${sha}" ;;
     esac
     echo "companion: ${repo} at ${sha} (hoprnet/${repo}#${num}, from #${source_pr})" |
@@ -432,6 +432,149 @@ cargo_it() {
   ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
     ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" "$@" \
     --no-fail-fast -- --include-ignored --test-threads=1 ${skips[@]+"${skips[@]}"} ${test_args[@]+"${test_args[@]}"}
+}
+
+# Runs LINE/TIER's suites on the chain the caller started, then prints the summary; non-zero if any
+# suite failed. Suites do not short-circuit, so a red run reports everything broken. v5 is tiered
+# (#65, docs/v5-test-matrix.md): `pr` gates merges on the happy paths, `nightly` runs the rest; v4
+# runs everything on either. PIX_BIN, a hoprd with the deposit pool, enables the PIX suites.
+# `rotsee` needs a funded Gnosis identity and `profiling` emits traces, so neither is a suite here.
+run_tier() {
+  local suite_rc=0 nodes_bin="${HOPRD_BIN}" mixed scenarios scenario held_out
+  export CHAIN_SHARED=1
+  IT_RESULTS="$(mktemp)" IT_STEP_LOG="$(mktemp)"
+  export IT_RESULTS IT_STEP_LOG
+
+  in_tier() { [ "${LINE}" = v4 ] || [ "${TIER}" = "$1" ]; }
+  run_suite() { # target, then any scenarios to HOLD OUT of it
+    local target="$1"
+    shift
+    echo "═══════ suite: ${target} ═══════"
+    if ! TEST_TARGETS="${target}" SCENARIOS="${SCENARIOS:-}" SCENARIOS_EXCEPT="$*" \
+      bash "${LIB_ROOT}/scripts/integration/run-binchain.sh"; then
+      echo "suite ${target} FAILED" >&2
+      suite_rc=1
+    fi
+  }
+
+  echo "running integration tests (binary chain, ${LINE}, tier ${TIER}) ..."
+  in_tier pr && run_suite integration
+  in_tier nightly && run_suite exit_origination
+  # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore
+  # FAILS against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there.
+
+  if [ -n "${PIX_BIN:-}" ]; then
+    HOPRD_BIN="${PIX_BIN}"
+    in_tier pr && run_suite pix
+    # `pix_shapes` also needs a localcluster that takes `--pix-config`: the bare `--enable-pix` is
+    # a 32-packet demo cycle no traffic shape fits inside, so it is probed rather than assumed.
+    if pix_check_localcluster "${HOPRD_LOCALCLUSTER_BIN}" 2>/dev/null; then
+      # The mixed shape also proves the production geometry completes a cycle, so it gates PRs.
+      mixed=a_mixed_session_sustains_its_cycles
+      in_tier pr && SCENARIOS="${mixed}" run_suite pix_shapes
+      in_tier nightly && run_suite pix_shapes "${mixed}"
+    else
+      echo "::error::${HOPRD_LOCALCLUSTER_BIN} has no --pix-config, so the pix_shapes suite cannot" >&2
+      echo "state its geometry. Use a newer hoprd ref." >&2
+      suite_rc=1
+    fi
+    HOPRD_BIN="${nodes_bin}"
+  fi
+
+  # v4 only until the v5 stack fixes land. Last and on a fresh chain: its 5-node cluster leaves
+  # nodes 3-4 channelled but offline. Scenarios kill nodes, so one cluster each. The 1-hop ones
+  # only: v4 mitigates a dead relayer one hop deep (hoprnet#8498); `spread` asserts a ratio on a
+  # random draw, so a red says nothing.
+  if [ "${LINE}" = v4 ]; then
+    chain_stop
+    chain_start
+    scenarios="$(list_scenarios return_path)"
+    held_out="return_paths_should_spread_across_distinct_relayers"
+    held_out="${held_out} a_two_hop_session_should_survive_exit_losing_its_return_relayer"
+    held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
+    for scenario in ${scenarios}; do
+      case " ${held_out} " in *" ${scenario} "*) continue ;; esac
+      SCENARIOS="${scenario}" run_suite return_path
+    done
+  fi
+
+  print_summary
+  return "${suite_rc}"
+}
+
+# Appends `target<TAB>test<TAB>ok|FAILED<TAB>error` to IT_RESULTS from one cargo run's output. With
+# one test thread libtest prints `test NAME ... `, then the test's own output, then `ok`/`FAILED`
+# (on the same line only when the test printed nothing). The error is the test's `Error:` line or
+# panic message, inline under --nocapture or in the `---- NAME stdout ----` block otherwise.
+record_results() { # target, captured output, cargo rc
+  local target="$1" out="$2" rc="$3" before
+  [ -n "${IT_RESULTS:-}" ] || return 0
+  before="$(wc -l <"${IT_RESULTS}")"
+  awk -v target="${target}" '
+    {
+      line = $0
+      if (match(line, /^test [^ ]+ \.\.\. /)) {
+        split(line, f, " "); cur = f[2]; line = substr(line, RLENGTH + 1)
+      }
+      if (line == "ok" || line == "FAILED") {
+        if (cur != "" && !(cur in status)) { order[++n] = cur; status[cur] = line }
+        if (!(cur in err) && pending != "") err[cur] = pending
+        pending = ""
+        next
+      }
+      if (match(line, /^---- [^ ]+ stdout ----$/)) { split(line, f, " "); cur = f[2]; failures = 1; next }
+      msg = ""
+      if ((i = index(line, "Error: ")) > 0) msg = substr(line, i + 7)
+      else if (index(line, "panicked at") > 0 && (getline nxt) > 0) msg = nxt
+      # Printed before its `test NAME` line when stdout and stderr reach the log separately.
+      if (msg == "") next
+      if (failures || (cur != "" && !(cur in status))) err[cur] = msg
+      else pending = msg
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        t = order[i]
+        printf "%s\t%s\t%s\t%s\n", target, t, status[t], (status[t] == "FAILED" ? err[t] : "")
+      }
+    }
+  ' "${out}" >>"${IT_RESULTS}"
+  if [ "${rc}" != 0 ] && [ "$(wc -l <"${IT_RESULTS}")" = "${before}" ]; then
+    printf '%s\t*\tFAILED\tno test ran (build or harness error)\n' "${target}" >>"${IT_RESULTS}"
+  fi
+}
+
+# pytest-style end-of-run report from IT_RESULTS, naming the failing step from IT_STEP_LOG. Mirrored
+# into the job summary, and its failures into IT_SUMMARY for the failure notification.
+print_summary() {
+  [ -s "${IT_RESULTS:-}" ] || return 0
+  local report
+  report="$(awk -F'\t' -v steps="${IT_STEP_LOG:-/dev/null}" -v secs="${SECONDS}" '
+    BEGIN {
+      while ((getline l < steps) > 0) {
+        split(l, s, "\t")
+        if (s[3] == "failed") step[s[1]] = "step `" s[2] "`: " s[4]
+      }
+    }
+    $3 == "ok" { print "PASSED " $1 "::" $2; p++; next }
+    {
+      print "FAILED " $1 "::" $2; f++
+      why = ($2 in step) ? step[$2] : $4
+      if (why != "") print "       " why
+    }
+    END { printf "%d passed, %d failed in %dm%02ds\n", p, f, secs / 60, secs % 60 }
+  ' "${IT_RESULTS}")"
+  printf '═══════ summary ═══════\n%s\n' "${report}"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    local fence='```'
+    printf '### Integration (%s)\n%s\n%s\n%s\n' "${LINE:-}${TIER:+, ${TIER}}" "${fence}" "${report}" "${fence}" >>"${GITHUB_STEP_SUMMARY}"
+  fi
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    {
+      echo "IT_SUMMARY<<IT_SUMMARY_EOF"
+      grep -vE '^PASSED ' <<<"${report}"
+      echo "IT_SUMMARY_EOF"
+    } >>"${GITHUB_ENV}"
+  fi
 }
 
 # Ask the binary what it carries, so a new scenario runs the moment it is written.

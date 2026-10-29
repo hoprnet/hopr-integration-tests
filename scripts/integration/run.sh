@@ -15,6 +15,7 @@
 #   BLOKLI_REF       blokli ref override     (default: per LINE)
 #   HOPRD_SKIP_LINE_CHECK  set to 1 to run a hoprd rev outside HOPRD_LINE anyway
 #   NIX_SYSTEM_SUFFIX    cross-build to this nix system (default: empty = build for this machine)
+#   TIER             pr | nightly — which v5 suites run (default: pr); v4 runs everything on either
 set -euo pipefail
 
 # shellcheck source=scripts/integration/lib.sh
@@ -29,6 +30,14 @@ SUFFIX="${NIX_SYSTEM_SUFFIX:+-${NIX_SYSTEM_SUFFIX}}"
 SYSTEM="${NIX_SYSTEM_SUFFIX:-$(nix eval --raw --impure --expr builtins.currentSystem)}"
 
 LINE="${LINE:-v4}"
+TIER="${TIER:-pr}"
+case "${TIER}" in
+pr | nightly) ;;
+*)
+  echo "unknown TIER '${TIER}' (pr | nightly)" >&2
+  exit 2
+  ;;
+esac
 
 companion_refs
 line_refs
@@ -36,13 +45,13 @@ HOPRD_REF="${HOPRD_REF:-${HOPRD_LINE}}"
 
 # The triggering project overrides its own rev; the other keeps its default above.
 case "${PROJECT:-}" in
-hoprd) HOPRD_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=hoprd}" ;;
+hoprd) HOPRD_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=hoprd}" HOPRD_PR_BASE="" ;;
 edge-client) EDGLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=edge-client}" ;;
 # blokli merge-testing is back on: blokli now gates its own merges to release/0.13,
 # so a dispatch from it must actually build the dispatched rev rather than the
 # branch head. Set here and consumed by the BLOKLI_REF default further down.
 blokli) BLOKLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=blokli}" ;;
-"" | manual) echo "no PROJECT override — ${LINE}: hoprd at ${HOPRD_LINE}, edge-client at ${EDGLI_REF}, blokli at ${BLOKLI_REF:-${BLOKLI_DEFAULT}}" ;;
+"" | manual) echo "no PROJECT override — ${LINE}: hoprd at ${HOPRD_REF}, edge-client at ${EDGLI_REF}, blokli at ${BLOKLI_REF:-${BLOKLI_DEFAULT}}" ;;
 *)
   echo "unknown PROJECT '${PROJECT}'" >&2
   exit 2
@@ -86,7 +95,9 @@ BLOKLI_SHA="$(resolve_sha hoprnet/blokli "${BLOKLI_REF}")"
 #                       PR head based on it. Accepted: that is precisely the
 #                       label-triggered PR case, which hoprd fires with its PR head.
 #   diverged          — the rev is off the line entirely (a v5 `main` sha). Rejected.
-if [ "${HOPRD_SKIP_LINE_CHECK:-0}" != "1" ] && [ "${HOPRD_REF}" != "${HOPRD_LINE}" ]; then
+# A companion PR that targets the line is skipped: once its base moves on, its head reads `diverged`.
+if [ "${HOPRD_SKIP_LINE_CHECK:-0}" != "1" ] && [ "${HOPRD_REF}" != "${HOPRD_LINE}" ] &&
+  [ "${HOPRD_PR_BASE:-}" != "${HOPRD_LINE}" ]; then
   status="$(gh api "repos/hoprnet/hoprd/compare/${HOPRD_LINE}...${HOPRD_REF}" --jq '.status' 2>/dev/null || true)"
   case "${status}" in
   identical | behind | ahead) ;;
@@ -131,7 +142,7 @@ fi
 # with the PR head's tree. The toolchain is left out: it is unpinned, so every run would miss.
 tree_of() { gh api "repos/hoprnet/$1/commits/$2" --jq .commit.tree.sha 2>/dev/null || true; }
 upstream_trees="$(tree_of hoprd "${HOPRD_SHA}") $(tree_of edge-client "${EDGLI_SHA}") $(tree_of blokli "${BLOKLI_SHA}")"
-fingerprint_inputs="${LINE} $(git -C "${REPO_ROOT}" rev-parse 'HEAD^{tree}') ${upstream_trees}"
+fingerprint_inputs="${LINE} ${TIER} $(git -C "${REPO_ROOT}" rev-parse 'HEAD^{tree}') ${upstream_trees}"
 IT_FINGERPRINT=""
 if [[ ${upstream_trees} =~ ^[0-9a-f]{40}\ [0-9a-f]{40}\ [0-9a-f]{40}$ ]]; then
   IT_FINGERPRINT="$(sha256sum <<<"${fingerprint_inputs}" | cut -c1-16)"
@@ -217,14 +228,13 @@ nix_build "anvil (foundry)" -L "nixpkgs#foundry" --out-link "${REPO_ROOT}/result
 # The deposit pool is a build-time choice: a plain hoprd bootstraps fine and then never
 # deposits. Built up front so a missing output fails in a minute, not after forty.
 # x86_64-linux only — the flake exposes no other arch, so darwin goes via `just pix`.
-PIX_SUITE=0
+PIX_BIN=""
 if [ "${LINE}" = "v5" ]; then
   if [ "${SYSTEM}" = "x86_64-linux" ]; then
     nix_build "hoprd (PIX pool)" -L "github:hoprnet/hoprd/${HOPRD_SHA}#binary-hoprd-pix-test-${SYSTEM}" \
       --out-link "${REPO_ROOT}/result-hoprd-pix"
     PIX_BIN="${REPO_ROOT}/result-hoprd-pix/bin/hoprd"
     pix_check_hoprd "${PIX_BIN}" || exit 1
-    PIX_SUITE=1
   else
     echo "skipping the PIX suite: no binary-hoprd-pix-test output for ${SYSTEM} (use \`just pix\`)"
   fi
@@ -238,65 +248,11 @@ if [ "${HOPRD_HOPRLIB_REV}" != "${EDGLI_HOPRLIB_REV}" ]; then
   echo "::warning::hoprd locks hoprnet ${HOPRD_HOPRLIB_REV:-unknown}, edge-client ${EDGLI_HOPRLIB_REV}; a wire change between them breaks every session" >&2
 fi
 
-# ── Run every localcluster suite on one shared chain ──
-# `rotsee` needs a funded Gnosis identity; `profiling` emits traces, not a verdict.
-# Suites are NOT short-circuited, so a red run reports everything broken.
-BINCHAIN="$(dirname "${BASH_SOURCE[0]}")/run-binchain.sh"
-suite_rc=0
-
+# ── Run the tier's suites on one shared chain ──
 # One chain for every suite: contract deploy + bloklid start happen once, and a localcluster with
 # frozen identities finds its nodes already funded, announced and channelled on it.
 it_env
 chain_start
 trap 'restore_manifest; chain_stop' EXIT
-export CHAIN_SHARED=1
-
-run_suite() { # target, then any scenarios to HOLD OUT of it
-  local target="$1"
-  shift
-  echo "═══════ suite: ${target} ═══════"
-  if ! TEST_TARGETS="${target}" SCENARIOS="${SCENARIOS:-}" SCENARIOS_EXCEPT="$*" \
-    bash "${BINCHAIN}"; then
-    echo "suite ${target} FAILED" >&2
-    suite_rc=1
-  fi
-}
-
-echo "running integration tests (binary chain) ..."
-run_suite integration
-# `return_path` is held out ENTIRELY: its scenarios assert an arrival ratio over an
-# unforced random relayer draw, so a red says nothing. Locally: `just return-path`.
-# Wiring it back in: run it LAST, after `chain_stop; chain_start`. Its 5-node cluster leaves nodes 3-4
-# announced and channelled but offline, and a later 3-node suite routes through them.
-# If it is ever wired back in, three of its five are the flaky ones — `spread` asserts a ratio on a
-# random draw, and the two survival scenarios miss their recovery deadline on some machines but not
-# others: `spread`, `common_mode_return_outage` and `a_symmetric_session_should_survive_relayer_loss`.
-run_suite exit_origination
-# Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore FAILS
-# against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there. Wiring it in now
-# would turn the nightly red every run. Enable once that fix is in release/4.0 — at which point the
-# test flips to passing and becomes a genuine regression guard.
-
-# Entry-side PIX: v5 only (`edgli/pix-test` has no v4 counterpart).
-if [ "${PIX_SUITE}" = "1" ]; then
-  export HOPRD_BIN="${PIX_BIN}"
-  run_suite pix
-
-  # `pix_shapes` additionally needs a localcluster that takes `--pix-config`: the bare
-  # `--enable-pix` is a 32-packet demo cycle that no traffic shape fits inside. Probed on the
-  # binary, the same way the deposit pool is, rather than assumed from the ref.
-  if pix_check_localcluster "${REPO_ROOT}/result-localcluster/bin/hoprd-localcluster" 2>/dev/null; then
-    # The geometry spike gets its own run, because a cluster serves one binary invocation and
-    # libtest orders the rest alphabetically: if the geometry cannot complete one cycle, no
-    # shape after it can be read.
-    spike=the_profile_geometry_completes_a_cycle
-    SCENARIOS="${spike}" run_suite pix_shapes
-    run_suite pix_shapes "${spike}"
-  else
-    echo "::error::the hoprd-localcluster built from '${HOPRD_REF}' has no --pix-config, so the" >&2
-    echo "pix_shapes suite cannot state its geometry. Use a newer hoprd ref." >&2
-    suite_rc=1
-  fi
-fi
-
-exit "${suite_rc}"
+export PIX_BIN
+run_tier

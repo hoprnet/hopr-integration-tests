@@ -274,9 +274,9 @@ impl IntegrationEnv {
     fn dest_for(&self, hops: usize) -> anyhow::Result<Address> {
         Ok(match (&self.targets, hops) {
             (Targets::Local { dest_zero_hop, .. }, 0) => *dest_zero_hop,
-            (Targets::Local { dest_one_hop, .. }, 1) => *dest_one_hop,
-            (Targets::Rotsee { exit }, 0 | 1) => *exit,
-            (_, n) => anyhow::bail!("unsupported hop count {n} (only 0 and 1 are supported)"),
+            (Targets::Local { dest_one_hop, .. }, 1..=3) => *dest_one_hop,
+            (Targets::Rotsee { exit }, 0..=3) => *exit,
+            (_, n) => anyhow::bail!("unsupported hop count {n} (at most 3)"),
         })
     }
 
@@ -373,7 +373,10 @@ impl IntegrationEnv {
                     max_surbs_per_data_packet: if balance_surbs { 2 } else { 1 },
                     surb_management: balance_surbs.then_some(SurbBalancerConfig {
                         // gnosis main: 10 MB response buffer, 16 Mb/s SURB upstream.
-                        target_surb_buffer_size: 10_000_000 / SESSION_MTU as u64,
+                        target_surb_buffer_size: std::env::var("HOPRD_SURB_TARGET")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(10_000_000 / SESSION_MTU as u64),
                         max_surbs_per_sec: 16_000_000 / (8 * SURB_SIZE as u64),
                         // Everything else stays at the default, because that is what the client
                         // does: `to_surb_balancer_config` in gnosis_vpn-lib sets exactly these two
@@ -874,10 +877,11 @@ async fn select_session_targets(edgli: &Edgli) -> anyhow::Result<(Address, Addre
         edgli.my_outgoing_channels(),
         edgli.connected_peer_addresses()
     )?;
+    // On a shared chain edgli keeps channels to identities a larger earlier cluster ran, now offline.
     let zero_hop = raw_channels
         .into_iter()
-        .find(|c| c.status == ChannelStatus::Open)
-        .ok_or_else(|| anyhow::anyhow!("no open outgoing channels"))?
+        .find(|c| c.status == ChannelStatus::Open && peers.contains(&c.destination))
+        .ok_or_else(|| anyhow::anyhow!("no open outgoing channel to a connected peer"))?
         .destination;
     let one_hop = peers
         .into_iter()
