@@ -152,6 +152,41 @@ pix-shapes *scenarios:
       SCENARIOS_EXCEPT="${spike}" "${runner[@]}"
     fi
 
+# PIX when half the return relays die mid-cycle (binary chain; manual, NOT run in CI, about ten
+# minutes per scenario at the default geometry). See integration/tests/pix_relay_loss.rs and
+# docs/pix-relay-loss.md. Same build path as `just pix`.
+#
+# One cluster PER SCENARIO, like `return-path` and for the same reason: each kills a cluster node.
+# They share one chain, started once. `HOPRD_PIX_*` (surplus, geometry, SURB buffer, rate) are
+# forwarded to the test; docs/pix-relay-loss.md lists them. Optional args = test-name filters.
+pix-relay-loss *scenarios:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ '{{line}}' = v5 ] || { echo "PIX is v5-only — run: LINE=v5 just pix-relay-loss" >&2; exit 2; }
+    source scripts/integration/lib.sh
+    pix_build '{{hoprd_src}}'
+    just build-chain
+    pix_check_hoprd "${HOPRD_BIN}"
+
+    it_env
+    export TEST_TARGET=pix_relay_loss HOPRNET_SHELL='{{hoprnet}}'
+    # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
+    scenarios='{{scenarios}}'
+    # Listed under the v5 dependency set: the target is `#![cfg(feature = "v5")]` and lists nothing
+    # without it.
+    [ -n "${scenarios}" ] || scenarios="$(bash scripts/integration/with-v5-deps.sh \
+      bash -c 'source scripts/integration/lib.sh; list_scenarios pix_relay_loss')"
+    chain_start
+    trap chain_stop EXIT
+    export CHAIN_SHARED=1
+    rc=0
+    for scenario in ${scenarios}; do
+      SCENARIOS="${scenario}" bash scripts/integration/with-v5-deps.sh \
+        bash scripts/integration/run-binchain.sh || rc=1
+    done
+    exit "${rc}"
+
 # Run a single test against a fresh env (e.g. `just scenario zero_hop`).
 scenario name:
     @just integration-binchain '{{name}}'

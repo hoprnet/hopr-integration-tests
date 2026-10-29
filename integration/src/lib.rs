@@ -63,3 +63,5 @@ pub use edgli::hopr_lib::exports::transport::HoprSession;
 /// and `TcpStream` variants point at an ordinary socket on the Exit's host, which is how a shape
 /// gets traffic that is *not* symmetric — see `env::IntegrationEnv::open_pix_session_with`.
 pub use edgli::hopr_lib::exports::transport::SessionTarget;
+#[cfg(feature = "v5")]
+pub mod relay_loss;

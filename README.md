@@ -20,22 +20,27 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 
 ## Test binaries
 
-| Binary (`integration/tests/`) | What it checks                                                    | In CI   | Local                       |
-| ----------------------------- | ----------------------------------------------------------------- | ------- | --------------------------- |
-| `integration.rs`              | 0-hop and 1-hop UDP loopback: at least 99% arrival, no corruption | yes     | `just integration-binchain` |
-| `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved    | yes     | `just exit-origination`     |
-| `pix.rs`                      | PIX settlement with `edgli` as the paying entry                   | v5 only | `LINE=v5 just pix`          |
-| `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)          | v5 only | `LINE=v5 just pix-shapes`   |
-| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies      | v4 only | `just return-path`          |
-| `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line       | no      | see `run.sh`                |
-| `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`) | no      | `just rotsee`               |
-| `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result            | no      | `just profile`              |
+| Binary (`integration/tests/`) | What it checks                                                    | In CI   | Local                         |
+| ----------------------------- | ----------------------------------------------------------------- | ------- | ----------------------------- |
+| `integration.rs`              | 0-hop and 1-hop UDP loopback: at least 99% arrival, no corruption | yes     | `just integration-binchain`   |
+| `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved    | yes     | `just exit-origination`       |
+| `pix.rs`                      | PIX settlement with `edgli` as the paying entry                   | v5 only | `LINE=v5 just pix`            |
+| `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)          | v5 only | `LINE=v5 just pix-shapes`     |
+| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies      | yes     | `just return-path`            |
+| `pix_relay_loss.rs`           | a PIX cycle survives half its return relays dying, and is paid    | no      | `LINE=v5 just pix-relay-loss` |
+| `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line       | no      | see `run.sh`                  |
+| `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`) | no      | `just rotsee`                 |
+| `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result            | no      | `just profile`                |
 
-CI runs 9 scenarios on v4 (6 of them `return_path`) and 11 on v5. Suites share one chain per
-`run.sh` invocation, warm with frozen identities after the first. `return_path` runs last on v4,
-on a fresh chain and one cluster per scenario, and only its 1-hop scenarios: the two-hop ones wait
-for the v5 fix and `spread` is held out for asserting a ratio on a random draw. v5 waits on stack
-fixes (branch `em/return-path-v5`).
+CI runs 9 scenarios on v4 (6 of them `return_path`) and 19 on v5 (8 of them `return_path`). Suites
+share one chain per `run.sh` invocation, warm with frozen identities after the first. `return_path`
+runs last on both lines, on a fresh chain and one cluster per scenario. `spread` is held out on both
+for asserting a ratio on a random draw. v4 runs only the 1-hop scenarios: the two-hop ones wait for
+the v5 fix. v5 runs them all. They need a localcluster with link cuts and stalls and up to 10 nodes,
+which hoprd `main` gets from the hoprd PR that this repository's PR names in a
+`Requires: hoprnet/hoprd#<n>` line. The two- and three-hop scenarios go green once edge-client's
+lock carries a hopr-lib with the dead-relayer recovery (hoprnet#8506 and #8576); until then that
+step is expected red.
 
 Every scenario is `#[ignore]` because it needs external binaries. Thresholds are constants in
 the test files, and there are no settings to change. Shared code is in `integration/src/`:
@@ -77,6 +82,7 @@ contracts and starts bloklid, and localcluster connects to it with `--chain-url`
 | `HOPR_LOG_DIR`           | parent directory for retained node/localcluster artifacts (`hoprd-it-*/logs/hoprd_<i>.log`) |
 | `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files after teardown           |
 | `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture` |
+| `TEST_PROFILE=release`   | build and run the test binary in release; timing-sensitive suites such as `return_path` at 3 hops run the test process at ~1800 % CPU in debug |
 
 To retain node logs under a fixed parent directory:
 

@@ -294,21 +294,27 @@ if [ "${PIX_SUITE}" = "1" ]; then
   fi
 fi
 
-# v4 only until the v5 stack fixes land (branch em/return-path-v5). Last and on a fresh chain: its
-# 5-node cluster leaves nodes 3-4 channelled but offline. Scenarios kill nodes, so one cluster each.
+# `return_path` on both lines. Last and on a fresh chain: its larger clusters leave nodes channelled
+# but offline. Scenarios kill nodes or cut links, so one cluster each.
+#
+# `spread` is held out on both: it asserts a ratio on a random draw, so a red says nothing.
+#
+# v4 runs the 1-hop scenarios only: it mitigates a dead relayer one hop deep (hoprnet#8498), and the
+# two-hop ones wait for the v5 fix. v5 runs them all. They cut and stall links between nodes and
+# need up to 8, which the localcluster of hoprnet/hoprd#248 provides on main (`Requires:` in the
+# PR body), and they go green only once edgli's lock carries a hopr-lib with hoprnet#8506 and #8576.
+# Until it does, the 2- and 3-hop scenarios on v5 are expected red.
+chain_stop
+chain_start
+scenarios="$(list_scenarios return_path)"
+held_out="return_paths_should_spread_across_distinct_relayers"
 if [ "${LINE}" = "v4" ]; then
-  chain_stop
-  chain_start
-  scenarios="$(list_scenarios return_path)"
-  # The 1-hop scenarios only: v4 mitigates a dead relayer one hop deep (hoprnet#8498). Two-hop ones
-  # wait for the v5 fix; `spread` asserts a ratio on a random draw, so a red says nothing.
-  held_out="return_paths_should_spread_across_distinct_relayers"
   held_out="${held_out} a_two_hop_session_should_survive_exit_losing_its_return_relayer"
   held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
-  for scenario in ${scenarios}; do
-    case " ${held_out} " in *" ${scenario} "*) continue ;; esac
-    SCENARIOS="${scenario}" run_suite return_path
-  done
 fi
+for scenario in ${scenarios}; do
+  case " ${held_out} " in *" ${scenario} "*) continue ;; esac
+  SCENARIOS="${scenario}" run_suite return_path
+done
 
 exit "${suite_rc}"
