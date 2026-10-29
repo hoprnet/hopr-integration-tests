@@ -701,10 +701,15 @@ fn edgli_config(
             config::{StreamProtocolConfig, SurbPopOrder, SurbStoreConfig},
         },
     };
-    // Follows the Exit's build. v5 is FIFO-only since hoprnet#8473 removed LIFO: a PIX share reaches
-    // the Exit only when its SURB is spent, so newest-first left the oldest unspent until the
-    // per-pseudonym ring buffer overwrote them. v4's hoprd still pins LIFO. A cluster whose two ends
-    // disagree measures neither order.
+    // Follows the Exit's build. v5 is FIFO-only since hoprnet#8473 removed LIFO, so the v4 branch is
+    // a *different type* rather than a different value: `SurbPopOrder` on the v5 tree has no `Lifo`
+    // variant to name, which is why the split is on the dependency line and not on `enforce_pix`.
+    //
+    // Note for anyone reading this as evidence about PIX: neither order is correct under PIX. Both
+    // hand back a contiguous run of the emission, and a PIX cycle needs every polynomial of its
+    // emission, so both bulk-fail a cycle once the ring overflows. What bounds that is the store's
+    // emission-window bucketing (hoprnet `SurbShareInfo::emission_window`), not the pop order. The
+    // v4 branch stays only because a v4 cluster cannot be built without naming its variant.
     #[cfg(feature = "v5")]
     let pop_order = SurbPopOrder::Fifo;
     #[cfg(not(feature = "v5"))]

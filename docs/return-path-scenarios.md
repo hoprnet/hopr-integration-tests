@@ -144,8 +144,9 @@ Gate on the channel status the exit reports, not on a sleep.
 ### S4 — Stale SURB backlog drains before a path change takes effect · **not implemented**
 
 _Isolates:_ #8328 FIFO vs LIFO pop order — the "a return-path change only takes effect
-after ~10 MB of stale backlog is consumed" half of the incident. v4 only: hoprnet#8473 made v5
-FIFO-only.
+after ~10 MB of stale backlog is consumed" half of the incident. **v4 only.** hoprnet#8473 made
+v5 FIFO-only, so on v5 there is no second order to vary and this scenario degenerates into the
+baseline it was meant to contrast with. Any future run has to pin a v4 hoprd.
 
 _Setup:_ provision a large SURB buffer and let it fill (the session config already asks for
 a production-scale 10 MB / `always_max_out_surbs`), quiesce the reply stream so the backlog
@@ -154,6 +155,13 @@ is genuinely stale, close a channel as in S3, then resume.
 _Signal:_ time (or bytes) from the change until replies first appear on the new path. FIFO
 must drain the backlog first; LIFO uses the freshest SURB immediately. Vary the **hoprd**
 pin; the metric is a latency-to-recovery, not a share.
+
+⚠️ **Do not read a result here as evidence about PIX.** Neither order is correct under PIX: both
+return a contiguous run of the emission, and a cycle recovers only if *every* polynomial of its
+emission reaches threshold, so both bulk-fail a cycle once the ring overflows (measured against
+the real reconstructor: 5 % contiguous loss is fatal, 50 % spread loss is not). What bounds that
+is the Exit store's emission-window bucketing (hoprnet `SurbShareInfo::emission_window`). This
+scenario measures *staleness latency on a reopened path*, which is a different property.
 
 ### S5 — 0-hop return path must not be invalidated · **not implemented**
 
