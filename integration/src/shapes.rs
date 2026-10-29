@@ -51,9 +51,10 @@ use edgli::hopr_lib::exports::transport::{SESSION_MTU, SURB_SIZE};
 
 /// Polynomials per SSA.
 ///
-/// A multiple of 256, which is upstream's `SHARE_EMISSION_WINDOW`: the generator walks polynomials
-/// in blocks of that size, so a count that is not a whole number of blocks narrows the last window
-/// and makes the emission order less uniform than the one production sees.
+/// A multiple of 512, which is upstream's `SHARE_EMISSION_WINDOW` (256 before hoprnet#8585): the
+/// generator walks polynomials in blocks of that size, so a count that is not a whole number of
+/// blocks narrows the last window and makes the emission order less uniform than the one
+/// production sees.
 ///
 /// Halved from 1024 together with [`TARGET_PACKET_RATE`], which keeps the cycle length and so every
 /// ratio below, and halves the quota the recovery floor is computed from — see the module docs.

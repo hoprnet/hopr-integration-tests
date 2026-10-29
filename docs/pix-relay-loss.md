@@ -18,7 +18,7 @@ shared. Manual, never in CI. Name scenarios to run only those. It forwards the e
 
 | variable | meaning | default |
 | --- | --- | --- |
-| `HOPRD_PIX_ADDITIONAL_SHARES` | surplus shares per polynomial, clamped to `8..=255` | 32 |
+| `HOPRD_PIX_ADDITIONAL_SHARES` | surplus shares per polynomial, clamped to `4..=255` | 32 |
 | `HOPRD_PIX_POLYS` | polynomials per SSA (production: 4096) | 512 |
 | `HOPRD_PIX_THRESHOLD` | shares that reconstruct a polynomial (production: 32) | 64 |
 | `HOPRD_PIX_RATE` | offered packets per second, and so the Exit's egress | 150 |
@@ -39,12 +39,14 @@ Two things qualify that, and both are more interesting than the parameter list:
 1. **The shipped surplus of 16 also survived.** At the SURB buffer depth a test cluster runs
    (2 400), the burst a relayer's death actually costs is smaller than even the shipped tolerance.
    The recommended 32 buys margin, not survival, *at this scale*.
-2. **At a deployed buffer depth the margin is three shares.** The tolerance is `256 × surplus`.
-   Written first as "no admissible surplus survives", on the assumption that upstream caps the
-   surplus at the threshold (`256 × 64` = 16 384 shares against ~19 264 SURBs); hoprnet#8519 lifted
-   that cap, production ships a surplus of 79 against a threshold of 32, and `256 × 79` = 20 224.
-   A deployed Exit's whole buffer, which one generation bump discards, costs each polynomial 76 of
-   those 79 shares. §"Production dimensions" has the runs that measured it.
+2. **At a deployed buffer depth the margin was three shares, at the emission window of 256.** The
+   tolerance is `window × surplus`. Written first as "no admissible surplus survives", on the
+   assumption that upstream caps the surplus at the threshold (`256 × 64` = 16 384 shares against
+   ~19 264 SURBs); hoprnet#8519 lifted that cap, production ships a surplus of 79 against a
+   threshold of 32, and `256 × 79` = 20 224. A deployed Exit's whole buffer, which one generation
+   bump discards, cost each polynomial 76 of those 79 shares. §"Production dimensions" has the runs
+   that measured it. **The suite now assumes the window of 512** (hoprnet#8585): `512 × 79` =
+   40 448, 38 of the 79 shares, a margin of 41. §"Emission window: 256 vs 512" has the measurements.
 
 So the durable part of this answer is the **inequality**, not the number. It held again on the stack
 of hoprnet#8506 and #8576 (§"Results on the dead-verdict stack"), where the wipe the inequality
@@ -115,18 +117,19 @@ burst  ≈  B  +  ½ · R_e · T_d
 
 ## What absorbs a burst
 
-Emission is **round-robin over `SHARE_EMISSION_WINDOW` = 256 polynomials advancing in lockstep**.
+Emission is **round-robin over `SHARE_EMISSION_WINDOW` = 512 polynomials advancing in lockstep**
+(256 until hoprnet#8585, which this suite follows; the measurements below that predate it say so).
 That is not incidental — the constant exists for exactly this, and its doc comment says so: a
 contiguous run of lost SURBs "would otherwise land on a single polynomial", and round-robin
 "spreads the same run across the window".
 
-So a burst of `L` costs each polynomial in the window `L / 256`, and each can afford `surplus`:
+So a burst of `L` costs each polynomial in the window `L / 512`, and each can afford `surplus`:
 
 ```
-tolerated burst  =  256 · surplus
+tolerated burst  =  512 · surplus
 ```
 
-**The design rule is therefore `256 · surplus ≥ margin · (B + ½ · R_e · T_d)`.** `surplus` is sized
+**The design rule is therefore `512 · surplus ≥ margin · (B + ½ · R_e · T_d)`.** `surplus` is sized
 against the Exit's *SURB buffer depth*, not against a packet-loss percentage. `relay_loss::burst_margin`
 is that ratio, and the profile is chosen to clear 2.0.
 
@@ -161,12 +164,12 @@ and it shows up as `recovery_idle` rather than as a stream stall.
 
 | knob | value | why |
 | --- | --- | --- |
-| `num_ssa_parts` | 512 | a whole number of 256-wide emission windows, so a burst is always spread over the full 256 |
+| `num_ssa_parts` | 512 | a whole number of 512-wide emission windows (exactly one), so a burst is always spread over the full 512 |
 | `ssa_part_size` | 64 | the deployed threshold, unchanged |
-| **`additional_shares`** | **32** | `256 × 32` = 8192 tolerated against ~3000 expected — a margin of 2.7 |
+| **`additional_shares`** | **32** | `512 × 32` = 16 384 tolerated against ~3000 expected — a margin of 5.5 (8192 and 2.7 at the window of 256, which is what 32 was chosen for) |
 | `E` | 49 152 packets | 328 s nominal at 150 pkt/s |
 | quota | 71.4 MB | `E × PIX_QUOTA_BYTES_PER_SHARE` |
-| `quota_range` | 36 864 … 65 536 shares | holds the whole `8..=64` surplus sweep, so the control run faces one admission policy |
+| `quota_range` | 34 816 … 65 536 shares | holds the whole `4..=64` surplus sweep, so the control run faces one admission policy |
 | `target_surb_buffer_size` | 2 400 (`16 × R`) | 4.9 % of `E`, the deployed ratio — and the dominant term in the burst |
 | `max_surbs_per_sec` | 600 (`4 × R`) | the mint ceiling; the old open-loop refill had to replace a whole buffer inside the 10 s degraded grace with it |
 | `max_recovery_time` | 900 s | `shapes`' value; also what bounds how long a *failure* takes to surface |
@@ -366,17 +369,19 @@ the headline answer and it is not marginal.
 
 **Not established: that surplus 32 is necessary.** The one run that reached the wipe was at
 surplus 32, and the one at surplus 16 never faced it. At this buffer depth the measured burst sits
-under even the shipped tolerance of 4 096, so 32 buys margin rather than survival. Settling this
+under even the shipped tolerance of 4 096 (at the window of 256 these runs were taken at; 8 192 at
+512), so 32 buys margin rather than survival. Settling this
 needs a way to force the detector to fire — the honest next experiment, and not one of these.
 
-**Derived, then measured: the rule scales, with three shares to spare.** These runs were first
-read as "the rule does not scale": the tolerance is `256 × surplus`, upstream was taken to cap the
-surplus at the threshold (`256 × 64` = 16 384 shares), and a deployed Exit holds ~19 264 SURBs
-(`docs/pix-traffic-shapes.md`), all of which a generation bump discards. hoprnet#8519 lifted that
-cap. Production ships a surplus of 79 against a threshold of 32, which tolerates `256 × 79` =
-20 224 shares, and the deployed buffer's wipe costs each polynomial 76 of the 79:
-`relay_loss::tests::the_deployed_buffer_is_covered_by_the_production_surplus_with_three_shares_to_spare`
-states it against the same constants, and §"Production dimensions" measures it.
+**Derived, then measured: the rule scales, with three shares to spare at the window of 256
+(forty-one at 512).** These runs were first read as "the rule does not scale": the tolerance is
+`256 × surplus`, upstream was taken to cap the surplus at the threshold (`256 × 64` = 16 384
+shares), and a deployed Exit holds ~19 264 SURBs (`docs/pix-traffic-shapes.md`), all of which a
+generation bump discards. hoprnet#8519 lifted that cap. Production ships a surplus of 79 against a threshold of 32, which tolerates `256 × 79` =
+20 224 shares, and the deployed buffer's wipe costs each polynomial 76 of the 79. At 512 it is 38 of
+the 79:
+`relay_loss::tests::the_deployed_buffer_is_covered_by_the_production_surplus_with_forty_one_shares_to_spare`
+states it against the same constants, and §"Production dimensions" measures it (at 256).
 
 ### Every run, in one table
 
@@ -406,7 +411,11 @@ buffer, the victim killed at about 26 % of a funded cycle.
 
 ### Does a cycle survive the wipe?
 
-| scenario | surplus | tolerated burst (`256 × surplus`) | wipe after the kill | SURBs wiped | arrival | wall | result |
+Measured at the emission window of 256, so the column below is `256 × surplus`. At 512 every
+tolerance doubles: 16 384, 8 192 and 4 096 for surplus 32, 16 and 8, and the negative control moves
+from surplus 8 to surplus 4 (2 048, below the 2 400 wiped here), which the suite now uses.
+
+| scenario | surplus | tolerated burst (`256 × surplus`, the window then) | wipe after the kill | SURBs wiped | arrival | wall | result |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | return-two-hop | 32 | 8192 | +2 s | 2403 | 95.6 % | 514 s | pass: swept, Safe +1 cycle |
 | return-two-hop | 16 | 4096 | none (no verdict this run) | — | 91.9 % | 500 s | pass: swept, Safe +1 cycle |
@@ -416,9 +425,9 @@ buffer, the victim killed at about 26 % of a funded cycle.
 
 The wipe is now deterministic (it fired within 5 s in four of the five runs; the earlier silence
 detector fired in one of four) and costs exactly the Exit's stock, about 2 400 shares here. A cycle
-survives it iff `256 × surplus` covers that stock plus the detection burst: 8192 and 4096 do. The
-surplus-8 run is the **negative control** and fails as predicted: 2508 wiped against 2048 tolerated,
-and the cycle starved. The surplus-16 run reached no verdict and survived without a wipe: for a deep
+survives it iff `256 × surplus` (the window then) covers that stock plus the detection burst: 8192
+and 4096 do. The surplus-8 run is the **negative control** (at 256) and fails as predicted: 2508
+wiped against 2048 tolerated, and the cycle starved. The surplus-16 run reached no verdict and survived without a wipe: for a deep
 victim the first hop still acknowledges, so shares arrive and only replies are lost.
 
 ### Production dimensions
@@ -486,6 +495,15 @@ over its window, that exactly one cycle recovered, one successor was requested b
 failed.
 
 ## Emission window: 256 vs 512 (2026-10-28)
+
+**The suite now assumes 512.** `relay_loss::SHARE_EMISSION_WINDOW` is 512 (hard-coded, following
+hoprnet's window PR, hoprnet#8585), `MIN_ADDITIONAL_SHARES` is 4 so that a negative control exists
+at 512 (`512 × 4` = 2048 is below the 2400 SURBs a wipe discards, while `512 × 8` = 4096 now
+survives it), and the margin test states the 512 arithmetic (`19 264.div_ceil(512)` = 38, a margin
+of 41). Against a hopr-lib still at 256 the suite's tolerance arithmetic overstates what a cycle
+survives. The runs below are the evidence for the change: the deep scenario at production dimensions,
+two runs per window. The test-scale profile (512 × (64 + 32), a 2 400-SURB buffer) has not been re-run
+at 512, and the surplus-4 control has not been run at all.
 
 **Question.** At the deployed worst case (the Exit holds 19 264 SURBs, production dimensions 4096 x (32 + 79)) the generation wipe loses ~19.2k shares in one burst. Emission is round-robin over `SHARE_EMISSION_WINDOW` polynomials, so the burst costs each polynomial of the active window `wipe / window` of its 79 surplus shares: ~75 with the current 256, ~38 with 512. What does 512 cost in Exit memory, in time to the Exit's `early recovery threshold reached`, and in shares lost?
 
