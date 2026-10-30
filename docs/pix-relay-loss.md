@@ -546,10 +546,37 @@ shares, which it survives, and the cycle still died 40 shares short. After the v
 probation the planner's exploration keeps drawing the dead relayer as a return hop, and a share is
 revealed to the reconstructor only when the first return relayer acknowledges, so every probe SURB
 whose first hop is the dead relayer takes its share with it (about 5 SURBs per second in the
-balancer's `invalid` count). At surplus 79 that is noise; at surplus 8 it is the margin. Until
-hoprnet decides how probation probes are priced (a lower probe rate, aging probation out, or
-documenting), the positive case at test scale is surplus 32 and the negative control surplus 4;
-surplus 8 is marginal and not a gate.
+balancer's `invalid` count). At surplus 79 that is noise; at surplus 8 it is the margin. Decision
+(2026-10-30): documented, no change in hoprnet. The positive case at test scale is surplus 32 and
+the negative control surplus 4; surplus 8 is marginal and not a gate (a second run on 2026-10-30,
+RLI, lost its cycle 26 shares short).
+
+### The stock after a wipe, and the test binary's profile (2026-10-30)
+
+Every production run above left the Exit holding 2.0 to 3.4 times its target for the rest of the
+cycle after the one wipe, which would have cost the whole surplus had a second relayer died in the
+same cycle. Two causes, found one after the other:
+
+1. **The Exit's level reports were a notify period stale.** hoprnet's keep-alive stream built the
+   message, level included, when its rate limiter pulled the next item and sent it a period (15 s)
+   later, so the first report after a wipe told the Entry what the Exit held right after the wipe.
+   The Entry read a 6 000-SURB deficit that did not exist, burst, kept its organic gate open, and the
+   Exit filled to twice its target. Fixed in hoprnet#8581 (`67f66f22fb`); on that head a release
+   `return_path` round shows the level after every bump at 1.03 to 1.08 times the target.
+2. **A debug-built test binary mints faster than it sends.** At production dimensions the paced
+   refill asks for 3 852 SURBs per second and the debug Entry's packet pipeline carries about 1 700,
+   so its own count runs ahead of what reaches the Exit, every Exit report reads low, and the PID
+   keeps producing into the Entry's own queue. `TEST_PROFILE=release` is therefore required for the
+   production-dimension runs, not only for the timing-sensitive stream scenarios: with it
+   (RP19264-K1 on hoprnet#8585's head `993104fe2b` plus #8595) every Exit report after the refill
+   agrees with the Entry's count to within 1 000 SURBs and the cycle recovers with the full margin,
+   where the same run with the debug binary read 3.4 times the target.
+
+What the release run still shows is the probe cost of the decision above at production scale: the
+believed level climbs by 26 SURBs per second of written-off probes through the relayer on probation,
+so the Exit holds twice its target 13 minutes after the bump, half of it SURBs through the dead
+relayer. The verdict in that run came at +16.3 s, the first Exit keep-alive after the kill, where the
+debug runs got +0.6 s from the fill keep-alives the slow Entry provoked (hoprnet#8596).
 
 ## Fidelity limits
 
