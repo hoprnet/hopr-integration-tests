@@ -665,7 +665,7 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         cmd.arg("--frozen-identities");
     }
     cmd.args(["--chain-url", &chain_url]);
- 
+
     if let Some(base) = &control_base {
         cmd.arg("--control-base").arg(base);
     }
