@@ -27,6 +27,7 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 | `pix.rs`                      | PIX settlement with `edgli` as the paying entry                    | v5 only | `LINE=v5 just pix`          |
 | `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)           | v5 only | `LINE=v5 just pix-shapes`   |
 | `return_path.rs`              | reply spread over relayers, and survival when a relayer dies       | v4 only | `just return-path`          |
+| `quic_congestion.rs`          | sustained QUIC throughput on a shaped entry↔exit link              | no      | `just quic-congestion`      |
 | `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line        | no      | see `run.sh`                |
 | `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`)  | no      | `just rotsee`               |
 | `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no      | `just profile`              |

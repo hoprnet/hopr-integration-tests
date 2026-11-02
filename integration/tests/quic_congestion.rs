@@ -39,6 +39,14 @@
 //! Run with:
 //!
 //! ```bash
+//! just quic-congestion                        # builds hoprd + localcluster, then runs both scenarios
+//! just quic-congestion unpaced                 # one scenario, by libtest filter
+//! ```
+//!
+//! Manual on purpose, not a CI gate: it is a reproduction, so on a stack that still has the bug it
+//! fails by design. Or straight through the runner:
+//!
+//! ```bash
 //! HOPRD_KEEP_ARTIFACTS=1 HOPRD_BIN=<hoprd> HOPRD_LOCALCLUSTER_BIN=<localcluster> \
 //! TEST_TARGET=quic_congestion TEST_ARGS=--nocapture \
 //!   bash scripts/integration/run-binchain.sh > /tmp/run.log 2>&1
@@ -101,12 +109,39 @@ fn target_mbps() -> f64 {
         })
 }
 
+/// Fails the run unless the session's traffic verifiably crossed the shaper.
+///
+/// The shaper is only in the path if Edgli dialed a port the proxy rewrote, so both directions
+/// have to show forwarded packets — and the blackhole and loss schedule has to have dropped some —
+/// before a throughput verdict means anything. Without this, a run in which Edgli reached a node
+/// directly passes on a perfectly healthy connection and reports nothing about the fault.
+fn assert_shaper_carried_the_session(shaper: &hoprd_integration_test::quic_shaper::QuicShaperPool) {
+    let stats = shaper.stats();
+    tracing::info!(?stats, "shaper counters");
+    assert!(
+        stats
+            .iter()
+            .any(|s| s.forward_sent > 0 && s.return_sent > 0),
+        "no QUIC traffic crossed the shaper in both directions; the impairment never applied: \
+         {stats:?}"
+    );
+    assert!(
+        stats
+            .iter()
+            .map(|s| s.forward_dropped + s.return_dropped)
+            .sum::<u64>()
+            > 0,
+        "the shaper dropped nothing; the blackhole and loss schedule never reached the session: \
+         {stats:?}"
+    );
+}
+
 /// A sustained transfer must not collapse to a fraction of the rate it held earlier in the run.
 ///
 /// The assertion is on the **final** windows against the peak, which is the shape of the reported
 /// fault: fast at the start, low ever after, no recovery within the connection.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
-#[ignore = "requires hoprd/hoprd-localcluster binaries + a bloklid-anvil container"]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
 async fn sustained_transfer_keeps_its_throughput() -> anyhow::Result<()> {
     // Mirror production 2 s egress stall timeout, which triggers stream eviction under backpressure.
     request_edgli_egress_timeout(Duration::from_secs(2));
@@ -161,6 +196,13 @@ async fn sustained_transfer_keeps_its_throughput() -> anyhow::Result<()> {
         "quic-sustained",
     )
     .await?;
+
+    // The impairment only means anything if the traffic actually crossed the shaper. Edgli could
+    // otherwise have reached a node directly — a multiaddr the proxy did not rewrite, an address
+    // learned outside Blokli, or an inbound connection to its own edge port — and the run would
+    // then pass without testing anything. Fails the run rather than the assertion below it, so a
+    // vacuous pass cannot be mistaken for a healthy connection.
+    assert_shaper_carried_the_session(&shaper);
 
     // The whole series, so a failing run reports the shape rather than one number.
     let mut series = String::new();
@@ -234,7 +276,7 @@ async fn sustained_transfer_keeps_its_throughput() -> anyhow::Result<()> {
 /// seen. Kept as a separate scenario because it exercises a different regime, not a different
 /// assertion.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
-#[ignore = "requires hoprd/hoprd-localcluster binaries + a bloklid-anvil container"]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
 async fn unpaced_transfer_keeps_its_throughput() -> anyhow::Result<()> {
     request_edgli_egress_timeout(Duration::from_secs(2));
 
@@ -264,6 +306,10 @@ async fn unpaced_transfer_keeps_its_throughput() -> anyhow::Result<()> {
         "quic-unpaced",
     )
     .await?;
+
+    // Same vacuity guard as the paced scenario: a run whose traffic never crossed the shaper says
+    // nothing about congestion control, whichever direction it is missing.
+    assert_shaper_carried_the_session(&shaper);
 
     // The whole series, so a failing run reports the shape rather than one number.
     let mut series = String::new();

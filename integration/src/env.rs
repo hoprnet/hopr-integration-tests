@@ -738,9 +738,10 @@ async fn boot_edgli(
         }
     }
     extra_strategies.apply(&mut strat_cfg);
-    #[cfg(feature = "v5")]
-    let reactor = edgli.run_reactor_from_cfg(strat_cfg)?;
-    #[cfg(not(feature = "v5"))]
+    // Both lines return the handle through `ReactorHandle`, so `.abort_handle` is the one spelling
+    // that compiles on both — v5's struct exposes the field publicly, and v4 returns the same
+    // wrapper (edge-client#200). Branching on the feature here is what broke the v5 build: the
+    // v5 arm kept the wrapper and the function's return type did not.
     let reactor = edgli.run_reactor_from_cfg(strat_cfg)?.abort_handle;
 
     // Require one channel *beyond* any pre-existing genesis channels, so the gate proves the

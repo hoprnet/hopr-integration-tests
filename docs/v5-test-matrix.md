@@ -42,7 +42,9 @@ and the fill aims at 540 s.
 | F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`   | #83    | nightly  | #83 7.6m                                                  | 3     | (0,1)                                |
 | F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`   | #83    | nightly  | #83 8.6m                                                  | 4     | (0,2)                                |
 
-Not in v5 CI: upload_survival, rotsee, profiling.
+Not in v5 CI: upload_survival, rotsee, profiling, and `quic_congestion` — the last is a
+reproduction, so it is red by design until the QUIC congestion fix lands; run it with
+`LINE=v5 just quic-congestion`.
 
 | Set (test time, build excluded) | Before                   | After                    |
 | ------------------------------- | ------------------------ | ------------------------ |

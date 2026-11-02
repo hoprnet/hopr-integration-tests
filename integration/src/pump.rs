@@ -962,8 +962,8 @@ pub struct Sustained {
 impl Sustained {
     /// Bytes per second achieved in the window ending at `at`, per direction.
     ///
-    /// `None` before the first sample or after the last, so a caller cannot read a rate off an
-    /// interval it never measured.
+    /// `None` before the first sample; a window ending past the last row is still measured, over
+    /// the span the rows do cover.
     fn rate_in_window(samples: &[(f64, u64)], before: f64, at: f64) -> Option<f64> {
         let end = samples
             .iter()
@@ -1040,9 +1040,10 @@ fn trailing_stall_secs(at: f64, last_progress_ms: i64) -> f64 {
 /// reports how the rate moved. That is the shape a "throughput collapsed and did not come back"
 /// finding needs, since a finite payload only ever shows the average.
 ///
-/// `pace` is the per-write delay, so `pace_for_rate(target)` offers `target` MB/s. The writer
-/// blocks on the session when the wire is slower than the pace, which is why the writer's own
-/// progress is the send-side measurement.
+/// `pace` is the per-write delay, so `pace_for_rate_with_chunk(target, chunk)` offers `target`
+/// MB/s — deriving it from [`IO_CHUNK`] while writing `chunk`-sized blocks would scale the rate by
+/// the ratio of the two. The writer blocks on the session when the wire is slower than the pace,
+/// which is why the writer's own progress is the send-side measurement.
 ///
 /// Borrows the session halves, so the same session can be measured more than once. Writer and
 /// reader are joined in this task rather than spawned, so the borrowed halves never leave the
@@ -1077,14 +1078,26 @@ pub async fn pump_sustained(
 
     let writer = async {
         let tx = tx;
+        // The writer must not outlive the reader: a connection pinned at quinn's window floor
+        // blocks `write_all` with no time limit of its own, and `join!` would then wait for it
+        // forever instead of returning the run whose stall is the finding. Same guard as
+        // `pump_halves`, anchored on this run's deadline rather than a separate one.
+        let deadline_at = tokio::time::Instant::from_std(deadline);
         let mut block = tagged_payload(0, chunk);
         while std::time::Instant::now() < deadline {
             let record = written.load(std::sync::atomic::Ordering::Relaxed) / RECORD_SIZE as u64;
             for (i, rec) in block.chunks_exact_mut(RECORD_SIZE).enumerate() {
                 rec[8..16].copy_from_slice(&(record + i as u64).to_le_bytes());
             }
-            if tx.write_all(&block).await.is_err() {
-                break;
+            match tokio::time::timeout_at(deadline_at, tx.write_all(&block)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    // Still blocked when the run ended: cancel the write rather than wait for a
+                    // window that may never reopen. The stall counter already holds the evidence.
+                    tracing::warn!("{label}: writer still blocked at the deadline");
+                    break;
+                }
             }
             written.fetch_add(chunk as u64, std::sync::atomic::Ordering::Relaxed);
             mark(&last_progress_ms);
@@ -1092,7 +1105,8 @@ pub async fn pump_sustained(
                 tokio::time::sleep(d).await;
             }
         }
-        let _ = tx.flush().await;
+        // Bounded for the same reason: a wedged connection would otherwise hold the flush open.
+        let _ = tokio::time::timeout(Duration::from_secs(1), tx.flush()).await;
     };
 
     let mut write_samples: Vec<(f64, u64)> = Vec::new();

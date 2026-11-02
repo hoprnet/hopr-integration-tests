@@ -3,6 +3,24 @@
 //! Enables controlled network impairment (latency, blackhole, packet loss)
 //! on the QUIC transport connection between Edgli and cluster nodes without
 //! requiring root privileges (`tc netem` / `iptables`).
+//!
+//! # Why not the localcluster relay
+//!
+//! `hoprd/localcluster/src/relay.rs` already relays UDP between cluster nodes, and reusing it
+//! would be the obvious way to avoid a second fault injector. It cannot stand in for this one:
+//!
+//! - It models **delay only** (`latency::DelayDist`: fixed, uniform, normal). There is no loss
+//!   schedule and no blackhole, which are the two impairments this scenario needs.
+//! - It identifies a peer by its **source port** (`p2p_port_base + index`) to pick the directed
+//!   link's delay. Edgli is the entry *outside* the cluster and dials from an ephemeral port, so
+//!   it is `UNKNOWN_PEER` there and would only ever get the default delay.
+//! - It lives in hoprd's workspace as the `hoprd-localcluster` **binary**, which this harness runs
+//!   from `HOPRD_LOCALCLUSTER_BIN`. Nothing here can link it, and a new capability would have to
+//!   reach a hoprd release before these tests could use it.
+//!
+//! The link this scenario has to impair is exactly entry↔exit, so the shaper sits between what
+//! Edgli learns from Blokli (the proxy rewrites the announced ports) and the node itself, rather
+//! than between nodes.
 
 use std::{
     collections::VecDeque,
@@ -361,6 +379,17 @@ pub fn rewrite_ports(input: &str, mappings: &[(u16, u16)]) -> String {
     result
 }
 
+/// Splits off the leading complete lines of `pending`, leaving any trailing partial line behind.
+///
+/// A stream chunk is not a line: an SSE event or a JSON document can arrive split anywhere,
+/// including inside a multiaddr. Handing the caller only the bytes up to the last newline keeps
+/// every `rewrite_ports` input a whole line, and the remainder stays buffered for the next chunk.
+/// `None` when the buffer holds no complete line yet.
+fn take_complete_lines(pending: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let end = pending.iter().rposition(|b| *b == b'\n')?;
+    Some(pending.drain(..=end).collect())
+}
+
 /// A lightweight HTTP reverse proxy that intercepts Blokli responses and rewrites node multiaddresses.
 pub struct BlokliProxy {
     local_port: u16,
@@ -507,10 +536,22 @@ async fn handle_proxy_conn(
         writer.flush().await?;
 
         let mut stream = resp.bytes_stream();
+        // Rewrite whole lines only. A multiaddr (`/udp/19000/`) can straddle two `bytes_stream`
+        // chunks, and neither half matches on its own — the port would then reach Edgli
+        // unrewritten, it would dial the node directly and the impairment would silently not
+        // apply. Decoding is only valid once the bytes are assembled for the same reason: a UTF-8
+        // sequence can straddle a chunk too, and `from_utf8_lossy` per chunk would corrupt it.
+        let mut pending: Vec<u8> = Vec::new();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            let text = String::from_utf8_lossy(&chunk);
-            let rewritten = rewrite_ports(&text, mappings);
+            pending.extend_from_slice(&chunk?);
+            if let Some(complete) = take_complete_lines(&mut pending) {
+                let rewritten = rewrite_ports(&String::from_utf8_lossy(&complete), mappings);
+                writer.write_all(rewritten.as_bytes()).await?;
+                writer.flush().await?;
+            }
+        }
+        if !pending.is_empty() {
+            let rewritten = rewrite_ports(&String::from_utf8_lossy(&pending), mappings);
             writer.write_all(rewritten.as_bytes()).await?;
             writer.flush().await?;
         }
@@ -547,6 +588,45 @@ mod tests {
         assert_eq!(
             rewritten,
             r#"{"data":{"peer":"/ip4/127.0.0.1/udp/54000/quic-v1/p2p/12D3","other":"/ip4/127.0.0.1/udp/54001"}}"#
+        );
+    }
+
+    /// A multiaddr split across two stream chunks must still be rewritten.
+    ///
+    /// The proxy used to rewrite each `bytes_stream` chunk on its own, so a port that straddled a
+    /// chunk boundary matched nothing and reached Edgli unrewritten — Edgli then dialed the node
+    /// directly and the impairment silently never applied, which is a scenario passing without
+    /// testing anything. This is the shape of that failure, without needing a socket.
+    #[test]
+    fn a_line_split_across_chunks_is_still_rewritten() {
+        let mappings = vec![(19000, 54000)];
+        let mut pending = Vec::new();
+
+        // First chunk ends inside the port: no complete line yet, nothing to rewrite.
+        pending.extend_from_slice(b"data: {\"p2p\":\"/ip4/127.0.0.1/udp/190");
+        assert!(
+            take_complete_lines(&mut pending).is_none(),
+            "a chunk without a newline must not be emitted"
+        );
+
+        // Second chunk completes the line and starts the next one.
+        pending.extend_from_slice(b"00/quic-v1/p2p/12D3\"}\n\npartial");
+        let complete = take_complete_lines(&mut pending).expect("the first line is now complete");
+        let rewritten = rewrite_ports(&String::from_utf8_lossy(&complete), &mappings);
+        assert!(
+            rewritten.contains("/udp/54000/quic-v1"),
+            "a multiaddr split across chunks must still be rewritten, got: {rewritten}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&pending),
+            "partial",
+            "the trailing partial line must stay buffered"
+        );
+
+        // What is left over is rewritten when the stream ends.
+        assert_eq!(
+            rewrite_ports(&String::from_utf8_lossy(&pending), &mappings),
+            "partial"
         );
     }
 
