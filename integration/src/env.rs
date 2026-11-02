@@ -738,11 +738,17 @@ fn edgli_config(
                 },
                 ..Default::default()
             },
+            // edgli's `Edgli::new` pins the mixer itself (Poisson, `max_delay` = 1 ms) and
+            // keeps only the configured `capacity`, so per-engine tuning here is dead on v5 —
+            // the old uniform `min_delay` / `delay_range` fields no longer exist. Default stands.
+            #[cfg(not(feature = "v5"))]
             mixer: MixerConfig {
                 min_delay: Duration::ZERO,
                 delay_range: Duration::from_millis(1),
                 ..Default::default()
             },
+            #[cfg(feature = "v5")]
+            mixer: MixerConfig::default(),
             // edgli derives the quota it announces from these dimensions and nothing else, and the
             // Exit refuses any Session whose quota falls outside its `quota_range`.
             #[cfg(feature = "v5")]
