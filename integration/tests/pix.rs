@@ -506,13 +506,17 @@ async fn a_session_should_close_when_the_entry_can_no_longer_deposit() -> anyhow
     );
 
     let env = IntegrationEnv::setup_pix(budget).await?;
+    // The Entry's side is read before the Session opens: the Exit asks for the first cycle as the
+    // Session is established, and its deposit can land before the opening returns (the paced SURB
+    // fill makes the opening take longer than the deposit at a small SURB target). Read after it,
+    // the first deposit would be missing from the count the budget is asserted against.
+    let entry_counters_before = pix::sample_entry();
+    let entry_safe_before = env.entry_safe_balance().await?;
     let (session, exit_addr) = env.open_unreliable_session_paths(HOPS, HOPS).await?;
     let exit = node_for(&env, exit_addr)?;
 
     let exit_before = pix::node_balances(&exit).await?;
     let exit_counters_before = pix::sample_exit(&exit).await?;
-    let entry_counters_before = pix::sample_entry();
-    let entry_safe_before = env.entry_safe_balance().await?;
 
     // The budget has to be what binds, so the Safe must be able to cover it — otherwise the entry
     // runs dry first and the run ends for a reason with no assertion behind it.

@@ -242,8 +242,9 @@ async fn close_session(
 /// * Surplus shares were accepted, more than the gate tolerates without progress. Rules that out,
 ///   but not surplus arriving in scattered fragments the gate never had to serve *through*.
 /// * The longest contiguous surplus-only run clears the same bar. That is the run the emission
-///   window actually produces — upstream emits one per window, so a cycle of 512 polynomials
-///   contains two — and it needs the trace, because a before/after pair cannot see contiguity.
+///   window actually produces — upstream emits one per window, so a cycle of 1024 polynomials
+///   contains two at the 512 window — and it needs the trace, because a before/after pair cannot see
+///   contiguity.
 /// * A recovered cycle's accepted-share fraction sits above 1.0. Independent of the trace's
 ///   sampling entirely: the Exit itself recorded, at finalization, that it accepted more shares
 ///   than the cycle's useful target. A sampling cadence too coarse to catch the run cannot make

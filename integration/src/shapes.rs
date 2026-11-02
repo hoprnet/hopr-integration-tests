@@ -51,17 +51,21 @@ use edgli::hopr_lib::exports::transport::{SESSION_MTU, SURB_SIZE};
 
 /// Polynomials per SSA.
 ///
-/// A multiple of 512, which is upstream's `SHARE_EMISSION_WINDOW` (256 before hoprnet#8585): the
-/// generator walks polynomials in blocks of that size, so a count that is not a whole number of
-/// blocks narrows the last window and makes the emission order less uniform than the one
-/// production sees.
+/// Two of upstream's `SHARE_EMISSION_WINDOW`s (512 since hoprnet#8585): the generator walks
+/// polynomials in blocks of that size and spends a block's whole surplus before the next block's
+/// useful shares, so a cycle of two blocks has a surplus-only run in its middle, as production's
+/// eight blocks have seven. With a single block (512 polynomials at the 512 window) the only
+/// surplus comes after the last useful share, a cycle that recovers there, such as one finished by
+/// Exit fill, accepts a few hundred surplus shares, and the gate check below never gets a surplus
+/// run to read.
 ///
-/// Halved from 1024 together with [`TARGET_PACKET_RATE`], which keeps the cycle length and so every
-/// ratio below, and halves the quota the recovery floor is computed from — see the module docs.
-pub const PIX_POLYS: usize = 512;
+/// Doubled from 512 while [`PIX_SHARES`] and [`PIX_ADDITIONAL_SHARES`] are halved, which keeps
+/// [`CYCLE_PACKETS`], the quota, the useful and the surplus share counts, and with them every ratio
+/// below; the surplus run of one block stays at 4096 shares, which it was at the 256 window.
+pub const PIX_POLYS: usize = 1024;
 
-/// Shares needed to reconstruct one polynomial — the deployed threshold, unchanged.
-pub const PIX_SHARES: usize = 64;
+/// Shares needed to reconstruct one polynomial — the deployed threshold.
+pub const PIX_SHARES: usize = 32;
 
 /// Shares emitted beyond the threshold, per polynomial.
 ///
@@ -69,7 +73,7 @@ pub const PIX_SHARES: usize = 64;
 /// unset: a 20 % loss tolerance. Stated explicitly here because the quota, the free credit and the
 /// deposit all scale with it, and a profile whose arithmetic is written down should not depend on
 /// a derivation happening somewhere else.
-pub const PIX_ADDITIONAL_SHARES: usize = 16;
+pub const PIX_ADDITIONAL_SHARES: usize = 8;
 
 /// `E` — every share one cycle emits, and therefore every packet it takes to complete one.
 ///
@@ -534,9 +538,9 @@ mod tests {
     fn the_rendered_yaml_carries_the_geometry() {
         let yaml = cluster_pix_yaml();
         for key in [
-            "num_ssa_parts: 512",
-            "ssa_part_size: 64",
-            "additional_shares: 16",
+            "num_ssa_parts: 1024",
+            "ssa_part_size: 32",
+            "additional_shares: 8",
             "max_recovery_time: 900s",
             "max_deposit_wait: 30s",
             "fill_enabled: true",
