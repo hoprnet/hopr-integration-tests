@@ -481,17 +481,25 @@ run_tier() {
     HOPRD_BIN="${nodes_bin}"
   fi
 
-  # v4 only until the v5 stack fixes land. Last and on a fresh chain: its 5-node cluster leaves
-  # nodes 3-4 channelled but offline. Scenarios kill nodes, so one cluster each. The 1-hop ones
-  # only: v4 mitigates a dead relayer one hop deep (hoprnet#8498); `spread` asserts a ratio on a
-  # random draw, so a red says nothing.
-  if [ "${LINE}" = v4 ]; then
+  # `return_path` last and on a fresh chain: its clusters leave nodes channelled but offline, and
+  # the scenarios kill nodes or cut links, so one cluster each. `spread` is held out on both lines:
+  # it asserts a ratio on a random draw, so a red says nothing.
+  #
+  # v4 runs the 1-hop scenarios only: it mitigates a dead relayer one hop deep (hoprnet#8498) and the
+  # two-hop ones wait for the v5 fix. v5 runs them all, in the nightly tier, but only when
+  # RETURN_PATH_V5=1: the 2- and 3-hop scenarios need a hopr-lib with the dead-relayer recovery
+  # (hoprnet#8506, #8576, #8581) in edge-client's lock, and a localcluster with link cuts, stalls and
+  # up to 8 nodes (hoprnet/hoprd#248). Off by default so the step stays green until both are in;
+  # flip it in pr.yaml then.
+  if [ "${LINE}" = v4 ] || { in_tier nightly && [ "${RETURN_PATH_V5:-0}" = 1 ]; }; then
     chain_stop
     chain_start
     scenarios="$(list_scenarios return_path)"
     held_out="return_paths_should_spread_across_distinct_relayers"
-    held_out="${held_out} a_two_hop_session_should_survive_exit_losing_its_return_relayer"
-    held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
+    if [ "${LINE}" = v4 ]; then
+      held_out="${held_out} a_two_hop_session_should_survive_exit_losing_its_return_relayer"
+      held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
+    fi
     for scenario in ${scenarios}; do
       case " ${held_out} " in *" ${scenario} "*) continue ;; esac
       SCENARIOS="${scenario}" run_suite return_path

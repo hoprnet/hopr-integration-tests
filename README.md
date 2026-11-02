@@ -42,7 +42,10 @@ CI runs 8 scenarios on v4 (6 of them `return_path`). Suites share one chain per
 `run.sh` invocation, warm with frozen identities after the first. `return_path` runs last on v4,
 on a fresh chain and one cluster per scenario, and only its 1-hop scenarios: the two-hop ones wait
 for the v5 fix and `spread` is held out for asserting a ratio on a random draw. v5 waits on stack
-fixes (branch `em/return-path-v5`).
+fixes (branch `em/return-path-v5`). The v5 `return_path` step is wired in the nightly tier behind
+`RETURN_PATH_V5=1`, off by default: its 2- and 3-hop scenarios need a hopr-lib with the dead-relayer
+recovery (hoprnet#8506, #8576, #8581) in edge-client's lock, and a localcluster with link faults and up to
+8 nodes (hoprnet/hoprd#248, the `Requires:` line). Flip the variable in `pr.yaml` once both are in.
 
 Every scenario is `#[ignore]` because it needs external binaries. Thresholds are constants in
 the test files, and there are no settings to change. Shared code is in `integration/src/`:
