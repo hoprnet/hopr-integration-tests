@@ -31,13 +31,19 @@ use crate::{
     },
 };
 
-/// Edgli's P2P port — one slot beyond the cluster nodes, then one per boot.
+/// Edgli's P2P port — one slot beyond the largest cluster, then one per boot.
+///
+/// Beyond the largest cluster rather than the current one: a chain shared by several clusters keeps
+/// the announcements of every frozen node identity that ever ran on it, and a smaller cluster after a
+/// larger one put Edgli on the port a node of the earlier cluster was announced at. The new cluster's
+/// nodes then dialled Edgli as that node, every connection closed at the handshake, and the scenario
+/// timed out waiting for Edgli's peers (the 3-node relay-loss scenarios after the 4-node one).
 ///
 /// A shared cluster boots several edglis in one process, and the previous one's listener is not
 /// always released by the time the next binds.
 fn edge_p2p_port() -> u16 {
     static BOOTS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
-    P2P_PORT_BASE + cluster_size() as u16 + BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    P2P_PORT_BASE + cluster::MAX_CLUSTER_SIZE as u16 + BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Strategies appended to the channel-lifecycle one `default_strategy_cfg` yields.
