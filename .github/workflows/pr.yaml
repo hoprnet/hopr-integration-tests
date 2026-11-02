@@ -84,8 +84,6 @@ jobs:
             shellcheck scripts/integration/*.sh scripts/*.sh
             shfmt -i 2 -d scripts/
           '
-      - name: Runner regression tests
-        run: python3 scripts/tests/test_run_binchain.py
       # The scripts grew by copying: a fork of the runner, three chain pollers, six reapers.
       # A hard cap is the guardrail; shared logic belongs in lib.sh, not in a new file.
       - name: Script budget
@@ -219,6 +217,27 @@ jobs:
             cd integration
             cargo test --lib --all-features
           '
+      # Use the real test binary to discover scenarios. A typo must fail before starting
+      # a chain and leave its diagnostic and run status available to the caller.
+      - name: Runner rejects an unknown scenario and preserves its status
+        run: |
+          nix develop github:hoprnet/hoprnet --command bash -euo pipefail <<'BASH'
+          log_dir=$(mktemp -d)
+          trap 'rm -rf "${log_dir}"' EXIT
+          code=0
+          CHAIN_SHARED=1 HOPR_LOG_DIR="${log_dir}" SCENARIOS_EXCEPT=__nonexistent_ci_scenario__ \
+            bash scripts/integration/run-binchain.sh >"${log_dir}/output.log" 2>&1 || code=$?
+          cat "${log_dir}/output.log"
+          [ "${code}" = 1 ]
+          grep -Fq "SCENARIOS_EXCEPT names '__nonexistent_ci_scenario__', which is not a test" "${log_dir}/output.log"
+          runs=("${log_dir}"/run-*)
+          [ "${#runs[@]}" = 1 ]
+          [ -s "${runs[0]}/run.env" ]
+          grep -qx 'status=failed' "${runs[0]}/run.status"
+          grep -qx 'exit_code=1' "${runs[0]}/run.status"
+          [ ! -e "${runs[0]}/chain" ]
+          [ ! -e "${runs[0]}/client-integration.log" ]
+          BASH
   # Fan-in jobs. The matrix names each job per line, so the bare contexts the ruleset
   # requires would never report and every queue entry would hang until its timeout.
   lint-gate:
