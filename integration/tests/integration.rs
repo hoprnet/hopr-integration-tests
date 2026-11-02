@@ -1,14 +1,12 @@
-//! Cross-repo integration throughput tests: one `#[test]` per hop count.
+//! Cross-repo integration throughput: one healthy session per hop count, as steps of one test.
 //!
-//! Both are `#[ignore]` — they need external binaries + a running chain.
-//! Each test owns its cluster (bring up → run → tear down). Run with:
+//! `#[ignore]`: it needs external binaries + a running chain. Run with:
 //!
 //! ```bash
 //! export HOPRD_LOCALCLUSTER_BIN=/path/to/hoprd-localcluster
 //! export HOPRD_BIN=/path/to/hoprd
 //! export HOPRD_CHAIN_URL=http://localhost:8080
 //! cargo test --test integration -- --include-ignored --test-threads=1
-//! # one hop count: append `zero_hop` or `one_hop` as a filter (before `--`)
 //! ```
 
 use std::time::Duration;
@@ -16,6 +14,7 @@ use std::time::Duration;
 use hoprd_integration_test::{
     IntegrationEnv, PAYLOAD_BYTES,
     pump::{PumpOpts, drain_until_quiet, pump_halves, tagged_payload},
+    step,
 };
 use rand::RngExt as _;
 
@@ -31,8 +30,7 @@ const WARM_UP_BYTES: usize = 64 * 1024;
 /// scored the warm-up as unacked is followed by one that sees its acks before the pump starts.
 const WARM_UP_SETTLE: Duration = Duration::from_secs(20);
 
-async fn run_hop(hops: usize, name: &str) -> anyhow::Result<()> {
-    let env = IntegrationEnv::setup().await?;
+async fn run_hop(env: &IntegrationEnv, hops: usize, name: &str) -> anyhow::Result<()> {
     let session = env.open_unreliable_session(hops).await?;
     let (mut rx, mut tx) = tokio::io::split(session);
 
@@ -75,14 +73,13 @@ async fn run_hop(hops: usize, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 2 hops is the deepest a 3-node cluster routes without reusing a node, and the deepest a happy
+/// path needs: 3 hops runs in the nightly `return_path` scenarios.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires hoprd/hoprd-localcluster binaries + a bloklid-anvil container"]
-async fn zero_hop() -> anyhow::Result<()> {
-    run_hop(0, "0-hop").await
-}
-
-#[test_log::test(tokio::test(flavor = "multi_thread"))]
-#[ignore = "requires hoprd/hoprd-localcluster binaries + a bloklid-anvil container"]
-async fn one_hop() -> anyhow::Result<()> {
-    run_hop(1, "1-hop").await
+async fn zero_one_two_hop() -> anyhow::Result<()> {
+    let env = step("setup", IntegrationEnv::setup()).await?;
+    step("1-hop", run_hop(&env, 1, "1-hop")).await?;
+    step("0-hop", run_hop(&env, 0, "0-hop")).await?;
+    step("2-hop", run_hop(&env, 2, "2-hop")).await
 }

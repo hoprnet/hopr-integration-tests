@@ -11,6 +11,10 @@ HOPRD_SRC=../hoprd-shapes just pix-shapes            # all of them, hours
 HOPRD_SRC=../hoprd-shapes just pix-shapes <scenario> # one, ~8-15 min
 ```
 
+The geometry spike the measurements below mention (`the_profile_geometry_completes_a_cycle`) is
+now part of the mixed scenario, whose bulk phase is the same cycle at the full rate; see
+[v5-test-matrix.md](v5-test-matrix.md). Mixed runs in the PR tier, the other shapes nightly.
+
 `HOPRD_SRC` must be a hoprd carrying the `--pix-config` seam. `just pix-shapes` refuses to run
 without it, because a `hoprd-localcluster` that ignores `--pix-config` silently runs the demo
 geometry and every assertion below would then be measuring a cycle 1 280x smaller than it claims.
