@@ -94,6 +94,10 @@ chain_log_sizes() {
 finish_run() {
   local code=$?
   [ "${CHAIN_SHARED:-0}" = 1 ] || chain_stop
+  if [ -n "${pipe_dir:-}" ] && [ -d "${pipe_dir}" ]; then
+    rm -f "${pipe_dir}/output"
+    rmdir "${pipe_dir}" || true
+  fi
   [ -n "${RUN_DIR}" ] || return 0
   [ "${RUN_STATUS}" = running ] && RUN_STATUS=$([ "${code}" = 0 ] && echo passed || echo failed)
   {
@@ -112,8 +116,14 @@ finish_run() {
   echo "logs of this run: ${RUN_DIR} (${RUN_STATUS})"
 }
 
+# Install before log setup and scenario validation so early failures get a final status too.
+trap finish_run EXIT
+trap 'RUN_STATUS=interrupted; exit 130' INT
+trap 'RUN_STATUS=interrupted; exit 143' TERM
+
 if [ -n "${HOPR_LOG_DIR:-}" ]; then
   mkdir -p "${HOPR_LOG_DIR}"
+  HOPR_LOG_DIR="$(cd "${HOPR_LOG_DIR}" && pwd)"
   RUN_DIR="$(mktemp -d "${HOPR_LOG_DIR}/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXX")"
   # The cluster creates its hoprd-it-* folder under HOPR_LOG_DIR (integration/src/cluster.rs).
   export HOPR_LOG_DIR="${RUN_DIR}"
@@ -160,10 +170,6 @@ if [ -z "${IT_RESULTS:-}" ]; then
   export IT_RESULTS IT_STEP_LOG
 fi
 
-# CHAIN_SHARED=1: the caller owns one chain for every suite (run.sh), so neither start nor stop it.
-trap finish_run EXIT
-trap 'RUN_STATUS=interrupted; exit 130' INT TERM
-
 rc=0
 for target in ${TARGETS}; do
   if [ "${CHAIN_SHARED:-0}" = 1 ]; then
@@ -177,13 +183,21 @@ for target in ${TARGETS}; do
   else
     out="$(mktemp)"
   fi
-  # Not a `| tee` pipeline: the leaked cluster inherits the pipe, so tee would never see EOF and the
-  # reap below would never run. Read the copy only after the reap has closed it.
+  # A background reader lets us reap the leaked cluster before waiting for EOF. An explicit
+  # FIFO also lets Bash 3.2 (macOS) wait for tee, which it cannot do for process substitutions.
+  pipe_dir="$(mktemp -d)"
+  mkfifo "${pipe_dir}/output"
+  tee "${out}" <"${pipe_dir}/output" &
+  tee_pid=$!
   # shellcheck disable=SC2086  # SCENARIOS is a deliberate word-split list of libtest filters
-  if cargo_it "${target}" ${SCENARIOS:-} > >(tee "${out}") 2>&1; then cargo_rc=0; else cargo_rc=1 rc=1; fi
+  if cargo_it "${target}" ${SCENARIOS:-} >"${pipe_dir}/output" 2>&1; then cargo_rc=0; else cargo_rc=1 rc=1; fi
   # Reaped before the chain stops: the test process leaks its cluster on purpose
   # (integration/src/cluster.rs), so nothing else will clear it.
   reap_nodes
+  # Wait after reaping: all writers are now closed and the summary sees the complete log.
+  wait "${tee_pid}" || rc=1
+  rm -f "${pipe_dir}/output"
+  rmdir "${pipe_dir}"
   record_results "${target}" "${out}" "${cargo_rc}"
   [ -n "${RUN_DIR}" ] || rm -f "${out}"
   [ "${CHAIN_SHARED:-0}" = 1 ] || chain_stop

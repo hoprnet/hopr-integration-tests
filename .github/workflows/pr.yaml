@@ -84,6 +84,8 @@ jobs:
             shellcheck scripts/integration/*.sh scripts/*.sh
             shfmt -i 2 -d scripts/
           '
+      - name: Runner regression tests
+        run: python3 scripts/tests/test_run_binchain.py
       # The scripts grew by copying: a fork of the runner, three chain pollers, six reapers.
       # A hard cap is the guardrail; shared logic belongs in lib.sh, not in a new file.
       - name: Script budget
