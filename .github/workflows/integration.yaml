@@ -210,6 +210,7 @@ jobs:
       # per-node hoprd_<i>.log files are gone before the upload step runs — which is
       # exactly what left run 34098266229 undiagnosable.
       HOPRD_KEEP_ARTIFACTS: 1
+      HOPR_LOG_DIR: ${{ github.workspace }}/logs/ci
       RUST_LOG: warn,hoprd_integration_test=info,return_path=info
       HOPRD_NODE_RUST_LOG: info
       # Without this libtest captures a PASSING test's output, so a green run would
@@ -370,11 +371,46 @@ jobs:
             echo "TESTS_FROM=, tests from [#${TESTS_PR}](https://github.com/${GITHUB_REPOSITORY}/pull/${TESTS_PR})" >>"${GITHUB_ENV}"
           fi
       - name: Resolve versions, build stack, run test
+        id: integration
         # Pinned rather than left to run.sh's native default: the runners are x86_64-linux,
         # and the suffixed outputs are the static musl builds CI has always run.
         env:
           NIX_SYSTEM_SUFFIX: x86_64-linux
-        run: nix develop github:hoprnet/hoprnet --command bash scripts/integration/run.sh
+        run: |
+          code=0
+          nix develop github:hoprnet/hoprnet --command bash scripts/integration/run.sh || code=$?
+          echo "exit_code=${code}" >>"${GITHUB_OUTPUT}"
+          exit "${code}"
+      # Check the real suites' artifacts, including failed runs. A reused pass or a
+      # stack build failure never starts the suites and has no run folders to check.
+      - name: Verify run logs and final status
+        if: ${{ !cancelled() && steps.integration.outputs.tests_started == 'true' }}
+        env:
+          EXIT_CODE: ${{ steps.integration.outputs.exit_code }}
+        run: |
+          runs=("${HOPR_LOG_DIR}"/run-*)
+          failed=0
+          for dir in "${runs[@]}"; do
+            [ -s "${dir}/run.env" ]
+            [ -s "${dir}/run.status" ]
+            if grep -qx 'status=passed' "${dir}/run.status"; then
+              grep -qx 'exit_code=0' "${dir}/run.status"
+              # The harness footer proves the retained log was drained to completion.
+              for log in "${dir}"/client-*.log; do
+                grep -Eq '^test [^ ]+ \.\.\. ' "${log}"
+                grep -q '^test result: ok\.' "${log}"
+              done
+            else
+              grep -Eq '^status=(failed|interrupted)$' "${dir}/run.status"
+              grep -Eq '^exit_code=[1-9][0-9]*$' "${dir}/run.status"
+              failed=1
+            fi
+          done
+          if [ "${EXIT_CODE}" = 0 ]; then
+            [ "${failed}" = 0 ]
+          else
+            [ "${failed}" = 1 ]
+          fi
       # The marker a later merge-queue run of the same stack, here or upstream, looks up instead of rerunning.
       - name: Record the pass
         if: >-
@@ -397,6 +433,7 @@ jobs:
           # which is what an earlier version of this globbed and never matched.
           path: |
             nix-build.log
+            logs/ci/
             /tmp/hopr-chain/*.log
             /tmp/nix-shell.*/**/hoprd-it-*/**/*.log
             /tmp/hoprd-it-*/**/*.log

@@ -255,4 +255,5 @@ it_env
 chain_start
 trap 'restore_manifest; chain_stop' EXIT
 export PIX_BIN
+[ -z "${GITHUB_OUTPUT:-}" ] || echo 'tests_started=true' >>"${GITHUB_OUTPUT}"
 run_tier
