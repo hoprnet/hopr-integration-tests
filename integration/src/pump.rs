@@ -247,9 +247,9 @@ impl Transfer {
 
     /// The longest interval in which no bytes arrived.
     ///
-    /// Counts the wait for the first byte and the tail after the last one, not merely the gaps
-    /// between arrivals: a stream that delivered a burst and then died has its worst stall
-    /// entirely in that tail, and a measure that ignored it would call the burst healthy.
+    /// Counts the wait for the first byte and the tail after the last one (for `TailGraceExpired`,
+    /// only up to the offer's end): a stream that delivered a burst and then died has its worst
+    /// stall entirely in that tail, and a measure that ignored it would call the burst healthy.
     pub fn longest_stall(&self) -> f64 {
         let mut previous = 0.0;
         let mut worst: f64 = 0.0;

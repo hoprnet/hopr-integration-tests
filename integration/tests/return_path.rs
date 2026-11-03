@@ -451,9 +451,8 @@ async fn measure_paced_baseline(
             pace: pace_for_rate(offered_mbps),
             phase: Some(BASELINE_PHASE),
             // The default 10 s budget ends the phase on a healthy-path SURB stall and leaves its
-            // backlog to the drain, which then fails the run as phase contamination.
+            // backlog to the drain. No tail cap either: a truncated baseline fails the drain too.
             idle_budget: Some(SURVIVAL_IDLE_BUDGET),
-            tail_grace: Some(SURVIVAL_TAIL_GRACE),
             ..PumpOpts::default()
         },
     )
