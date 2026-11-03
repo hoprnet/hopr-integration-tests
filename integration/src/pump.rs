@@ -1060,6 +1060,17 @@ fn trailing_stall_secs(at: f64, last_progress_ms: i64) -> f64 {
 /// Borrows the session halves, so the same session can be measured more than once. Writer and
 /// reader are joined in this task rather than spawned, so the borrowed halves never leave the
 /// caller's scope.
+/// The write size [`pump_sustained`] actually sends, given the one its caller asked for.
+///
+/// [`tagged_payload`] emits whole [`RECORD_SIZE`] records, so a `chunk` that is not a multiple of
+/// one would send fewer bytes than the run's accounting charges to it, and the record index —
+/// derived from that same counter — would drift from what went out. Round down to whole records,
+/// and never to an empty block: a zero-length write returns at once and the writer would spin for
+/// the rest of the run.
+fn whole_record_chunk(chunk: usize) -> usize {
+    (chunk / RECORD_SIZE).max(1) * RECORD_SIZE
+}
+
 pub async fn pump_sustained(
     rx: &mut tokio::io::ReadHalf<HoprSession>,
     tx: &mut tokio::io::WriteHalf<HoprSession>,
@@ -1071,7 +1082,7 @@ pub async fn pump_sustained(
 ) -> anyhow::Result<Sustained> {
     use std::sync::atomic::{AtomicI64, AtomicU64};
 
-    let chunk = chunk.max(1);
+    let chunk = whole_record_chunk(chunk);
     let started = std::time::Instant::now();
     let deadline = started + duration;
 
@@ -1111,7 +1122,7 @@ pub async fn pump_sustained(
                     break;
                 }
             }
-            written.fetch_add(chunk as u64, std::sync::atomic::Ordering::Relaxed);
+            written.fetch_add(block.len() as u64, std::sync::atomic::Ordering::Relaxed);
             mark(&last_progress_ms);
             if let Some(d) = pace {
                 tokio::time::sleep(d).await;
@@ -1210,6 +1221,15 @@ pub async fn pump_sustained(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_write_size_is_whole_records_and_never_empty() {
+        assert_eq!(whole_record_chunk(16 * 1024), 16 * 1024);
+        assert_eq!(whole_record_chunk(900), 896);
+        assert_eq!(whole_record_chunk(16), 16);
+        assert_eq!(whole_record_chunk(1), 16);
+        assert_eq!(whole_record_chunk(0), 16);
+    }
 
     /// A transfer with the given `(second, cumulative bytes)` arrivals over a `wall_seconds` pump.
     fn transfer(wall_seconds: f64, progress: &[(f64, usize)]) -> Transfer {
