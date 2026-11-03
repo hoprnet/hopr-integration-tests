@@ -583,6 +583,8 @@ async fn boot_edgli(
         blokli_endpoint(blokli_url)?,
         Some(tuning.connector),
         tuning.probe_local,
+        #[cfg(feature = "v5")]
+        None,
         |s: EdgliInitState| tracing::info!(?s, "edgli init"),
     )
     .await?;
