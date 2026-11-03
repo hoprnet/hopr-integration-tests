@@ -118,14 +118,14 @@ S = strict assertion, w = exercised but weakly or not asserted.
 
 ## Tiers
 
-| Tier      | Trigger                                                                    | v5 suites                                                                                     |
-| --------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `pr`      | `run-integration` label, merge queue, v5 dispatches                        | integration, pix, pix_shapes mixed                                                            |
-| `nightly` | `run-integration-v5-nightly` label, merge queue, v5 dispatches, `schedule` | exit_origination, the other four pix_shapes; return_path and pix_relay_loss once #82/#83 land |
+| Tier      | Trigger                                             | v5 suites                                                                                     |
+| --------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `pr`      | `run-integration` label, merge queue, v5 dispatches | integration, pix, pix_shapes mixed                                                            |
+| `nightly` | `run-integration-v5-nightly` label, `schedule`      | exit_origination, the other four pix_shapes; return_path and pix_relay_loss once #82/#83 land |
 
 - `run.sh` picks the suites from `TIER`. v4 ignores it and runs everything, as before.
-- Each tier is its own job. The merge queue and v5 dispatches run both, so a test is validated
-  before it lands; the schedule runs v4 and v5 `nightly`. The full table is in the README, under CI.
+- Each tier is its own job. The merge queue and v5 dispatches run `pr` only; the schedule runs v4
+  and v5 `nightly`, and the label runs `nightly` on a PR before it is queued. The full table is in the README, under CI.
 - The pass marker's fingerprint carries the tier, so a merge gate never reuses a nightly green.
 
 ## Measured locally
