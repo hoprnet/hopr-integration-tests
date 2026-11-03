@@ -198,9 +198,9 @@ Each trigger runs one job per line and tier, one after another on the box:
 
 | Trigger                                   | v4  | v5 `pr` | v5 `nightly` |
 | ----------------------------------------- | --- | ------- | ------------ |
-| this repo's merge queue                   | yes | yes     | yes          |
+| this repo's merge queue                   | yes | yes     | –            |
 | upstream dispatch / manual run, `line=v4` | yes | –       | –            |
-| upstream dispatch / manual run, `line=v5` | –   | yes     | yes          |
+| upstream dispatch / manual run, `line=v5` | –   | yes     | –            |
 | manual run, `line=v5 tier=pr`             | –   | yes     | –            |
 | manual run, `line=v5 tier=nightly`        | –   | –       | yes          |
 | nightly schedule                          | yes | –       | yes          |
@@ -209,7 +209,8 @@ Each trigger runs one job per line and tier, one after another on the box:
 | PR label `run-integration-v5-nightly`     | –   | –       | yes          |
 
 PR labels add up, so `run-integration` plus `run-integration-v4` runs two jobs. The merge queue and
-the upstream gates run every suite of their line, so a new or changed test passes before it lands.
+the upstream gates run the `pr` tier only; a new or changed nightly test needs the
+`run-integration-v5-nightly` label before it is queued.
 
 No versions are stored. The project that triggered the run supplies its rev, and every other ref
 is the current head of its branch on the line. `run.sh` builds hoprd, localcluster and the blokli
