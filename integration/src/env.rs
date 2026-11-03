@@ -43,7 +43,9 @@ use crate::{
 /// always released by the time the next binds.
 fn edge_p2p_port() -> u16 {
     static BOOTS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
-    P2P_PORT_BASE + cluster::MAX_CLUSTER_SIZE as u16 + BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    P2P_PORT_BASE
+        + cluster::MAX_CLUSTER_SIZE as u16
+        + BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Strategies appended to the channel-lifecycle one `default_strategy_cfg` yields.
