@@ -227,6 +227,8 @@ pub struct Transfer {
     /// Stamped from the pump start rather than the first arrival, so a stream that delivered
     /// nothing for its first 12 s cannot report that it recovered at t=0.
     pub progress: Vec<(f64, usize)>,
+    /// Seconds from the pump start to the writer's final flush; `None` if it never finished.
+    pub offer_completed_at: Option<f64>,
 }
 
 impl Transfer {
@@ -262,10 +264,16 @@ impl Transfer {
         // deadline check it structurally cannot pass. One run delivered 97.8% and recovered in
         // 13.8s, then failed for a "30.1s stall" that was the pump waiting to be sure the stream
         // had ended.
-        if self.outcome == PumpOutcome::Idle {
-            return worst;
+        match self.outcome {
+            PumpOutcome::Idle => worst,
+            // The tail cap also fires on a stream that already went quiet. Silence that began after
+            // the last byte was offered is the stream having ended, exactly as for `Idle`.
+            PumpOutcome::TailGraceExpired => {
+                let offer_end = self.offer_completed_at.unwrap_or(self.wall_seconds);
+                worst.max(offer_end.min(self.wall_seconds) - previous)
+            }
+            _ => worst.max(self.wall_seconds - previous),
         }
-        worst.max(self.wall_seconds - previous)
     }
 
     /// Throughput up to the moment `fraction` of the offered payload had come back, in MB/s.
@@ -833,6 +841,10 @@ pub async fn pump_halves(
         sha_ok,
         wall_seconds,
         progress,
+        offer_completed_at: match offer_completed_ms.load(std::sync::atomic::Ordering::Relaxed) {
+            OFFER_IN_FLIGHT => None,
+            at => Some(at as f64 / 1000.0),
+        },
     };
 
     tracing::info!(
@@ -954,6 +966,7 @@ mod tests {
             sha_ok: false,
             wall_seconds,
             progress: progress.to_vec(),
+            offer_completed_at: None,
         }
     }
 
@@ -1473,6 +1486,20 @@ mod tests {
                 waiting.longest_stall()
             );
         }
+    }
+
+    /// Nightly 2026-10-31: offer done at +85 s, last byte at +104 s, tail cap at +130 s.
+    #[test]
+    fn a_tail_cap_on_a_stream_that_ended_after_the_offer_should_not_count_the_silence() {
+        let mut ended = transfer(130.0, &steady(1, 104));
+        ended.outcome = PumpOutcome::TailGraceExpired;
+        ended.offer_completed_at = Some(85.0);
+        assert!((ended.longest_stall() - 1.0).abs() < 1e-9);
+
+        let mut died_while_offered = transfer(130.0, &steady(1, 40));
+        died_while_offered.outcome = PumpOutcome::TailGraceExpired;
+        died_while_offered.offer_completed_at = Some(85.0);
+        assert!((died_while_offered.longest_stall() - 45.0).abs() < 1e-9);
     }
 
     /// Nothing arrived at all: every statistic has to say so rather than divide by zero.
