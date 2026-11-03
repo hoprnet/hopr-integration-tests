@@ -251,16 +251,22 @@ async fn edgli_entry_deposits_should_be_swept_into_the_exit_safe() -> anyhow::Re
     );
 
     let env = IntegrationEnv::setup_pix(budget).await?;
+    // The Entry's side is read before the Session opens, as in the exhaustion test below: the Exit
+    // asks for the first cycle as the Session is established, and that deposit's transfer can be
+    // mined before the opening returns. Read after it, the baseline already has the first debit, the
+    // Safe seems to have paid one cycle less than the Exit swept, and the conservation check fails
+    // on a correct run.
+    let entry_counters_before = pix::sample_entry();
+    let entry_before = env.entry_safe_balance().await?;
     let (session, exit_addr) = env.open_unreliable_session_paths(HOPS, HOPS).await?;
     let exit = node_for(&env, exit_addr)?;
     tracing::info!(exit = %exit_addr, elapsed = ?t0.elapsed(), "PIX session open");
 
     // Both sides move wxHOPR through their Safe: a deposit debits the entry's, a sweep credits the
-    // Exit's. Sampled after the channels are funded, so the stakes are already out.
+    // Exit's. The Exit's is sampled once its node is known; no sweep can land before a cycle has been
+    // recovered.
     let exit_before = pix::node_balances(&exit).await?;
     let exit_counters_before = pix::sample_exit(&exit).await?;
-    let entry_before = env.entry_safe_balance().await?;
-    let entry_counters_before = pix::sample_entry();
     tracing::info!(
         entry_safe = %entry_before, exit_safe = %exit_before.safe,
         "balances before the session"
