@@ -306,6 +306,77 @@ impl NodeInfo {
     }
 }
 
+/// The impairment the localcluster latency relays apply right now.
+///
+/// This is the schedule a scenario changes *during* a run — take the link away, then hand it back
+/// degraded — which the latency profile cannot express, because localcluster resolves that once at
+/// startup. It is written to `<data-dir>/impairment` and picked up by the relays within a poll
+/// interval; see `docs/localcluster/README.md`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Impairment {
+    /// Drop every datagram, both directions.
+    pub blackhole: bool,
+    /// Drop one datagram in every `n`.
+    pub drop_every: Option<u32>,
+    /// Per-datagram drop probability, in parts per million.
+    pub loss_ppm: u32,
+}
+
+impl Impairment {
+    /// Nothing dropped: the state a finished scenario leaves behind.
+    pub const NONE: Self = Self {
+        blackhole: false,
+        drop_every: None,
+        loss_ppm: 0,
+    };
+
+    /// Drop everything, or stop dropping.
+    pub fn blackhole(on: bool) -> Self {
+        Self {
+            blackhole: on,
+            ..Self::NONE
+        }
+    }
+
+    /// Drop one datagram in every `n`.
+    pub fn drop_every(n: u32) -> Self {
+        Self {
+            drop_every: Some(n),
+            ..Self::NONE
+        }
+    }
+
+    /// The file localcluster watches, one setting per line.
+    fn render(&self) -> String {
+        let drop_every = match self.drop_every {
+            Some(n) => n.to_string(),
+            None => "off".to_string(),
+        };
+        format!(
+            "blackhole {}\ndrop-every {}\nloss-ppm {}\n",
+            if self.blackhole { "on" } else { "off" },
+            drop_every,
+            self.loss_ppm
+        )
+    }
+}
+
+/// What the relays have seen and dropped, as `status` reports it.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub struct RelayStats {
+    /// Datagrams let through towards the nodes.
+    pub forwarded_forward: u64,
+    /// Datagrams let through towards the peers.
+    pub forwarded_return: u64,
+    /// Datagrams the impairment dropped, either direction.
+    pub dropped: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RelayStatsWire {
+    relay: Option<RelayStats>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClusterSummary {
     pub blokli_url: String,
@@ -313,6 +384,13 @@ pub struct ClusterSummary {
     pub extras: Vec<ExtraInfo>,
     /// Directory holding each node's `hoprd_<i>.log`, when the cluster's data dir is known.
     pub log_dir: Option<PathBuf>,
+    /// Where localcluster keeps its control socket, when that is not `<data-dir>/cluster`.
+    ///
+    /// A data dir deep under `HOPR_LOG_DIR` makes the default socket path too long for a Unix
+    /// socket, so localcluster is started with `--control-base` pointing at a short folder in
+    /// `/tmp`. Anything that queries `status` afterwards has to pass the same base, or the CLI
+    /// builds a path it cannot even connect to.
+    pub control_base: Option<PathBuf>,
 }
 
 impl ClusterSummary {
@@ -368,6 +446,63 @@ impl ClusterSummary {
             .with_context(|| format!("writing {file}"))?;
         tracing::info!(%a, %b, file, rest, "added a link rule between two cluster nodes");
         Ok(())
+    }
+
+    /// Apply `impairment` at the latency relays.
+    ///
+    /// Written to a temporary file and renamed, because the relays poll: a half-written file would
+    /// be read as a different schedule, which for a blackhole means "briefly on, then off".
+    pub fn set_impairment(&self, impairment: Impairment) -> anyhow::Result<()> {
+        let dir = self.data_dir()?;
+        let path = dir.join("impairment");
+        let tmp = dir.join(format!("impairment.tmp.{}", std::process::id()));
+        std::fs::write(&tmp, impairment.render())
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
+        tracing::info!(?impairment, "applied impairment at the latency relays");
+        Ok(())
+    }
+
+    /// What the relays have seen and dropped.
+    ///
+    /// Asks the running orchestrator rather than reading a file, so a scenario can prove the
+    /// impairment reached the traffic instead of passing on a connection it never shaped.
+    pub async fn relay_stats(&self) -> anyhow::Result<RelayStats> {
+        let dir = self.data_dir()?;
+        let lc_bin = std::env::var("HOPRD_LOCALCLUSTER_BIN").map_err(|_| {
+            anyhow::anyhow!("HOPRD_LOCALCLUSTER_BIN is not set; cannot query relay counters")
+        })?;
+        let mut status = tokio::process::Command::new(&lc_bin);
+        status.args(["status", "--data-dir"]).arg(&dir);
+        if let Some(base) = &self.control_base {
+            status.arg("--control-base").arg(base);
+        }
+        let out = status
+            .output()
+            .await
+            .with_context(|| format!("running `{lc_bin} status --data-dir {}`", dir.display()))?;
+        let wire: RelayStatsWire = serde_json::from_slice(&out.stdout).with_context(|| {
+            format!(
+                "failed to parse relay counters from cluster status: stdout {:?}, stderr {:?}, {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+                out.status
+            )
+        })?;
+        wire.relay.ok_or_else(|| {
+            anyhow::anyhow!(
+                "cluster status carries no relay counters; the latency relays are not running"
+            )
+        })
+    }
+
+    /// The cluster's data directory, which the relays watch for the impairment file.
+    fn data_dir(&self) -> anyhow::Result<PathBuf> {
+        self.log_dir
+            .as_ref()
+            .and_then(|d| d.parent())
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| anyhow::anyhow!("cluster data dir unknown; cannot impair the relays"))
     }
 
     /// Path to `node`'s log file, or `None` when the log directory is not known.
@@ -497,6 +632,7 @@ fn wire_into_summary(
         nodes,
         extras,
         log_dir: data_dir.map(|d| d.join("logs")),
+        control_base: None,
     })
 }
 
@@ -710,7 +846,11 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     )
     .await
     {
-        Ok(s) => s,
+        Ok(mut s) => {
+            // Kept so a later `status` query passes the same base this cluster was started with.
+            s.control_base = control_base.clone();
+            s
+        }
         Err(err) => {
             #[cfg(unix)]
             if let Some(pid) = child.id() {
@@ -1112,6 +1252,25 @@ pub async fn log_channel_stakes(summary: &ClusterSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The file format is a contract between this harness and `hoprd-localcluster`: the relays
+    /// parse one setting per line, and an unknown spelling there means "no impairment" rather than
+    /// an error. Pinned here so a change on either side shows up as a failing test.
+    #[test]
+    fn the_impairment_file_carries_each_setting_on_its_own_line() {
+        assert_eq!(
+            Impairment::NONE.render(),
+            "blackhole off\ndrop-every off\nloss-ppm 0\n"
+        );
+        assert_eq!(
+            Impairment::blackhole(true).render(),
+            "blackhole on\ndrop-every off\nloss-ppm 0\n"
+        );
+        assert_eq!(
+            Impairment::drop_every(20).render(),
+            "blackhole off\ndrop-every 20\nloss-ppm 0\n"
+        );
+    }
 
     const RUNNING_SNAPSHOT: &str = r#"{
   "state": "running",

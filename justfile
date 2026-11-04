@@ -116,6 +116,23 @@ exit-origination: build build-chain
     export TEST_TARGET=exit_origination
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
+# QUIC throughput-collapse repro (binary chain; manual, NOT run in CI — it fails by design on a
+# stack that still has the bug). Shapes the entry↔exit link: 100 ms RTT, a 4 s blackhole, then
+# 1-in-20 loss, and fails when the send/echo rate does not come back. See
+# integration/tests/quic_congestion.rs. Optional args = test-name filters.
+#
+# Overrides: HOPRD_QUIC_DURATION (s), HOPRD_QUIC_MBPS (offered rate), HOPRD_QUIC_HEALTHY_PCT
+# (floor on the final windows relative to the peak).
+quic-congestion *scenarios: build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TEST_TARGET=quic_congestion HOPRNET_SHELL='{{hoprnet}}'
+    [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
+    # A failed run is unreadable without the rate series and the node logs.
+    export TEST_ARGS="${TEST_ARGS:---nocapture}"
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
+    {{v5_deps}} bash scripts/integration/run-binchain.sh
+
 # End-to-end PIX with edgli as the paying entry (binary chain; manual, NOT run in CI).
 # Builds hoprd from HOPRD_SRC (default ../hoprd) because the nix flake has no PIX binary.
 # See integration/tests/pix.rs. Optional args = test-name filters.

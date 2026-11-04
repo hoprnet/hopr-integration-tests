@@ -42,7 +42,7 @@ pub mod udp_service;
 /// packet count for channel funding (see [`env`]).
 pub const PAYLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
-pub use env::IntegrationEnv;
+pub use env::{IntegrationEnv, request_edgli_egress_timeout};
 
 /// Runs one named phase of a test. A panic or error inside it fails the test with the step's
 /// name, and with `IT_STEP_LOG` set the outcome is appended there for the end-of-run summary.

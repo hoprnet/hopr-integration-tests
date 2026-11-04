@@ -51,7 +51,8 @@ write_run_env() {
     echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "tests_rev=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null)$(git -C "${REPO_ROOT}" diff --quiet HEAD 2>/dev/null || echo '-dirty')"
     for v in RUST_LOG TEST_TARGETS TEST_TARGET SCENARIOS SCENARIOS_EXCEPT TEST_ARGS CARGO_FEATURES \
-      HOPRD_PUMP_MBPS HOPRD_CLUSTER_SIZE CHAIN_SHARED; do
+      HOPRD_PUMP_MBPS HOPRD_QUIC_DURATION HOPRD_QUIC_MBPS HOPRD_QUIC_HEALTHY_PCT \
+      HOPRD_CLUSTER_SIZE CHAIN_SHARED; do
       printf '%s=%s\n' "${v}" "${!v:-}"
     done
     echo "HOPRD_CHAIN_URL=$(without_credentials "${HOPRD_CHAIN_URL:-}")"

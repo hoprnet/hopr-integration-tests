@@ -135,6 +135,20 @@ impl NetTuning {
     }
 }
 
+static REQUESTED_EDGLI_EGRESS_TIMEOUT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+
+/// Ask for edgli's egress stream backpressure timeout to be set, before booting edgli.
+///
+/// In production this default is 2 seconds, which triggers StallGuardSink stream eviction
+/// under sustained write stalls. First call in a test binary wins.
+pub fn request_edgli_egress_timeout(d: Duration) {
+    REQUESTED_EDGLI_EGRESS_TIMEOUT.get_or_init(|| d);
+}
+
+pub fn edgli_egress_timeout() -> Option<Duration> {
+    REQUESTED_EDGLI_EGRESS_TIMEOUT.get().copied()
+}
+
 pub struct IntegrationEnv {
     // Field order matters for drop: edgli first (cancels tasks), then cluster.
     edgli: Edgli,
@@ -181,6 +195,58 @@ impl IntegrationEnv {
             },
             _cluster: Some(cluster),
         })
+    }
+
+    /// As [`Self::setup`], but with the cluster's latency relays in front of every node, so the
+    /// link a scenario measures can be delayed and impaired while the run is in flight.
+    ///
+    /// Sets an initial one-way delay of 50 ms (100 ms RTT), which is what makes a collapsed
+    /// congestion window visible: at that RTT the QUIC floor is a few hundred kbit/s rather than
+    /// the loopback bandwidth. Returns the cluster handle, because the impairment schedule — the
+    /// blackhole and the loss that follow — is driven from the test through it.
+    pub async fn setup_shaped() -> anyhow::Result<(Self, &'static ClusterHandle)> {
+        Self::setup_shaped_with(Duration::from_millis(50)).await
+    }
+
+    /// As [`Self::setup_shaped`], with a specified base one-way delay.
+    pub async fn setup_shaped_with(
+        delay: Duration,
+    ) -> anyhow::Result<(Self, &'static ClusterHandle)> {
+        // Before bring-up: localcluster resolves its delay model once, at startup, and the nodes
+        // inherit their environment from it.
+        cluster::request_latency_profile(format!("default: {}ms\n", delay.as_millis()));
+        // The controller under test. A hoprd built from the BBRv2 branch carries both and selects
+        // at startup; an older build ignores the variable and runs CUBIC, which is the collapse
+        // this scenario exists to catch.
+        cluster::request_node_env([("HOPR_QUIC_CONGESTION_CONTROLLER", "bbr2")]);
+        let cluster = cluster::bring_up_shared().await?;
+        let summary = cluster.summary.clone();
+        let extra = summary.extras[0].clone();
+
+        // Edgli dials the relay ports the nodes announce, so it needs no proxy of its own: the
+        // relays front the nodes and every datagram to and from the entry crosses one.
+        let (edgli, reactor) = boot_edgli(
+            &summary.blokli_url,
+            &extra,
+            &NetTuning::local(),
+            cluster_size(),
+            ExtraStrategies::default(),
+        )
+        .await?;
+
+        let (dest_zero_hop, dest_one_hop) = select_session_targets(&edgli).await?;
+
+        let env = Self {
+            edgli,
+            _reactor: reactor,
+            targets: Targets::Local {
+                dest_zero_hop,
+                dest_one_hop,
+            },
+            _cluster: Some(cluster),
+        };
+
+        Ok((env, cluster))
     }
 
     /// As [`Self::setup`], but with the cluster configured for PIX and the entry running the PIX
@@ -664,6 +730,10 @@ async fn boot_edgli(
         }
     }
     extra_strategies.apply(&mut strat_cfg);
+    // Both lines return the handle through `ReactorHandle`, so `.abort_handle` is the one spelling
+    // that compiles on both — v5's struct exposes the field publicly, and v4 returns the same
+    // wrapper (edge-client#200). Branching on the feature here is what broke the v5 build: the
+    // v5 arm kept the wrapper and the function's return type did not.
     let reactor = edgli.run_reactor_from_cfg(strat_cfg)?.abort_handle;
 
     // Require one channel *beyond* any pre-existing genesis channels, so the gate proves the
@@ -726,7 +796,8 @@ fn edgli_config(
             // Experiment: hopr-lib 61120e77 reuses this 2 s default as a write-stall timeout that evicts
             // a peer's stream with every queued packet and ack. Raised to test it as the 1-hop regression.
             stream: StreamProtocolConfig {
-                egress_backpressure_timeout: Duration::from_secs(30),
+                egress_backpressure_timeout: edgli_egress_timeout()
+                    .unwrap_or(Duration::from_secs(30)),
                 ..Default::default()
             },
             packet: HoprPacketPipelineConfig {
