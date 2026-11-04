@@ -6,21 +6,27 @@
 //!
 //! # Why not the localcluster relay
 //!
-//! `hoprd/localcluster/src/relay.rs` already relays UDP between cluster nodes, and reusing it
-//! would be the obvious way to avoid a second fault injector. It cannot stand in for this one:
+//! `hoprd/localcluster/src/relay.rs` already relays UDP for cluster nodes, and reusing it would be
+//! the obvious way to avoid a second fault injector. It fronts the *destination*, so an external
+//! entry reaches it too: under `--latency`, localcluster announces each relay's port on chain
+//! instead of the node's real one, and a datagram from a peer it does not recognise — Edgli dials
+//! from an ephemeral port, which recovers no configured link — still gets the default delay.
 //!
-//! - It models **delay only** (`latency::DelayDist`: fixed, uniform, normal). There is no loss
-//!   schedule and no blackhole, which are the two impairments this scenario needs.
-//! - It identifies a peer by its **source port** (`p2p_port_base + index`) to pick the directed
-//!   link's delay. Edgli is the entry *outside* the cluster and dials from an ephemeral port, so
-//!   it is `UNKNOWN_PEER` there and would only ever get the default delay.
-//! - It lives in hoprd's workspace as the `hoprd-localcluster` **binary**, which this harness runs
-//!   from `HOPRD_LOCALCLUSTER_BIN`. Nothing here can link it, and a new capability would have to
-//!   reach a hoprd release before these tests could use it.
+//! What it cannot do is what this scenario needs:
 //!
-//! The link this scenario has to impair is exactly entry↔exit, so the shaper sits between what
-//! Edgli learns from Blokli (the proxy rewrites the announced ports) and the node itself, rather
-//! than between nodes.
+//! - **Change the impairment mid-run.** The delay model is resolved once at startup and shared as
+//!   an `Arc`; the control socket serves status only, and there is no loss at all
+//!   (`latency::DelayDist` is fixed, uniform or normal). The scenario needs 15 s healthy, then a
+//!   4 s blackhole, then recurring loss on the same connection, and drives those transitions from
+//!   the test itself. Expressing them through localcluster means adding a runtime control surface
+//!   to hoprd.
+//! - **Reach a released binary.** It ships as `hoprd-localcluster`, which this harness runs from
+//!   `HOPRD_LOCALCLUSTER_BIN`; nothing here can link it, so any new capability has to reach a
+//!   hoprd release on both lines before these tests could use it.
+//!
+//! So the shaper sits between what Edgli learns from Blokli (the proxy rewrites the announced
+//! ports) and the node, and the test owns the schedule. Moving loss and a control surface into the
+//! localcluster relay is worth doing in hoprd on its own merits; it should not gate this repro.
 
 use std::{
     collections::VecDeque,
