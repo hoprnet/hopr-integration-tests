@@ -417,20 +417,25 @@ cluster_wait() {
 # The one cargo invocation. Skips the dev-shell wrap when already inside one — `just ci` and CI
 # both enter it before calling the runner, which used to open a second shell per scenario.
 # Extra args after the target are libtest filters; SKIP_SCENARIOS names tests to hold out.
+# TEST_PROFILE=release builds and runs the test binary in release: timing-sensitive suites
+# (return_path at three hops) run the test process at about 1800 % CPU in debug, and the
+# measurement is then of the test process. `list_scenarios` takes the same profile, so listing and
+# running share one binary.
 cargo_it() {
   local target="${1:?usage: cargo_it <test-target> [filter...]}"
   shift
   local -a wrap=()
   [ -z "${IN_NIX_SHELL:-}" ] && [ "${HOPRNET_SHELL:-}" != none ] &&
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
-  local -a test_args cargo_features skips=()
+  local -a test_args cargo_features profile=() skips=()
+  [ "${TEST_PROFILE:-}" = release ] && profile=(--release)
   read -r -a test_args <<<"${TEST_ARGS:-}"
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
   local held
   for held in ${SKIP_SCENARIOS:-}; do skips+=(--skip "${held}"); done
   # Bash 3.2 (macOS /bin/bash) treats empty arrays as unset under `set -u`.
   ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
-    ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" "$@" \
+    ${profile[@]+"${profile[@]}"} ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" "$@" \
     --no-fail-fast -- --include-ignored --test-threads=1 ${skips[@]+"${skips[@]}"} ${test_args[@]+"${test_args[@]}"}
 }
 
@@ -481,17 +486,25 @@ run_tier() {
     HOPRD_BIN="${nodes_bin}"
   fi
 
-  # v4 only until the v5 stack fixes land. Last and on a fresh chain: its 5-node cluster leaves
-  # nodes 3-4 channelled but offline. Scenarios kill nodes, so one cluster each. The 1-hop ones
-  # only: v4 mitigates a dead relayer one hop deep (hoprnet#8498); `spread` asserts a ratio on a
-  # random draw, so a red says nothing.
-  if [ "${LINE}" = v4 ]; then
+  # `return_path` last and on a fresh chain: its clusters leave nodes channelled but offline, and
+  # the scenarios kill nodes or cut links, so one cluster each. `spread` is held out on both lines:
+  # it asserts a ratio on a random draw, so a red says nothing.
+  #
+  # v4 runs the 1-hop scenarios only: it mitigates a dead relayer one hop deep (hoprnet#8498) and the
+  # two-hop ones wait for the v5 fix. v5 runs them all, in the nightly tier, but only when
+  # RETURN_PATH_V5=1: the multi-hop scenarios need a hopr-lib with the dead-relayer recovery
+  # (hoprnet#8506, #8576, #8581) in edge-client's lock, and a localcluster with link cuts, stalls and
+  # up to 8 nodes (hoprnet/hoprd#248). Off by default so the step stays green until both are in;
+  # flip it in pr.yaml then.
+  if [ "${LINE}" = v4 ] || { in_tier nightly && [ "${RETURN_PATH_V5:-0}" = 1 ]; }; then
     chain_stop
     chain_start
     scenarios="$(list_scenarios return_path)"
     held_out="return_paths_should_spread_across_distinct_relayers"
-    held_out="${held_out} a_two_hop_session_should_survive_exit_losing_its_return_relayer"
-    held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
+    if [ "${LINE}" = v4 ]; then
+      held_out="${held_out} a_two_hop_session_should_survive_exit_losing_its_return_relayer"
+      held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
+    fi
     for scenario in ${scenarios}; do
       case " ${held_out} " in *" ${scenario} "*) continue ;; esac
       SCENARIOS="${scenario}" run_suite return_path
@@ -580,12 +593,13 @@ print_summary() {
 # Ask the binary what it carries, so a new scenario runs the moment it is written.
 list_scenarios() {
   local target="${1:?usage: list_scenarios <test-target>}"
-  local -a wrap=() cargo_features
+  local -a wrap=() cargo_features profile=()
   [ -z "${IN_NIX_SHELL:-}" ] && [ "${HOPRNET_SHELL:-}" != none ] &&
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
+  [ "${TEST_PROFILE:-}" = release ] && profile=(--release)
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
   ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
-    ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" -- --list |
+    ${profile[@]+"${profile[@]}"} ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" -- --list |
     sed -n 's/: test$//p' | tr '\n' ' '
 }
 

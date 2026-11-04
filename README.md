@@ -20,16 +20,17 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 
 ## Test binaries
 
-| Binary (`integration/tests/`) | What it checks                                                     | In CI   | Local                       |
-| ----------------------------- | ------------------------------------------------------------------ | ------- | --------------------------- |
-| `integration.rs`              | 0-, 1- and 2-hop UDP loopback: at least 99% arrival, no corruption | yes     | `just integration-binchain` |
-| `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved     | yes     | `just exit-origination`     |
-| `pix.rs`                      | PIX settlement with `edgli` as the paying entry                    | v5 only | `LINE=v5 just pix`          |
-| `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)           | v5 only | `LINE=v5 just pix-shapes`   |
-| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies       | v4 only | `just return-path`          |
-| `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line        | no      | see `run.sh`                |
-| `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`)  | no      | `just rotsee`               |
-| `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no      | `just profile`              |
+| Binary (`integration/tests/`) | What it checks                                                     | In CI   | Local                         |
+| ----------------------------- | ------------------------------------------------------------------ | ------- | ----------------------------- |
+| `integration.rs`              | 0-, 1- and 2-hop UDP loopback: at least 99% arrival, no corruption | yes     | `just integration-binchain`   |
+| `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved     | yes     | `just exit-origination`       |
+| `pix.rs`                      | PIX settlement with `edgli` as the paying entry                    | v5 only | `LINE=v5 just pix`            |
+| `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)           | v5 only | `LINE=v5 just pix-shapes`     |
+| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies       | v4 only | `just return-path`            |
+| `pix_relay_loss.rs`           | a PIX cycle survives half its return relays dying, and is paid     | no      | `LINE=v5 just pix-relay-loss` |
+| `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line        | no      | see `run.sh`                  |
+| `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`)  | no      | `just rotsee`                 |
+| `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no      | `just profile`                |
 
 v5 is split in two tiers, chosen with `TIER` (see [`docs/v5-test-matrix.md`](docs/v5-test-matrix.md)
 for what each test covers and costs): `pr` (integration, pix, the mixed shape) is the fast
@@ -41,7 +42,10 @@ CI runs 8 scenarios on v4 (6 of them `return_path`). Suites share one chain per
 `run.sh` invocation, warm with frozen identities after the first. `return_path` runs last on v4,
 on a fresh chain and one cluster per scenario, and only its 1-hop scenarios: the two-hop ones wait
 for the v5 fix and `spread` is held out for asserting a ratio on a random draw. v5 waits on stack
-fixes (branch `em/return-path-v5`).
+fixes (branch `em/return-path-v5`). The v5 `return_path` step is wired in the nightly tier behind
+`RETURN_PATH_V5=1`, off by default: its multi-hop scenarios need a hopr-lib with the dead-relayer
+recovery (hoprnet#8506, #8576, #8581) in edge-client's lock, and a localcluster with link faults and up to
+8 nodes (hoprnet/hoprd#248, the `Requires:` line). Flip the variable in `pr.yaml` once both are in.
 
 Every scenario is `#[ignore]` because it needs external binaries. Thresholds are constants in
 the test files, and there are no settings to change. Shared code is in `integration/src/`:
@@ -81,15 +85,16 @@ local hoprnet checkout for the dev shell. `just pix` builds hoprd from `HOPRD_SR
 The chain does not need docker: `scripts/integration/lib.sh chain_up` starts anvil, deploys the
 contracts and starts bloklid, and localcluster connects to it with `--chain-url`.
 
-| Env var                  | Meaning                                                      |
-| ------------------------ | ------------------------------------------------------------ |
-| `HOPRD_BIN`              | `hoprd` binary (default `result-hoprd/bin/hoprd`)            |
-| `HOPRD_LOCALCLUSTER_BIN` | `hoprd-localcluster` binary                                  |
-| `HOPRD_CHAIN_URL`        | bloklid to connect to (default `http://localhost:8080`)      |
-| `HOPRD_CLUSTER_DATA_DIR` | use an already-running cluster instead of starting one       |
-| `HOPR_LOG_DIR`           | keep each run's logs in a folder under it (see below)        |
-| `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files, also when start-up fails |
-| `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture` |
+| Env var                  | Meaning                                                                                                                                        |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HOPRD_BIN`              | `hoprd` binary (default `result-hoprd/bin/hoprd`)                                                                                              |
+| `HOPRD_LOCALCLUSTER_BIN` | `hoprd-localcluster` binary                                                                                                                    |
+| `HOPRD_CHAIN_URL`        | bloklid to connect to (default `http://localhost:8080`)                                                                                        |
+| `HOPRD_CLUSTER_DATA_DIR` | use an already-running cluster instead of starting one                                                                                         |
+| `HOPR_LOG_DIR`           | keep each run's logs in a folder under it (see below)                                                                                          |
+| `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files, also when start-up fails                                                                                  |
+| `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture`                                                                                   |
+| `TEST_PROFILE=release`   | build and run the test binary in release; timing-sensitive suites such as `return_path` at 3 hops run the test process at ~1800 % CPU in debug |
 
 To keep the logs of each run:
 

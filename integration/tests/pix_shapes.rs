@@ -242,8 +242,9 @@ async fn close_session(
 /// * Surplus shares were accepted, more than the gate tolerates without progress. Rules that out,
 ///   but not surplus arriving in scattered fragments the gate never had to serve *through*.
 /// * The longest contiguous surplus-only run clears the same bar. That is the run the emission
-///   window actually produces — upstream emits one per window, so a cycle of 512 polynomials
-///   contains two — and it needs the trace, because a before/after pair cannot see contiguity.
+///   window actually produces — upstream emits one per window, so a cycle of 1024 polynomials
+///   contains two at the 512 window — and it needs the trace, because a before/after pair cannot see
+///   contiguity.
 /// * A recovered cycle's accepted-share fraction sits above 1.0. Independent of the trace's
 ///   sampling entirely: the Exit itself recorded, at finalization, that it accepted more shares
 ///   than the cycle's useful target. A sampling cadence too coarse to catch the run cannot make
@@ -286,6 +287,18 @@ fn assert_the_gate_served_the_surplus(gate: &ExitTelemetry, trace: &Trace) {
         "the gate parked on share lag at some point mid-scenario and had resumed by the end, so \
          the before/after counters look clean: {}",
         trace.summary()
+    );
+
+    // No share was lost to the Exit's SURB store overflowing. The store gives up share-less SURBs
+    // first, so a `ring_share` eviction means it held nothing but shares: a share lost for good,
+    // which no surplus-run assertion below would name. (A generation advance clears the store
+    // without evicting, and is not counted here.)
+    assert_eq!(
+        0,
+        gate.ring_share_evictions(),
+        "the Exit's SURB store evicted share-bearing SURBs for capacity during the scenario, each \
+         a PIX share lost for good. {}",
+        gate.summary()
     );
 
     let surplus = gate.shares("surplus").unwrap_or(0);
