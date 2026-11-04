@@ -54,7 +54,7 @@
 //!
 //! At 512 the same stock costs half as much per polynomial, so surplus 8 (4096) now survives the
 //! 2400-SURB wipe, and the negative control is surplus 4 (2048): `HOPRD_PIX_ADDITIONAL_SHARES=4`,
-//! expected to end in `recovery_idle`. It has not been run at 512.
+//! expected to end in `recovery_idle`, and it did at 512 (RLH in `docs/pix-relay-loss.md`).
 //!
 //! # Running
 //!

@@ -31,7 +31,7 @@ production dimensions needs no recompile (§"Production dimensions").
 ## The answer in short
 
 **Yes, and the measured set is below.** A PIX cycle survived losing one of its two return relays
-mid-cycle in three of three runs, with every one of its 512 polynomials reconstructing and the
+mid-cycle in four of four runs, with every one of its 512 polynomials reconstructing and the
 Exit's Safe rising by exactly one cycle's deposit each time.
 
 Two things qualify that, and both are more interesting than the parameter list:
@@ -214,8 +214,14 @@ It then asserts, in order of what each rules out:
 - **No supervisor closure at all** (`hopr_pix_closures_total`). This is the one that names the
   cause: a starved cycle produces `recovery_idle`, roughly a minute after the Entry runs out of
   shares to emit for a cycle it can no longer complete.
+- **No share-bearing SURB was evicted** (`hopr_surb_store_evictions_count{cache="ring_share"}`).
+  A share the Exit's store drops for capacity is lost for good, and no outcome assertion below
+  names it.
 - **No deposit timed out** — separates a cycle lost to the outage from one lost to a slow chain.
 - **A cycle was swept** — every one of the 512 polynomials reached threshold despite the burst.
+- **Exactly one cycle requested and recovered, none failed** (`hopr_pix_cycles_total`). A sweep and
+  an empty closure count can come from a successor cycle; this is what shows that the cycle in
+  flight at the kill survived.
 - **The Exit's Safe rose by at least one cycle's deposit.** The counters alone cannot establish
   this: `keys_recovered` and `sweeps` both increment on the "already swept" path, where a key is
   recovered against a stealth address the deposit never reached.
@@ -341,7 +347,7 @@ even the shipped 4 096.
 from SURB reply races replace it in hoprnet#8506, and the wipe follows each one; see §"Results on
 the dead-verdict stack".)
 
-The detector fired in one of the three runs. Chasing why is the most useful thing these runs
+The detector fired in one of the four runs. Chasing why is the most useful thing these runs
 produced, because it bounds how bad the problem actually is.
 
 `degraded_destinations` only counts a flush against a pair of legs that minted at least
@@ -359,7 +365,7 @@ fire it discards the whole buffer at once — so it cannot be designed around by
 ## What these runs establish, and what they do not
 
 **Established.** A PIX cycle survives losing one of two return relayers, mid-cycle, at this
-geometry — in three of three runs, across both topologies and both surpluses, with every one of
+geometry — in four of four runs, across both topologies and both surpluses, with every one of
 512 polynomials reconstructing (`useful` landed on exactly 32 768 every time), no egress-gate
 stall, no supervisor closure, and the Exit's Safe rising by exactly one cycle's deposit. That is
 the headline answer and it is not marginal.

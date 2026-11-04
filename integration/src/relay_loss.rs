@@ -307,7 +307,7 @@ pub fn required_surplus(surb_buffer: u64, margin: f64) -> u64 {
 
 /// SURBs a deployed Exit holds, from `docs/pix-traffic-shapes.md`'s deployed column.
 ///
-/// Here so that [`the_deployed_buffer_is_covered_by_the_production_surplus_with_three_shares_to_spare`](tests::the_deployed_buffer_is_covered_by_the_production_surplus_with_three_shares_to_spare)
+/// Here so that [`the_deployed_buffer_is_covered_by_the_production_surplus_with_forty_one_shares_to_spare`](tests::the_deployed_buffer_is_covered_by_the_production_surplus_with_forty_one_shares_to_spare)
 /// can state what this profile's arithmetic implies about a real deployment, which is not
 /// something a three-node cluster can measure.
 pub const DEPLOYED_SURB_BUFFER: u64 = 19_264;
