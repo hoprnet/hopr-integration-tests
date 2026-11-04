@@ -384,6 +384,13 @@ pub struct ClusterSummary {
     pub extras: Vec<ExtraInfo>,
     /// Directory holding each node's `hoprd_<i>.log`, when the cluster's data dir is known.
     pub log_dir: Option<PathBuf>,
+    /// Where localcluster keeps its control socket, when that is not `<data-dir>/cluster`.
+    ///
+    /// A data dir deep under `HOPR_LOG_DIR` makes the default socket path too long for a Unix
+    /// socket, so localcluster is started with `--control-base` pointing at a short folder in
+    /// `/tmp`. Anything that queries `status` afterwards has to pass the same base, or the CLI
+    /// builds a path it cannot even connect to.
+    pub control_base: Option<PathBuf>,
 }
 
 impl ClusterSummary {
@@ -465,14 +472,23 @@ impl ClusterSummary {
         let lc_bin = std::env::var("HOPRD_LOCALCLUSTER_BIN").map_err(|_| {
             anyhow::anyhow!("HOPRD_LOCALCLUSTER_BIN is not set; cannot query relay counters")
         })?;
-        let out = tokio::process::Command::new(&lc_bin)
-            .args(["status", "--data-dir"])
-            .arg(&dir)
+        let mut status = tokio::process::Command::new(&lc_bin);
+        status.args(["status", "--data-dir"]).arg(&dir);
+        if let Some(base) = &self.control_base {
+            status.arg("--control-base").arg(base);
+        }
+        let out = status
             .output()
             .await
             .with_context(|| format!("running `{lc_bin} status --data-dir {}`", dir.display()))?;
-        let wire: RelayStatsWire = serde_json::from_slice(&out.stdout)
-            .context("failed to parse relay counters from cluster status")?;
+        let wire: RelayStatsWire = serde_json::from_slice(&out.stdout).with_context(|| {
+            format!(
+                "failed to parse relay counters from cluster status: stdout {:?}, stderr {:?}, {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+                out.status
+            )
+        })?;
         wire.relay.ok_or_else(|| {
             anyhow::anyhow!(
                 "cluster status carries no relay counters; the latency relays are not running"
@@ -616,6 +632,7 @@ fn wire_into_summary(
         nodes,
         extras,
         log_dir: data_dir.map(|d| d.join("logs")),
+        control_base: None,
     })
 }
 
@@ -829,7 +846,11 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
     )
     .await
     {
-        Ok(s) => s,
+        Ok(mut s) => {
+            // Kept so a later `status` query passes the same base this cluster was started with.
+            s.control_base = control_base.clone();
+            s
+        }
         Err(err) => {
             #[cfg(unix)]
             if let Some(pid) = child.id() {
