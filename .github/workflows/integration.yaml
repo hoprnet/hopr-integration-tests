@@ -30,7 +30,7 @@ on:
         description: "v5 suites to run: all (both tiers, a job each), pr (happy paths) or nightly (the rest)"
         required: false
         type: choice
-        default: "all"
+        default: "pr"
         options: ["all", "pr", "nightly"]
       project:
         description: "Triggering project (hoprd | edge-client | blokli); empty = every ref defaults to the head of its branch on the chosen line"
@@ -93,20 +93,20 @@ jobs:
       tests_sha: ${{ steps.resolve.outputs.tests_sha }}
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      # One job per (line, tier). The merge queue and dispatches run everything on their line, so a
-      # new test is validated before it lands; a PR label picks a slice.
+      # One job per (line, tier). Gates (merge queue, upstream dispatches) run the pr tier only; the
+      # v5 nightly tier runs on the schedule or when asked for (label, tier=nightly).
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           LINE: ${{ inputs.line || github.event.client_payload.line || 'v4' }}
-          TIER: ${{ inputs.tier || github.event.client_payload.tier || 'all' }}
+          TIER: ${{ inputs.tier || github.event.client_payload.tier || 'pr' }}
         run: |
           set -euo pipefail
           jobs=()
           case "${EVENT}" in
           schedule) jobs=(v4:pr v5:nightly) ;;
-          merge_group) jobs=(v4:pr v5:pr v5:nightly) ;;
+          merge_group) jobs=(v4:pr v5:pr) ;;
           pull_request)
             while read -r label; do
               case "${label}" in
