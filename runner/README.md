@@ -24,15 +24,16 @@ stable hardware.
 
 The boxes are provisioned out of the **gitops** repo, not here:
 `ansible/playbooks/install-github-hetzner-runner.yaml` (see `ansible/README.md`
-there). Two servers, **one** runner instance each
-(`github_hetzner_runner_instances: 1`, set in gitops commit `1d25673`), registered at
-the **org** level with the single label `hetzner`.
+there). Two servers (`hetzner-kvm-1/2`), each hosting two KVM VMs with half its
+physical cores pinned to each: `github-hetzner-runner-1..4`, **one** runner per VM,
+registered at the **org** level with the single label `hetzner`. So up to 4 jobs run at
+once, each on its own cores, ports, `/tmp` and nix store.
 
 ```bash
 # gitops repo
 just install-github-hetzner-runner
 
-# on the box
+# in a VM (ssh -J <box> root@192.168.122.11)
 sudo journalctl -u 'github-hetzner-runner@*' -f
 sudo systemctl restart 'github-hetzner-runner@*'
 ```
@@ -137,10 +138,10 @@ Unlike a hosted VM, nothing is reinstalled per run:
 job: it installs an eBPF egress monitor and needs sudo, and only supports
 GitHub-hosted runners.
 
-### Dedicating the box — two gitops changes still open
+### Dedicating the runners — one gitops change still open
 
 A throughput number is only comparable to another number from the same idle
-machine, so the box has to be **dedicated to hopr-integration-tests** and **run one job at a
+cores, so each runner has to be **dedicated to hopr-integration-tests** and **run one job at a
 time**. Neither is achievable from this repo — both are gitops / org settings:
 
 1. **Restrict the runners to this repository.** They are registered at the _org_
@@ -150,19 +151,16 @@ time**. Neither is achievable from this repo — both are gitops / org settings:
    repositories_ off), not a label — a label expresses a preference, it does not
    deny anyone. Renaming the label would also work but breaks every workflow
    referencing it, so prefer the group.
-2. ~~One runner instance per box~~ — **already done.** The role sets
-   `github_hetzner_runner_instances: 1`, so a box runs one job at a time and cannot
-   contend with itself. Note the consequence: PR `unit` jobs queue behind a ~60
-   minute integration run rather than running beside it.
+2. ~~One job per runner~~ — **already done.** One runner per VM, and each VM's vCPUs
+   are pinned to physical cores no other VM uses, so a job cannot contend with itself
+   or with its neighbour for CPU.
 
-So a slow measurement on this box is **not** explained by parallel jobs on the same
-box — one instance rules that out. With two boxes and one instance each, a `unit` job
-and an `integration` job land on different machines. What remains as an explanation is
-the machine itself (per-core speed, core count) or something outside the box, not
-self-contention.
+What two VMs on one box still share is memory bandwidth, last-level cache and the disk.
+If a measurement is slow only while the sibling VM is busy, that is the explanation; the
+runner name in the job log tells which VM (and so which box) it ran on.
 
-Both boxes register the _same_ `hetzner` label, so a run lands on either one — a
-baseline established on one box is only a baseline for that box. If the two ever
+All four VMs register the _same_ `hetzner` label, so a run lands on any of them — a
+baseline established on one box is only a baseline for that box. If the boxes ever
 differ in spec, give this workflow its own label.
 
 ## Repo secrets (hopr-integration-tests)
@@ -236,8 +234,8 @@ lifts, but today only the label path fires there — which is why the nightly ex
 The upstream gates use `repository_dispatch` to start the run and then **wait** on it,
 which needs a `marker`: a caller cannot otherwise identify its own run, since
 `repository_dispatch` returns nothing identifying, the API does not expose a run's
-dispatch inputs, and "newest run" is a race because three repos dispatch here and the
-`integration` concurrency group makes runs queue rather than start. The caller passes a
+dispatch inputs, and "newest run" is a race because three repos dispatch here and a run
+queues rather than starts while every runner is busy. The caller passes a
 unique marker, `run-name` puts it in the run title, and the caller polls for it.
 
 **Every dispatch names its line, and the default is v4.** A caller adds
@@ -265,12 +263,10 @@ change the harness, the thresholds or the scripts and merge without the test eve
 running — the one repo where that matters most. The job already admitted any
 non-`pull_request` event, so only the trigger had to be added.
 
-Merge-queue runs share the `integration` job concurrency group (`queue: max`) with the
-dispatch runs. That is deliberate: cancelling a queue run fails the queue entry, and the
-box runs one integration job at a time. The default `queue: single` is not enough: it
-keeps one pending run and cancels it when the next arrives. The cost is that a candidate can wait
-behind several queued runs, so keep the queue's max wait comfortably above the combined
-runtime of the runs ahead of it. A queue candidate itself takes about 2 hours (v4, v5 and v5
+Merge-queue runs compete with the dispatch runs for the same four runners. There is no
+job-level concurrency group, so nothing cancels a queued run (which would fail the queue
+entry); a job just waits for a free runner. With more than four jobs pending a candidate
+can still wait behind others, so keep the queue's max wait comfortably above that. A queue candidate itself takes about 2 hours (v4, v5 and v5
 nightly), against the ruleset's 320-minute check timeout.
 
 **hopr-integration-tests has no rulesets at all** as of 2026-09-04 — `main` is unprotected, so
@@ -317,9 +313,8 @@ Each is resolved to its current head per run. A red night posts to Zulip with th
 shown as `nightly` plus the line, tier, the three resolved revisions and the failures from
 the end-of-run summary.
 
-Scheduled runs only ever fire from the default branch, and they share the
-`integration` job concurrency group (`queue: max`), so a nightly queues behind
-in-flight runs rather than cancelling them or being cancelled.
+Scheduled runs only ever fire from the default branch, and wait for a free runner like
+every other run, so a nightly never cancels an in-flight run or is cancelled by one.
 
 ### What the gate runs
 
@@ -371,7 +366,7 @@ stack.
 
 - **On a hopr-integration-tests PR:** `run-integration` runs the v5 `pr` tier,
   `run-integration-v4` the v4 suites, `run-integration-v5-nightly` the v5 `nightly` tier. Labels
-  add up; the jobs run back to back on the single runner.
+  add up; the jobs run side by side, one per runner VM.
 - **Manual:** `gh workflow run integration.yaml -R hoprnet/hopr-integration-tests`
   then `gh run watch -R hoprnet/hopr-integration-tests --exit-status`.
 - **Simulate a merge trigger:**
@@ -383,6 +378,6 @@ stack.
     -f 'client_payload[rev]=<edge-client release/4.1 sha>'
   ```
 
-Concurrency: a new push to a PR cancels that PR's in-progress run; the `integration`
-job of every run, PR or not, shares one group with `queue: max`, so they stack FIFO and
-run one at a time.
+Concurrency: a new push to a PR cancels that PR's in-progress run. Otherwise runs and
+their matrix legs (`max-parallel: 4`) start as soon as a `hetzner` runner is free — up to
+four at once, one per VM.

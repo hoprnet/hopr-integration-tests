@@ -45,8 +45,8 @@ on:
         # return a run id and the API does not expose dispatch inputs on a run. So
         # the caller passes a unique marker, `run-name` below puts it in the run
         # title, and the caller polls for the run whose title carries it. Matching
-        # on "newest run" instead is a race: several repos dispatch here, and the
-        # `integration` concurrency group makes runs queue rather than start.
+        # on "newest run" instead is a race: several repos dispatch here, and a run
+        # queues rather than starts while every runner is busy.
         description: "Opaque tag echoed into the run name, so a caller can find this run"
         required: false
         default: ""
@@ -74,7 +74,7 @@ on:
 run-name: >-
   ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration {0} ({1} {2})', github.event.client_payload.line || 'v4', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly)' || 'Integration throughput test'))) }}
 # Only lets a new push supersede a PR's previous run; every other run is its own group.
-# Serialising on the box is the `integration` job's concurrency, not this one.
+# Nothing else serialises runs: each runner is its own VM, and jobs wait for a free one.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('integration-pr-{0}', github.event.pull_request.number) || format('integration-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -159,11 +159,6 @@ jobs:
     # Dedicated self-hosted machine rather than a hosted VM: the onion encoder is
     # CPU-bound and the throughput thresholds only mean anything on a stable core count.
     runs-on: [self-hosted, hetzner]
-    # One job on the box at a time (shared ports). `queue: max` because the default keeps a single
-    # pending run and cancels it on the next arrival, which fails the upstream merge-queue entry.
-    concurrency:
-      group: integration
-      queue: max
     # `actions: read` lets run.sh find a matching earlier green; the rest is what it used before.
     permissions:
       contents: read
@@ -172,10 +167,9 @@ jobs:
     # `fail-fast: false` so a v5 break still reports the v4 verdict.
     strategy:
       fail-fast: false
-      # One line at a time. The box hosts several runner instances sharing these labels, so
-      # without this both legs start at once and collide on anvil 8545, bloklid 8080, node ports
-      # 13000/19000 and /tmp/hopr-chain — which the hygiene steps also delete under each other.
-      max-parallel: 1
+      # Legs run side by side: each `hetzner` runner is its own VM (one runner per VM, see
+      # runner/README.md), so the fixed ports 8545/8080/13000/19000 and /tmp/hopr-chain never meet.
+      max-parallel: 4
       matrix:
         include: ${{ fromJSON(needs.companions.outputs.matrix) }}
     # Per job: ~40 min of tests on v4, ~29 on v5 pr and ~44 on v5 nightly (one shared chain each),

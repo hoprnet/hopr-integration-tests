@@ -187,11 +187,11 @@ build output to `nix-build.log`, so a long build can look like it has stopped.
 ## CI
 
 **`pr.yaml`** runs on every PR and in the merge queue, for both lines: title check, shell lint,
-`fmt` + `clippy` (depot), and unit tests (the `hetzner` box). Before compiling, it pins `edgli`
+`fmt` + `clippy` (depot), and unit tests (the `hetzner` runners). Before compiling, it pins `edgli`
 the same way `run.sh` does (see below).
 
 **`integration.yaml`** runs [`scripts/integration/run.sh`](scripts/integration/run.sh) on the
-`hetzner` box. It is triggered by:
+`hetzner` runners. It is triggered by:
 
 - upstream gates (hoprd, edge-client, blokli) through dispatch, on the line they request;
 - this repo's merge queue, and PRs carrying a `run-integration*` label;
