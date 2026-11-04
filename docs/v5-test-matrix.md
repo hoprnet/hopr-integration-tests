@@ -38,13 +38,13 @@ and the fill aims at 540 s.
 | E9  | `return_path::a_three_hop_session_should_survive_relayer_loss`        | #82    | nightly  | L 3.0–3.1m                                                | 8     | SIGKILL (3,3)                        |
 | E10 | `return_path::a_three_hop_session_should_survive_a_stalling_relayer`  | #82    | nightly  | L 3.0–3.1m                                                | 8     | victim stalls every link (3,3)       |
 | E11 | `return_path::return_paths_should_spread_across_distinct_relayers`    | main   | held out | L 0.4–0.6m                                                | 5     | –                                    |
+| G1  | `quic_congestion::sustained_transfer_keeps_its_throughput`            | #75    | pr       | 60 s run + 50 s bring-up, plus the 15 s warm-up inside it | 3     | 4 s blackhole, then 1-in-20 loss, 100 ms RTT |
+| G2  | `quic_congestion::unpaced_transfer_keeps_its_throughput`              | #75    | pr       | as G1                                                     | 3     | as G1                                |
 | F1  | `pix_relay_loss::a_pix_cycle_survives_a_relay_death_on_both_paths`    | #83    | nightly  | #83 7.5m (≈24m at production size)                        | 3     | kill half the return relays (1,1)    |
 | F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`   | #83    | nightly  | #83 7.6m                                                  | 3     | (0,1)                                |
 | F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`   | #83    | nightly  | #83 8.6m                                                  | 4     | (0,2)                                |
 
-Not in v5 CI: upload_survival, rotsee, profiling, and `quic_congestion` — the last is a
-reproduction, so it is red by design until the QUIC congestion fix lands; run it with
-`LINE=v5 just quic-congestion`.
+Not in v5 CI: upload_survival, rotsee, profiling.
 
 | Set (test time, build excluded) | Before                   | After                    |
 | ------------------------------- | ------------------------ | ------------------------ |

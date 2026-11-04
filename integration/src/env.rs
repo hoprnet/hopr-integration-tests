@@ -156,8 +156,6 @@ pub struct IntegrationEnv {
     targets: Targets,
     /// The binary-wide cluster; `None` for Rotsee (no local process).
     _cluster: Option<&'static ClusterHandle>,
-    _proxy: Option<crate::quic_shaper::BlokliProxy>,
-    _shaper: Option<std::sync::Arc<crate::quic_shaper::QuicShaperPool>>,
 }
 
 impl Drop for IntegrationEnv {
@@ -196,41 +194,39 @@ impl IntegrationEnv {
                 dest_one_hop,
             },
             _cluster: Some(cluster),
-            _proxy: None,
-            _shaper: None,
         })
     }
 
-    /// As [`Self::setup`], but routing QUIC traffic between Edgli and cluster nodes through
-    /// a userspace UDP shaper pool via a local Blokli reverse proxy.
+    /// As [`Self::setup`], but with the cluster's latency relays in front of every node, so the
+    /// link a scenario measures can be delayed and impaired while the run is in flight.
     ///
-    /// Sets an initial latency delay of 50 ms (100 ms RTT) on the QUIC links.
-    pub async fn setup_shaped()
-    -> anyhow::Result<(Self, std::sync::Arc<crate::quic_shaper::QuicShaperPool>)> {
+    /// Sets an initial one-way delay of 50 ms (100 ms RTT), which is what makes a collapsed
+    /// congestion window visible: at that RTT the QUIC floor is a few hundred kbit/s rather than
+    /// the loopback bandwidth. Returns the cluster handle, because the impairment schedule — the
+    /// blackhole and the loss that follow — is driven from the test through it.
+    pub async fn setup_shaped() -> anyhow::Result<(Self, &'static ClusterHandle)> {
         Self::setup_shaped_with(Duration::from_millis(50)).await
     }
 
     /// As [`Self::setup_shaped`], with a specified base one-way delay.
     pub async fn setup_shaped_with(
         delay: Duration,
-    ) -> anyhow::Result<(Self, std::sync::Arc<crate::quic_shaper::QuicShaperPool>)> {
+    ) -> anyhow::Result<(Self, &'static ClusterHandle)> {
+        // Before bring-up: localcluster resolves its delay model once, at startup, and the nodes
+        // inherit their environment from it.
+        cluster::request_latency_profile(format!("default: {}ms\n", delay.as_millis()));
+        // The controller under test. A hoprd built from the BBRv2 branch carries both and selects
+        // at startup; an older build ignores the variable and runs CUBIC, which is the collapse
+        // this scenario exists to catch.
+        cluster::request_node_env([("HOPR_QUIC_CONGESTION_CONTROLLER", "bbr2")]);
         let cluster = cluster::bring_up_shared().await?;
         let summary = cluster.summary.clone();
         let extra = summary.extras[0].clone();
 
-        let shaper_pool = std::sync::Arc::new(
-            crate::quic_shaper::QuicShaperPool::bind(cluster_size(), P2P_PORT_BASE).await?,
-        );
-        shaper_pool.set_delay(delay);
-
-        let proxy = crate::quic_shaper::BlokliProxy::start(
-            &summary.blokli_url,
-            shaper_pool.port_mappings().to_vec(),
-        )
-        .await?;
-
+        // Edgli dials the relay ports the nodes announce, so it needs no proxy of its own: the
+        // relays front the nodes and every datagram to and from the entry crosses one.
         let (edgli, reactor) = boot_edgli(
-            &proxy.url(),
+            &summary.blokli_url,
             &extra,
             &NetTuning::local(),
             cluster_size(),
@@ -248,11 +244,9 @@ impl IntegrationEnv {
                 dest_one_hop,
             },
             _cluster: Some(cluster),
-            _proxy: Some(proxy),
-            _shaper: Some(shaper_pool.clone()),
         };
 
-        Ok((env, shaper_pool))
+        Ok((env, cluster))
     }
 
     /// As [`Self::setup`], but with the cluster configured for PIX and the entry running the PIX
@@ -301,8 +295,6 @@ impl IntegrationEnv {
                 dest_one_hop,
             },
             _cluster: Some(cluster),
-            _proxy: None,
-            _shaper: None,
         })
     }
 
@@ -341,8 +333,6 @@ impl IntegrationEnv {
             _reactor: reactor,
             targets: Targets::Rotsee { exit },
             _cluster: None,
-            _proxy: None,
-            _shaper: None,
         })
     }
 

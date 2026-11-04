@@ -28,7 +28,6 @@ pub mod pix;
 // gate has failed. Those tests belong in the default `cargo test --lib`.
 pub mod pix_exit;
 pub mod pump;
-pub mod quic_shaper;
 pub mod relayers;
 pub mod session_metrics;
 // Ungated for the same reason `pix` is: the profile is arithmetic over constants, and its

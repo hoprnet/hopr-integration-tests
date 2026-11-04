@@ -58,6 +58,7 @@ use std::time::Duration;
 
 use hoprd_integration_test::{
     IntegrationEnv,
+    cluster::{ClusterHandle, Impairment},
     pump::{pace_for_rate_with_chunk, pump_sustained},
     request_edgli_egress_timeout,
 };
@@ -109,31 +110,60 @@ fn target_mbps() -> f64 {
         })
 }
 
-/// Fails the run unless the session's traffic verifiably crossed the shaper.
+/// Fails the run unless the session's traffic verifiably crossed the latency relays.
 ///
-/// The shaper is only in the path if Edgli dialed a port the proxy rewrote, so both directions
-/// have to show forwarded packets — and the blackhole and loss schedule has to have dropped some —
-/// before a throughput verdict means anything. Without this, a run in which Edgli reached a node
-/// directly passes on a perfectly healthy connection and reports nothing about the fault.
-fn assert_shaper_carried_the_session(shaper: &hoprd_integration_test::quic_shaper::QuicShaperPool) {
-    let stats = shaper.stats();
-    tracing::info!(?stats, "shaper counters");
+/// The impairment is applied at the relays, so both directions have to show forwarded datagrams —
+/// and the blackhole and loss schedule has to have dropped some — before a throughput verdict
+/// means anything. Without this, a run in which Edgli reached a node directly passes on a
+/// perfectly healthy connection and reports nothing about the fault.
+async fn assert_impairment_reached_the_session(cluster: &ClusterHandle) {
+    let stats = cluster.summary.relay_stats().await.expect("relay counters");
+    tracing::info!(?stats, "relay counters");
     assert!(
-        stats
-            .iter()
-            .any(|s| s.forward_sent > 0 && s.return_sent > 0),
-        "no QUIC traffic crossed the shaper in both directions; the impairment never applied: \
-         {stats:?}"
+        stats.forwarded_forward > 0 && stats.forwarded_return > 0,
+        "no QUIC traffic crossed the latency relays in both directions; the impairment never \
+         applied: {stats:?}"
     );
     assert!(
-        stats
-            .iter()
-            .map(|s| s.forward_dropped + s.return_dropped)
-            .sum::<u64>()
-            > 0,
-        "the shaper dropped nothing; the blackhole and loss schedule never reached the session: \
+        stats.dropped > 0,
+        "the relays dropped nothing; the blackhole and loss schedule never reached the session: \
          {stats:?}"
     );
+}
+
+/// How long the link is healthy before the fault, so the run establishes a peak to collapse from.
+const WARMUP: Duration = Duration::from_secs(15);
+/// How long the link is blackholed. Long enough to exceed the 2 s egress stall timeout, which is
+/// what triggers the stream eviction and the congestion-window collapse in the incident.
+const BLACKHOLE: Duration = Duration::from_secs(4);
+/// One datagram in this many is dropped after the blackhole ends, so a collapsed window is kept
+/// pinned instead of recovering between bursts.
+const LOSS_EVERY: u32 = 20;
+
+/// Drive the incident's shape on the entry↔exit link: a healthy warm-up, a blackhole, then
+/// recurring loss.
+///
+/// Scheduled from the test rather than configured up front, because the schedule changes *while
+/// the run is in flight* — that is the shape being reproduced. The latency relays pick each phase
+/// up within a poll interval, and the counters they report afterwards are what prove it applied.
+fn schedule_impairment(cluster: &'static ClusterHandle) {
+    tokio::spawn(async move {
+        let apply = |impairment: Impairment| {
+            if let Err(err) = cluster.summary.set_impairment(impairment) {
+                tracing::error!(%err, ?impairment, "could not apply the impairment");
+            }
+        };
+        // A second scenario in this binary reuses the cluster; clear what the first one left.
+        apply(Impairment::NONE);
+        tokio::time::sleep(WARMUP).await;
+        tracing::warn!(
+            ">>> QUIC IMPAIRMENT: blackhole for {BLACKHOLE:?} to trigger write stall and congestion collapse"
+        );
+        apply(Impairment::blackhole(true));
+        tokio::time::sleep(BLACKHOLE).await;
+        tracing::warn!(">>> QUIC IMPAIRMENT: blackhole ended, dropping 1 in {LOSS_EVERY}");
+        apply(Impairment::drop_every(LOSS_EVERY));
+    });
 }
 
 /// A sustained transfer must not collapse to a fraction of the rate it held earlier in the run.
@@ -146,9 +176,9 @@ async fn sustained_transfer_keeps_its_throughput() -> anyhow::Result<()> {
     // Mirror production 2 s egress stall timeout, which triggers stream eviction under backpressure.
     request_edgli_egress_timeout(Duration::from_secs(2));
 
-    // Route QUIC traffic between Edgli and cluster nodes through the userspace shaper with 50ms delay
-    // (100ms RTT) so CUBIC's minimum window calculation (2 * MTU / 100ms RTT = ~192 kbit/s) applies.
-    let (env, shaper) = IntegrationEnv::setup_shaped().await?;
+    // Put the cluster's latency relays in front of every node, 50ms one-way (100ms RTT), so CUBIC's
+    // minimum window calculation (2 * MTU / 100ms RTT = ~192 kbit/s) applies to the session.
+    let (env, cluster) = IntegrationEnv::setup_shaped().await?;
     // 0-hop: the fault is on the entry↔exit connection itself, not in relaying, so a direct path
     // keeps the scenario about the transport.
     let session = env.open_unreliable_session(0).await?;
@@ -171,20 +201,7 @@ async fn sustained_transfer_keeps_its_throughput() -> anyhow::Result<()> {
     // 1. Warm-up at 100ms RTT for 15s (healthy peak throughput established).
     // 2. Blackhole for 4s (exceeds 2s egress timeout, triggering StallGuardSink eviction and Quinn loss).
     // 3. Resume with light recurring loss (1 in 20 packets) to keep CUBIC pinned at quinn's 2400-byte floor.
-    let shaper_ctrl = shaper.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        tracing::warn!(
-            ">>> QUIC IMPAIRMENT: inducing blackhole (4s) to trigger write stall and congestion collapse"
-        );
-        shaper_ctrl.set_blackhole(true);
-        tokio::time::sleep(Duration::from_secs(4)).await;
-        shaper_ctrl.set_blackhole(false);
-        tracing::warn!(
-            ">>> QUIC IMPAIRMENT: blackhole ended, activating light recurring loss (1 in 20)"
-        );
-        shaper_ctrl.set_drop_every(Some(20));
-    });
+    schedule_impairment(cluster);
 
     let run = pump_sustained(
         &mut rx,
@@ -197,12 +214,12 @@ async fn sustained_transfer_keeps_its_throughput() -> anyhow::Result<()> {
     )
     .await?;
 
-    // The impairment only means anything if the traffic actually crossed the shaper. Edgli could
-    // otherwise have reached a node directly — a multiaddr the proxy did not rewrite, an address
-    // learned outside Blokli, or an inbound connection to its own edge port — and the run would
-    // then pass without testing anything. Fails the run rather than the assertion below it, so a
-    // vacuous pass cannot be mistaken for a healthy connection.
-    assert_shaper_carried_the_session(&shaper);
+    // The impairment only means anything if the traffic actually crossed the relays. Edgli could
+    // otherwise have reached a node directly — an address learned outside Blokli, or an inbound
+    // connection to its own edge port — and the run would then pass without testing anything.
+    // Fails the run rather than the assertion below it, so a vacuous pass cannot be mistaken for
+    // a healthy connection.
+    assert_impairment_reached_the_session(cluster).await;
 
     // The whole series, so a failing run reports the shape rather than one number.
     let mut series = String::new();
@@ -280,21 +297,14 @@ async fn sustained_transfer_keeps_its_throughput() -> anyhow::Result<()> {
 async fn unpaced_transfer_keeps_its_throughput() -> anyhow::Result<()> {
     request_edgli_egress_timeout(Duration::from_secs(2));
 
-    let (env, shaper) = IntegrationEnv::setup_shaped().await?;
+    let (env, cluster) = IntegrationEnv::setup_shaped().await?;
     let session = env.open_unreliable_session(0).await?;
     let (mut rx, mut tx) = tokio::io::split(session);
 
     let floor_pct = healthy_floor_pct();
     let duration = run_duration();
 
-    let shaper_ctrl = shaper.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        shaper_ctrl.set_blackhole(true);
-        tokio::time::sleep(Duration::from_secs(4)).await;
-        shaper_ctrl.set_blackhole(false);
-        shaper_ctrl.set_drop_every(Some(20));
-    });
+    schedule_impairment(cluster);
 
     let run = pump_sustained(
         &mut rx,
@@ -307,9 +317,9 @@ async fn unpaced_transfer_keeps_its_throughput() -> anyhow::Result<()> {
     )
     .await?;
 
-    // Same vacuity guard as the paced scenario: a run whose traffic never crossed the shaper says
+    // Same vacuity guard as the paced scenario: a run whose traffic never crossed the relays says
     // nothing about congestion control, whichever direction it is missing.
-    assert_shaper_carried_the_session(&shaper);
+    assert_impairment_reached_the_session(cluster).await;
 
     // The whole series, so a failing run reports the shape rather than one number.
     let mut series = String::new();

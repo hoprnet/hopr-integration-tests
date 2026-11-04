@@ -460,6 +460,12 @@ run_tier() {
   echo "running integration tests (binary chain, ${LINE}, tier ${TIER}) ..."
   in_tier pr && run_suite integration
   in_tier nightly && run_suite exit_origination
+  # v5 only: the QUIC collapse repro. Its cluster runs the latency relays, which is where the
+  # impairment is applied, and the v5 stack builds QUIC with BBRv2 — on v4 the CUBIC collapse is
+  # the known fault (hoprnet#8524), so running it there would gate on a bug rather than catch one.
+  if [ "${LINE}" = v5 ]; then
+    in_tier pr && run_suite quic_congestion
+  fi
   # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore
   # FAILS against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there.
 
