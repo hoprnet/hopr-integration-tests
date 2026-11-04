@@ -1045,6 +1045,17 @@ fn trailing_stall_secs(at: f64, last_progress_ms: i64) -> f64 {
     (at * 1000.0 - last_progress_ms as f64).max(0.0) / 1000.0
 }
 
+/// The write size [`pump_sustained`] actually sends, given the one its caller asked for.
+///
+/// [`tagged_payload`] emits whole [`RECORD_SIZE`] records, so a `chunk` that is not a multiple of
+/// one would send fewer bytes than the run's accounting charges to it, and the record index —
+/// derived from that same counter — would drift from what went out. Round down to whole records,
+/// and never to an empty block: a zero-length write returns at once and the writer would spin for
+/// the rest of the run.
+fn whole_record_chunk(chunk: usize) -> usize {
+    (chunk / RECORD_SIZE).max(1) * RECORD_SIZE
+}
+
 /// Drive a session for `duration`, writing a paced, tagged stream and reading the echo back while
 /// sampling both directions on `sample_every`.
 ///
@@ -1060,17 +1071,6 @@ fn trailing_stall_secs(at: f64, last_progress_ms: i64) -> f64 {
 /// Borrows the session halves, so the same session can be measured more than once. Writer and
 /// reader are joined in this task rather than spawned, so the borrowed halves never leave the
 /// caller's scope.
-/// The write size [`pump_sustained`] actually sends, given the one its caller asked for.
-///
-/// [`tagged_payload`] emits whole [`RECORD_SIZE`] records, so a `chunk` that is not a multiple of
-/// one would send fewer bytes than the run's accounting charges to it, and the record index —
-/// derived from that same counter — would drift from what went out. Round down to whole records,
-/// and never to an empty block: a zero-length write returns at once and the writer would spin for
-/// the rest of the run.
-fn whole_record_chunk(chunk: usize) -> usize {
-    (chunk / RECORD_SIZE).max(1) * RECORD_SIZE
-}
-
 pub async fn pump_sustained(
     rx: &mut tokio::io::ReadHalf<HoprSession>,
     tx: &mut tokio::io::WriteHalf<HoprSession>,
@@ -1144,7 +1144,11 @@ pub async fn pump_sustained(
             if now >= deadline {
                 break;
             }
+            // Capped at the deadline: a budget that runs to `next_sample` alone would let the
+            // final read outlive the run, which pushes the last row — and so `at` — past
+            // `duration` and reports a trailing stall that never happened.
             let budget = next_sample
+                .min(deadline)
                 .saturating_duration_since(now)
                 .max(Duration::from_millis(1));
             match tokio::time::timeout(budget, rx.read(&mut buf)).await {
