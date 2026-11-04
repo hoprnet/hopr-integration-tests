@@ -20,9 +20,10 @@
 //!   4 s blackhole, then recurring loss on the same connection, and drives those transitions from
 //!   the test itself. Expressing them through localcluster means adding a runtime control surface
 //!   to hoprd.
-//! - **Reach a released binary.** It ships as `hoprd-localcluster`, which this harness runs from
-//!   `HOPRD_LOCALCLUSTER_BIN`; nothing here can link it, so any new capability has to reach a
-//!   hoprd release on both lines before these tests could use it.
+//! - **Arrive through hoprd.** It ships as `hoprd-localcluster`, which this harness runs from
+//!   `HOPRD_LOCALCLUSTER_BIN` rather than linking, so a new capability has to come in a hoprd
+//!   change — a PR head named by a `Requires:` line, or a release — and be built on the line
+//!   under test before these tests can use it.
 //!
 //! So the shaper sits between what Edgli learns from Blokli (the proxy rewrites the announced
 //! ports) and the node, and the test owns the schedule. Moving loss and a control surface into the
