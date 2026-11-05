@@ -208,7 +208,7 @@ There are no gate variables — thresholds are hardcoded in
 
 Both lines are supported, one per run: `LINE=v4` (default) builds hoprd from
 `release/4.1` against edge-client `release/4.1` and blokli `release/0.13`; `LINE=v5`
-builds from `main` against edge-client `main` and blokli `release/0.14`, and adds the PIX
+builds from `main` against edge-client `main` and blokli `main`, and adds the PIX
 suite. `release/4.1` is the only v4 branch hoprd has — `4.0` exists as a hoprnet branch
 and as hoprd tags `v4.0.x`, not as a hoprd branch. The dependency sets live side by side
 in the crate (`Cargo.toml` = v4, `Cargo.v5.toml` = v5) and `run.sh` swaps the v5 one in
