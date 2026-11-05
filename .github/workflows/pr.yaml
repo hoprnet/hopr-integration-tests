@@ -18,10 +18,9 @@ on:
   # here too — they are cheap, and running them against the candidate is the point.
   merge_group:
     types: [checks_requested]
-permissions:
-  contents: read
+permissions: {}
 concurrency:
-  group: ${{ github.event.pull_request.head.ref || github.ref_name }}-pr
+  group: ${{ github.event.pull_request.number || github.ref }}-pr
   cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
@@ -57,11 +56,14 @@ jobs:
             refactor
             perf
             test
+            revert
           requireScope: false
   shell:
     name: Shell lint
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
@@ -150,6 +152,9 @@ jobs:
     name: Unit tests (${{ matrix.line }})
     # Self-hosted because it runs tests, not because these are slow. No `harden-runner`:
     # it needs sudo for an eBPF egress monitor and only supports GitHub-hosted runners.
+    # Never on a fork PR: fork code would persist on the shared box (target dir,
+    # ~/.cargo, PATH shims) and run later inside trusted gate jobs. hoprnet/hopr-devops#355.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, hetzner]
     timeout-minutes: 30
     permissions:
@@ -247,6 +252,7 @@ jobs:
     if: always()
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 5
+    permissions: {}
     steps:
       - env:
           RESULT: ${{ needs.lint.result }}
@@ -260,9 +266,39 @@ jobs:
     # Hosted: must not queue behind the matrix on the self-hosted runner.
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 5
+    permissions: {}
     steps:
       - env:
           RESULT: ${{ needs.unit.result }}
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          echo "unit matrix result: ${RESULT}"
+          echo "unit matrix result: ${RESULT} (fork PR: ${IS_FORK})"
+          # Unit tests never run on the shared self-hosted box for a fork PR, so skipped is
+          # expected there and nowhere else.
+          [ "${RESULT}" = skipped ] && [ "${IS_FORK}" = true ] && exit 0
           [ "${RESULT}" = success ] || { echo "::error::unit result is '${RESULT}'"; exit 1; }
+  # Single aggregate merge gate: green only if every other job in this run
+  # succeeded. Runs on a hosted runner so a fork PR can never occupy the shared
+  # self-hosted box. `if: always()` runs it even when a dependency fails;
+  # alls-green then reds the gate on any non-success (a failed job, or a skip
+  # that is not allowed).
+  merge-gate:
+    name: Merge gate
+    if: always()
+    needs:
+      - validate-pr-title
+      - shell
+      - lint
+      - unit
+      - lint-gate
+      - unit-gate
+    runs-on: depot-ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Require all jobs to pass
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          jobs: ${{ toJSON(needs) }}
+          # validate-pr-title runs on pull_request only. `unit` is skipped only for a
+          # fork PR (it must not run on the self-hosted box); every other event must run it.
+          allowed-skips: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'validate-pr-title, unit' || 'validate-pr-title' }}
