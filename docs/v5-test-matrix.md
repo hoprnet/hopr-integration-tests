@@ -131,7 +131,7 @@ S = strict assertion, w = exercised but weakly or not asserted.
 ## Measured locally
 
 `just tier` on an Apple-silicon Mac, 2026-10-28. Stack: hoprd `main` (flake) plus the PIX hoprd
-built from `8d9f11a`, edge-client `main` head, blokli `release/0.14`. Each tier ran on one fresh
+built from `8d9f11a`, edge-client `main` head, blokli `main`. Each tier ran on one fresh
 chain. Both tiers were green.
 
 | Tier    | Suite            | Tests | Test time | Summary                      |

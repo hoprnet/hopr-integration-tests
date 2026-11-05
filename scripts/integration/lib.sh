@@ -14,13 +14,13 @@ it_env() {
   export REPO_ROOT="${LIB_ROOT}"
   export HOPRD_BIN="${HOPRD_BIN:-${LIB_ROOT}/result-hoprd/bin/hoprd}"
   export HOPRD_LOCALCLUSTER_BIN="${HOPRD_LOCALCLUSTER_BIN:-${LIB_ROOT}/result-localcluster/bin/hoprd-localcluster}"
-  export HOPRD_CHAIN_URL="${HOPRD_CHAIN_URL:-http://localhost:8080}"
+  export BLOKLI_API_PORT="${BLOKLI_API_PORT:-8080}"
+  export HOPRD_CHAIN_URL="${HOPRD_CHAIN_URL:-http://localhost:${BLOKLI_API_PORT}}"
   export RUST_LOG="${RUST_LOG:-info,edgli=debug}"
   export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
   export HOPRD_PUMP_MBPS="${HOPRD_PUMP_MBPS:-0.5}"
-  export BLOKLI_API_PORT="${BLOKLI_API_PORT:-8080}"
   export ANVIL_PORT="${ANVIL_PORT:-8545}"
-  export CHAIN_DATA_DIR="${CHAIN_DATA_DIR:-/tmp/hopr-chain}"
+  export CHAIN_DATA_DIR="${CHAIN_DATA_DIR:-${IT_TMP_ROOT:-/tmp}/hopr-chain}"
   grep -qa 'frozen-identities' "${HOPRD_LOCALCLUSTER_BIN}" 2>/dev/null && export HOPRD_FROZEN_IDENTITIES=1
   return 0
 }
@@ -110,7 +110,7 @@ line_refs() {
   v5)
     HOPRD_LINE="${HOPRD_LINE:-main}"
     EDGLI_REF="${EDGLI_REF:-main}"
-    BLOKLI_DEFAULT="release/0.14"
+    BLOKLI_DEFAULT="${BLOKLI_DEFAULT:-main}"
     ;;
   *)
     echo "unknown LINE '${LINE}' (expected v4 or v5)" >&2
@@ -231,7 +231,7 @@ chain_up() {
   local anvil="${ANVIL_BIN:-${LIB_ROOT}/result-foundry/bin/anvil}"
   local bloklid="${BLOKLID_BIN:-${LIB_ROOT}/result-bloklid/bin/bloklid}"
   local deployer="${DEPLOYER_BIN:-${LIB_ROOT}/result-bloklid/bin/blokli-contract-deployer}"
-  local dir="${CHAIN_DATA_DIR:-/tmp/hopr-chain}"
+  local dir="${CHAIN_DATA_DIR:-${IT_TMP_ROOT:-/tmp}/hopr-chain}"
   local anvil_port="${ANVIL_PORT:-8545}"
   local api_port="${BLOKLI_API_PORT:-8080}"
   local rpc_url="http://127.0.0.1:${anvil_port}"
@@ -325,7 +325,7 @@ EOF
 # Tails of the chain logs, at the moment they are worth reading. chain_up keeps them in files,
 # so a startup failure is otherwise a bare "chain died" with no cause.
 chain_logs() {
-  local dir="${CHAIN_DATA_DIR:-/tmp/hopr-chain}" f
+  local dir="${CHAIN_DATA_DIR:-${IT_TMP_ROOT:-/tmp}/hopr-chain}" f
   for f in bloklid.log anvil.log deployer.log; do
     [ -s "${dir}/${f}" ] || continue
     echo "── last 40 lines of ${dir}/${f} ──" >&2
@@ -357,27 +357,34 @@ chain_start() {
 # pkill matching nothing is the normal case, not a failure.
 chain_stop() {
   [ -n "${CHAIN_PID}" ] && kill "${CHAIN_PID}" 2>/dev/null || true
-  # Safety net for a chain whose wrapper died without running its trap.
-  pkill -f "result-bloklid/bin/bloklid" 2>/dev/null || true
-  pkill -f "result-foundry/bin/anvil" 2>/dev/null || true
+  # Safety net for a chain whose wrapper died without running its trap. Scoped to this
+  # checkout's binaries: another job on the same host runs the same ones from its own.
+  pkill -f "$(ere_escape "${LIB_ROOT}/result-bloklid/bin/bloklid")" 2>/dev/null || true
+  pkill -f "$(ere_escape "${LIB_ROOT}/result-foundry/bin/anvil")" 2>/dev/null || true
   wait "${CHAIN_PID}" 2>/dev/null || true
   CHAIN_PID=""
+}
+
+# `pkill -f`/`pgrep -f` read an ERE, so a `+`, `(` or `[` in a path would either stop the
+# pattern matching or make pgrep error.
+ere_escape() {
+  printf '%s' "$1" | sed 's/[][\.^$*+?(){}|]/\\&/g'
 }
 
 # The cargo test process tears its own cluster down, but localcluster's SIGINT→hoprd reaping is
 # async and can lag. Stray nodes steal CPU from the next scenario — on the crypto-heavy 1-hop
 # path that alone tanks arrival — so force-reap and let the machine idle first.
 #
-# Matched against ${HOPRD_BIN} rather than a hardcoded path: `just pix` points it at a cargo
-# target dir. `pkill -f`/`pgrep -f` read an ERE, so a `+`, `(` or `[` in that path would either
-# stop the pattern matching or make pgrep error — escaped once here.
+# Matched against the full binary paths rather than names: `just pix` points them at a cargo
+# target dir, and another job on the same host runs the same binaries from its own checkout.
 reap_nodes() {
-  local bin_re
-  bin_re="$(printf '%s' "${HOPRD_BIN:-result-hoprd/bin/hoprd}" | sed 's/[][\.^$*+?(){}|]/\\&/g')"
-  pkill -f "hoprd-localcluster" 2>/dev/null || true
+  local bin_re lc_re
+  bin_re="$(ere_escape "${HOPRD_BIN:-result-hoprd/bin/hoprd}")"
+  lc_re="$(ere_escape "${HOPRD_LOCALCLUSTER_BIN:-hoprd-localcluster}")"
+  pkill -f "${lc_re}" 2>/dev/null || true
   pkill -f "${bin_re}" 2>/dev/null || true
   for _ in $(seq 1 30); do
-    pgrep -f "${bin_re}|hoprd-localcluster" >/dev/null 2>&1 || break
+    pgrep -f "${bin_re}|${lc_re}" >/dev/null 2>&1 || break
     sleep 1
   done
   sleep 5
@@ -392,7 +399,7 @@ cluster_up() {
   "${HOPRD_LOCALCLUSTER_BIN}" \
     --size "${HOPRD_CLUSTER_SIZE:-3}" --extra-identities 1 \
     --api-host 127.0.0.1 \
-    --api-port-base 13000 --p2p-port-base 19000 \
+    --api-port-base "${HOPRD_API_PORT_BASE:-13000}" --p2p-port-base "${HOPRD_P2P_PORT_BASE:-19000}" \
     --api-token test-token-localcluster \
     --hoprd-bin "${HOPRD_BIN}" \
     --chain-url "${HOPRD_CHAIN_URL}" \
@@ -718,10 +725,12 @@ warn_if_trace_capped() {
   echo "      Run \`just integration-trace\` to build hoprd with TRACE logs." >&2
 }
 
-# What "the state" is, in one place. Was four divergent lists.
+# What "the state" is, in one place. Was four divergent lists. Under IT_TMP_ROOT, which CI sets
+# per runner, so a job never deletes the live state of another job on the same host.
 clean_tmp() {
-  rm -rf /tmp/hopr-chain /tmp/hopr-nodes /tmp/hopr-it /tmp/hoprd-it-* 2>/dev/null || true
-  find /tmp -maxdepth 3 -type d -name 'hoprd-it-*' -exec rm -rf {} + 2>/dev/null || true
+  local root="${IT_TMP_ROOT:-/tmp}"
+  rm -rf "${root}/hopr-chain" "${root}/hopr-nodes" "${root}/hopr-it" "${root}"/hoprd-it-* 2>/dev/null || true
+  find "${root}" -maxdepth 3 -type d -name 'hoprd-it-*' -exec rm -rf {} + 2>/dev/null || true
 }
 
 # Called as a script rather than sourced: dispatch to the named function. An `if` rather than

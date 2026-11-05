@@ -1,9 +1,8 @@
 name: PR
 # Validate PR metadata and check the integration crate. Split by what each step
 # actually needs: `fmt`/`clippy` are pure compile-time checks and run on a hosted
-# depot runner, while anything that EXECUTES a test runs on the self-hosted
-# self-hosted runner — the same machine the throughput gate uses, so a test result here
-# and one there come from the same hardware. The heavy end-to-end run lives in
+# depot runner, and unit tests run on a hosted depot runner too (main moved them off the
+# self-hosted box so they cannot queue behind integration runs). The heavy end-to-end run lives in
 # integration.yaml. See runner/README.md.
 #
 # Both jobs fan out over the two release lines: shared source, two dependency sets
@@ -153,12 +152,11 @@ jobs:
     # Stage 2: runs only after the cheap hosted stage 1 (shell, lint) is green. No
     # `always()`: a failed stage 1 skips this job and reds the merge gate.
     needs: [shell, lint]
-    # Self-hosted because it runs tests, not because these are slow. No `harden-runner`:
-    # it needs sudo for an eBPF egress monitor and only supports GitHub-hosted runners.
-    # Never on a fork PR: fork code would persist on the shared box (target dir,
-    # ~/.cargo, PATH shims) and run later inside trusted gate jobs. hoprnet/hopr-devops#355.
+    # Never on a fork PR (hoprnet/hopr-devops#355); `unit-gate` and `merge-gate` accept that skip.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, hetzner]
+    # Hosted, like lint: the self-hosted boxes run one integration job each, and a unit job
+    # queued behind a 40-80 min integration run would hold up every PR.
+    runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 30
     permissions:
       contents: read
@@ -166,43 +164,23 @@ jobs:
     strategy:
       # A red line cancels the other: the first failure is the one to read.
       fail-fast: true
-      max-parallel: 1
       matrix:
         line: [v4, v5]
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          disable-sudo: false
+          egress-policy: audit
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      # Keep build artifacts OUT of the workspace: the checkout above runs
-      # `git clean -ffdx`, which deletes the gitignored `integration/target` every
-      # run — on a persistent box that means recompiling the whole hopr-lib dep
-      # tree each time for no reason. Under the runner's own $HOME (it owns that,
-      # unlike /opt), and keyed by $RUNNER_NAME so jobs on separate instances do
-      # not serialise on cargo's target-dir lock. Set here rather than in `env:`
-      # because the `runner` context is not available at that level.
-      - name: Point cargo at a persistent target dir
-        run: |
-          dir="${HOME}/.cache/hopr-integration-tests/cargo-target-${RUNNER_NAME}"
-          mkdir -p "${dir}"
-          echo "CARGO_TARGET_DIR=${dir}" >> "${GITHUB_ENV}"
-      # Same as integration.yaml: `setup-nix` would try `install-nix-action`, which
-      # needs root the `runner` user does not have. Nix belongs to the box here.
-      - name: Locate nix
-        run: |
-          if command -v nix >/dev/null 2>&1; then
-            echo "nix already on PATH: $(command -v nix)"
-            exit 0
-          fi
-          for d in /nix/var/nix/profiles/default/bin "${HOME}/.nix-profile/bin"; do
-            if [ -x "${d}/nix" ]; then
-              echo "found nix in ${d}; adding to PATH"
-              echo "${d}" >> "${GITHUB_PATH}"
-              exit 0
-            fi
-          done
-          echo "::error::nix is not installed on this runner — see runner/README.md." >&2
-          exit 1
+      - name: Setup Nix
+        uses: hoprnet/hopr-workflows/actions/setup-nix@5477bd53d62ac15c4804b31fbd55966b29a43997 # setup-nix-v2
+        with:
+          cachix_cache_name: hoprnet
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
       # Same swap run.sh does. Its own step rather than a branch inside the single-quoted
       # `bash -c` body below, where any `${...}` is an SC2016 finding that fails actionlint.
       - name: Select the v5 dependency set
@@ -266,7 +244,7 @@ jobs:
     name: Unit tests
     needs: unit
     if: always()
-    # Hosted: must not queue behind the matrix on the self-hosted runner.
+    # Hosted, like the unit matrix.
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -276,13 +254,13 @@ jobs:
           IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           echo "unit matrix result: ${RESULT} (fork PR: ${IS_FORK})"
-          # Unit tests never run on the shared self-hosted box for a fork PR, so skipped is
+          # Unit tests never run for a fork PR, so skipped is
           # expected there and nowhere else.
           [ "${RESULT}" = skipped ] && [ "${IS_FORK}" = true ] && exit 0
           [ "${RESULT}" = success ] || { echo "::error::unit result is '${RESULT}'"; exit 1; }
   # Single aggregate merge gate: green only if every other job in this run
-  # succeeded. Runs on a hosted runner so a fork PR can never occupy the shared
-  # self-hosted box. `if: always()` runs it even when a dependency fails;
+  # succeeded. Runs on a hosted runner.
+  # `if: always()` runs it even when a dependency fails;
   # alls-green then reds the gate on any non-success (a failed job, or a skip
   # that is not allowed).
   merge-gate:
@@ -303,5 +281,5 @@ jobs:
         with:
           jobs: ${{ toJSON(needs) }}
           # validate-pr-title runs on pull_request only. `unit` is skipped only for a
-          # fork PR (it must not run on the self-hosted box); every other event must run it.
+          # fork PR (see the `unit` job); every other event must run it.
           allowed-skips: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'validate-pr-title, unit' || 'validate-pr-title' }}

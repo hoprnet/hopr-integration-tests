@@ -10,7 +10,7 @@ differs (`integration/Cargo.toml` = v4, `integration/Cargo.v5.toml` = v5):
 |                  | hoprd         | hoprnet       | edge-client   | blokli         | PIX |
 | ---------------- | ------------- | ------------- | ------------- | -------------- | --- |
 | **v4** (default) | `release/4.1` | `release/4.0` | `release/4.1` | `release/0.13` | no  |
-| **v5**           | `main`        | `master`      | `main`        | `release/0.14` | yes |
+| **v5**           | `main`        | `master`      | `main`        | `main`         | yes |
 
 The lines do not mix. A v0.13 blokli cannot bootstrap a v5 localcluster (no `service_registry`),
 and the edge-client lines pin different hopr-lib versions.
@@ -187,11 +187,11 @@ build output to `nix-build.log`, so a long build can look like it has stopped.
 ## CI
 
 **`pr.yaml`** runs on every PR and in the merge queue, for both lines: title check, shell lint,
-`fmt` + `clippy` (depot), and unit tests (the `hetzner` box). Before compiling, it pins `edgli`
+`fmt` + `clippy` and unit tests (depot). Before compiling, it pins `edgli`
 the same way `run.sh` does (see below).
 
 **`integration.yaml`** runs [`scripts/integration/run.sh`](scripts/integration/run.sh) on the
-`hetzner` box. It is triggered by:
+dedicated self-hosted runners. It is triggered by:
 
 - upstream gates (hoprd, edge-client, blokli) through dispatch, on the line they request;
 - this repo's merge queue, and PRs carrying a `run-integration*` label;
@@ -199,7 +199,7 @@ the same way `run.sh` does (see below).
   default branches);
 - manual runs: `gh workflow run integration.yaml -f line=v5 -f tier=nightly -f project=hoprd -f rev=<sha>`.
 
-Each trigger runs one job per line and tier, one after another on the box:
+Each trigger runs one job per line and tier, side by side when runners are free:
 
 | Trigger                                   | v4  | v5 `pr` | v5 `nightly` |
 | ----------------------------------------- | --- | ------- | ------------ |

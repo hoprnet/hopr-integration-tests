@@ -4,10 +4,8 @@ self-hosted-runner:
     # that only compiles can live on a throwaway VM.
     - depot-ubuntu-24.04
     - depot-ubuntu-24.04-4
-    # The self-hosted Hetzner box, provisioned by gitops/ansible
-    # (playbooks/install-github-hetzner-runner.yaml). Everything that EXECUTES a
-    # test lands here — the unit tests and the whole integration throughput gate —
-    # so results come from one known machine. See runner/README.md.
+    # The dedicated self-hosted boxes. The integration throughput gate lands here,
+    # so results come from known machines. See runner/README.md.
     - hetzner
 # The pre-commit hook's actionlint (1.7.9, nix-pinned) predates `concurrency.queue`, which GitHub accepts.
 paths:
