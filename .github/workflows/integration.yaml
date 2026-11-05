@@ -386,16 +386,9 @@ jobs:
         # and the suffixed outputs are the static musl builds CI has always run.
         env:
           NIX_SYSTEM_SUFFIX: x86_64-linux
-        # Box-wide lock shared by both runner instances: v4 jobs may share a box, a v5 job waits
-        # for it alone, since PIX shapes evict shares and 2-hop halves under a neighbour's load.
         run: |
-          lock="${HOME}/.cache/hopr-integration-tests/box.lock"
-          mkdir -p "$(dirname "${lock}")"
-          mode=--shared
-          [ "${LINE}" = v5 ] && mode=--exclusive
           code=0
-          flock "${mode}" "${lock}" \
-            nix develop github:hoprnet/hoprnet --command bash scripts/integration/run.sh || code=$?
+          nix develop github:hoprnet/hoprnet --command bash scripts/integration/run.sh || code=$?
           echo "exit_code=${code}" >>"${GITHUB_OUTPUT}"
           exit "${code}"
       # Check the real suites' artifacts, including failed runs. A reused pass or a

@@ -148,9 +148,9 @@ jobs:
           '
   unit:
     name: Unit tests (${{ matrix.line }})
-    # Self-hosted because it runs tests, not because these are slow. No `harden-runner`:
-    # it needs sudo for an eBPF egress monitor and only supports GitHub-hosted runners.
-    runs-on: [self-hosted, hetzner]
+    # Hosted, like lint: the hetzner boxes run one integration job each, and a unit job
+    # queued behind a 40-80 min integration run would hold up every PR.
+    runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 30
     permissions:
       contents: read
@@ -158,43 +158,23 @@ jobs:
     strategy:
       # A red line cancels the other: the first failure is the one to read.
       fail-fast: true
-      max-parallel: 1
       matrix:
         line: [v4, v5]
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          disable-sudo: false
+          egress-policy: audit
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      # Keep build artifacts OUT of the workspace: the checkout above runs
-      # `git clean -ffdx`, which deletes the gitignored `integration/target` every
-      # run — on a persistent box that means recompiling the whole hopr-lib dep
-      # tree each time for no reason. Under the runner's own $HOME (it owns that,
-      # unlike /opt), and keyed by $RUNNER_NAME so jobs on separate instances do
-      # not serialise on cargo's target-dir lock. Set here rather than in `env:`
-      # because the `runner` context is not available at that level.
-      - name: Point cargo at a persistent target dir
-        run: |
-          dir="${HOME}/.cache/hopr-integration-tests/cargo-target-${RUNNER_NAME}"
-          mkdir -p "${dir}"
-          echo "CARGO_TARGET_DIR=${dir}" >> "${GITHUB_ENV}"
-      # Same as integration.yaml: `setup-nix` would try `install-nix-action`, which
-      # needs root the `runner` user does not have. Nix belongs to the box here.
-      - name: Locate nix
-        run: |
-          if command -v nix >/dev/null 2>&1; then
-            echo "nix already on PATH: $(command -v nix)"
-            exit 0
-          fi
-          for d in /nix/var/nix/profiles/default/bin "${HOME}/.nix-profile/bin"; do
-            if [ -x "${d}/nix" ]; then
-              echo "found nix in ${d}; adding to PATH"
-              echo "${d}" >> "${GITHUB_PATH}"
-              exit 0
-            fi
-          done
-          echo "::error::nix is not installed on this runner — see runner/README.md." >&2
-          exit 1
+      - name: Setup Nix
+        uses: hoprnet/hopr-workflows/actions/setup-nix@5477bd53d62ac15c4804b31fbd55966b29a43997 # setup-nix-v2
+        with:
+          cachix_cache_name: hoprnet
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
       # Same swap run.sh does. Its own step rather than a branch inside the single-quoted
       # `bash -c` body below, where any `${...}` is an SC2016 finding that fails actionlint.
       - name: Select the v5 dependency set

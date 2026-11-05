@@ -24,11 +24,16 @@ stable hardware.
 
 The boxes are provisioned out of the **gitops** repo, not here:
 `ansible/playbooks/install-github-hetzner-runner.yaml` (see `ansible/README.md`
-there). Two servers, **two** runner instances each (`github_hetzner_runner_instances: 2`,
-gitops commit `93a9b86`), registered at the **org** level with the single label `hetzner`
-as `github-hetzner-runner-<box>-<instance>`. So up to 4 jobs run at once, two per box.
+there). Two servers, **one** runner instance each (`github_hetzner_runner_instances: 1`),
+registered at the **org** level with the single label `hetzner` as
+`github-hetzner-runner-<box>-<instance>`. So up to 2 jobs run at once, one per box.
+`max-parallel: 4` in `integration.yaml` is only a ceiling; the runner count is the limit.
 
-Two jobs on one box share the OS, so the integration job keeps them apart itself: the
+One instance per box on purpose: with two (gitops `93a9b86`) v5 failed next to any
+neighbour — `pix_shapes` evicted PIX shares from the Exit's SURB store and `2-hop` dropped
+to ~0.17 MB/s (0.28 alone) — while only v4 gained from the second slot.
+
+Should a box ever run two instances again, the integration job keeps them apart itself: the
 "Claim this runner's ports and temp dir" step reads the instance number from `RUNNER_NAME`
 and, for instance N, shifts every port by `(N-1) * 1000` and roots the chain and socket
 folders at that runner's `RUNNER_TEMP`:
@@ -168,18 +173,10 @@ runs one job at a time. Neither is achievable from this repo — both are gitops
    repositories_ off), not a label — a label expresses a preference, it does not
    deny anyone. Renaming the label would also work but breaks every workflow
    referencing it, so prefer the group.
-2. **One job per box — kept for v5 only.** Two runner instances per box (above) keep
-   ports and state apart, but **not CPU**. v4 tolerates a neighbour; v5 does not: next to
-   another job its `pix_shapes` scenarios evict PIX shares from the Exit's SURB store and
-   `2-hop` drops to ~0.17 MB/s (0.28 alone). So the run step holds a box-wide `flock` on
-   `~/.cache/hopr-integration-tests/box.lock`, which both instances share: v4 takes it
-   shared, v5 exclusive. Two v4 jobs run side by side; a v5 job idles on its runner until
-   the box is its own, and the job log shows no output while it waits.
+2. **One job per box** — one runner instance each (above). The PR unit tests run on
+   depot for the same reason: nothing else should take a box from an integration job.
 
-If a run is slow, check the job log's runner name and whether the other instance on that
-box (`-<box>-1` vs `-<box>-2`) was running at the same time before blaming the stack.
-
-All four runners register the _same_ `hetzner` label, so a run lands on any of them — a
+All runners register the _same_ `hetzner` label, so a run lands on any of them — a
 baseline established on one box is only a baseline for that box. If the boxes ever
 differ in spec, give this workflow its own label.
 
@@ -386,7 +383,7 @@ stack.
 
 - **On a hopr-integration-tests PR:** `run-integration` runs the v5 `pr` tier,
   `run-integration-v4` the v4 suites, `run-integration-v5-nightly` the v5 `nightly` tier. Labels
-  add up; the jobs run side by side, up to four at once (v5 ones one per box).
+  add up; the jobs run side by side, one per box.
 - **Manual:** `gh workflow run integration.yaml -R hoprnet/hopr-integration-tests`
   then `gh run watch -R hoprnet/hopr-integration-tests --exit-status`.
 - **Simulate a merge trigger:**
@@ -399,6 +396,5 @@ stack.
   ```
 
 Concurrency: a new push to a PR cancels that PR's in-progress run. Otherwise runs and
-their matrix legs (`max-parallel: 4`) start as soon as a `hetzner` runner is free — up to
-four at once, two per box, except that a v5 job waits for its box to be otherwise idle
-(the box lock, above).
+their matrix legs (`max-parallel: 4`) start as soon as a `hetzner` runner is free — one
+per box, two at once.
