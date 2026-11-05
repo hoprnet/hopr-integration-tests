@@ -65,7 +65,7 @@ EDGLI_SHA="$(resolve_sha hoprnet/edge-client "${EDGLI_REF}")"
 }
 
 # blokli tracks the `release/0.13` BRANCH — the line the Jura (v4) network runs,
-# agreed with the blokli team — and `release/0.14` on v5. Deliberately a moving branch and not a resolved
+# agreed with the blokli team — and `main` on v5. Deliberately a moving branch and not a resolved
 # release number, so patch releases land without an edit here; resolving it to a sha
 # below is what makes that actually take effect.
 #

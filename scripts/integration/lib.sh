@@ -110,7 +110,7 @@ line_refs() {
   v5)
     HOPRD_LINE="${HOPRD_LINE:-main}"
     EDGLI_REF="${EDGLI_REF:-main}"
-    BLOKLI_DEFAULT="release/0.14"
+    BLOKLI_DEFAULT="${BLOKLI_DEFAULT:-main}"
     ;;
   *)
     echo "unknown LINE '${LINE}' (expected v4 or v5)" >&2

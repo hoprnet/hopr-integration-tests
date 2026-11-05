@@ -10,7 +10,7 @@ differs (`integration/Cargo.toml` = v4, `integration/Cargo.v5.toml` = v5):
 |                  | hoprd         | hoprnet       | edge-client   | blokli         | PIX |
 | ---------------- | ------------- | ------------- | ------------- | -------------- | --- |
 | **v4** (default) | `release/4.1` | `release/4.0` | `release/4.1` | `release/0.13` | no  |
-| **v5**           | `main`        | `master`      | `main`        | `release/0.14` | yes |
+| **v5**           | `main`        | `master`      | `main`        | `main`         | yes |
 
 The lines do not mix. A v0.13 blokli cannot bootstrap a v5 localcluster (no `service_registry`),
 and the edge-client lines pin different hopr-lib versions.
