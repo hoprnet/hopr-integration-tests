@@ -74,12 +74,12 @@ on:
 run-name: >-
   ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration {0} ({1} {2})', github.event.client_payload.line || 'v4', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly)' || 'Integration throughput test'))) }}
 # Only lets a new push supersede a PR's previous run; every other run is its own group.
-# Nothing else serialises runs: jobs wait for a free `hetzner` runner.
+# Nothing else serialises runs: jobs wait for a free self-hosted runner.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('integration-pr-{0}', github.event.pull_request.number) || format('integration-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # On a hosted runner so `gh` need not exist on the hetzner box. See README "Breaking upstream changes".
+  # On a hosted runner so `gh` need not exist on the self-hosted box. See README "Breaking upstream changes".
   companions:
     name: Resolve companion PRs
     if: >-
@@ -232,7 +232,7 @@ jobs:
           # No step pushes; edge-client/hoprd are public so cargo/gh fetch needs no token.
           persist-credentials: false
           ref: ${{ needs.companions.outputs.tests_sha }}
-      # Two runner instances share each box (github-hetzner-runner-<box>-<instance>). Each job
+      # In case several runner instances share a box (RUNNER_NAME ends in -<instance>): each job
       # shifts every port the stack binds by 1000 per instance and keeps its chain and socket
       # folders under its own RUNNER_TEMP, so neither job sees the other's state.
       - name: Claim this runner's ports and temp dir
@@ -276,7 +276,7 @@ jobs:
       # back to `install-nix-action` when `nix` is not on PATH, which needs root —
       # and the `runner` user has no sudo, so it dies with "sudo: a password is
       # required" after a screenful of installer output. On this box nix is part of
-      # the machine, installed by gitops/ansible, so the job's job is to *find* it,
+      # the machine, installed by its provisioning, so the job's job is to *find* it,
       # not to install it. The profile path is checked explicitly because a
       # multi-user install exports nix through /etc/profile.d/nix.sh, which a
       # non-login job shell never sources.
@@ -293,7 +293,7 @@ jobs:
               exit 0
             fi
           done
-          echo "::error::nix is not installed on this runner. It is a prerequisite of the box, not of the workflow — install it from gitops/ansible (multi-user) and put its profile bin dir on the runner user's PATH. See runner/README.md." >&2
+          echo "::error::nix is not installed on this runner. It is a prerequisite of the box, not of the workflow — install it with the box's provisioning (multi-user) and put its profile bin dir on the runner user's PATH. See runner/README.md." >&2
           exit 1
       # Nix evaluation shells out to the `git` BINARY to fetch git dependencies
       # (hoprd's flake pulls hopr-lib from github.com/hoprnet/hoprnet), and the

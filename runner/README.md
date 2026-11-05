@@ -6,30 +6,28 @@ Jobs are split by whether they **execute a test** or only compile:
 | ---------------------------------- | ---------------------- | --------------------------------------- |
 | `pr.yaml` → `validate-pr-title`    | `depot-ubuntu-24.04`   | metadata only                           |
 | `pr.yaml` → `lint` (fmt + clippy)  | `depot-ubuntu-24.04-4` | compile-time checks, timing-insensitive |
-| `pr.yaml` → `unit`                 | **`hetzner`**          | runs tests                              |
-| `integration.yaml` → `integration` | **`hetzner`**          | the throughput gate                     |
+| `pr.yaml` → `unit`                 | `depot-ubuntu-24.04-4` | no cluster, timing-insensitive          |
+| `integration.yaml` → `integration` | **self-hosted**        | the throughput gate                     |
 
-Anything that runs a test runs on the **self-hosted Hetzner box** (label
-`hetzner`), so a result here and a result there come from the same hardware. A
+The integration suites run on **dedicated self-hosted boxes** (the label in
+`integration.yaml`), so a result here and a result there come from the same hardware. A
 dedicated machine rather than a hosted VM because the onion encoder is CPU-bound
 and the throughput thresholds only mean anything on a stable core count — on the
 hosted runners the gate used to sit on, the 4-vCPU size already flooded with
 packet-encode timeouts and 8 was the floor.
 
-Format and clippy stay on depot deliberately: they saturate every core they are
+Format, clippy and the unit tests stay on depot deliberately: they saturate every core they are
 given and would otherwise contend with a measurement, and they gain nothing from
 stable hardware.
 
 ## Provisioning
 
-The boxes are provisioned out of the **gitops** repo, not here:
-`ansible/playbooks/install-github-hetzner-runner.yaml` (see `ansible/README.md`
-there). Two servers, **one** runner instance each (`github_hetzner_runner_instances: 1`),
-registered at the **org** level with the single label `hetzner` as
-`github-hetzner-runner-<box>-<instance>`. So up to 2 jobs run at once, one per box.
+The boxes are provisioned from the internal infrastructure repo, not here. Two boxes,
+**one** runner instance each, registered at the **org** level with a single label and a
+runner name ending in `-<box>-<instance>`. So up to 2 jobs run at once, one per box.
 `max-parallel: 4` in `integration.yaml` is only a ceiling; the runner count is the limit.
 
-One instance per box on purpose: with two (gitops `93a9b86`) v5 failed next to any
+One instance per box on purpose: with two, v5 failed next to any
 neighbour — `pix_shapes` evicted PIX shares from the Exit's SURB store and `2-hop` dropped
 to ~0.17 MB/s (0.28 alone) — while only v4 gained from the second slot.
 
@@ -45,20 +43,14 @@ folders at that runner's `RUNNER_TEMP`:
 | hoprd API (`HOPRD_API_PORT_BASE`) | 13000+ | 14000+ |
 | hoprd P2P (`HOPRD_P2P_PORT_BASE`) | 19000+ | 20000+ |
 | latency relays (`HOPRD_LATENCY_PORT_BASE`) | 9100+ | 10100+ |
-| chain + control sockets (`IT_TMP_ROOT`) | `runner-1/_work/_temp` | `runner-2/_work/_temp` |
+| chain + control sockets (`IT_TMP_ROOT`) | instance 1's `RUNNER_TEMP` | instance 2's `RUNNER_TEMP` |
 
 `reap_nodes`, `chain_stop` and the hygiene steps match processes by their full path under
 the job's own checkout, never by name, so neither job kills the other's nodes. Outside CI
 none of these variables is set and the defaults are the instance-1 column with `/tmp`.
 
-```bash
-# gitops repo
-just install-github-hetzner-runner
-
-# on the box
-sudo journalctl -u 'github-hetzner-runner@*' -f
-sudo systemctl restart 'github-hetzner-runner@*'
-```
+Installing, restarting and reading the runner service logs is documented with the
+provisioning in the infrastructure repo.
 
 ### Prerequisites the box must satisfy
 
@@ -80,14 +72,14 @@ Unlike a hosted VM, nothing is reinstalled per run:
   `GITHUB_PATH`, which is per-run) and the installer would refuse because `/nix`
   already exists.
 
-  So the hetzner jobs do not use `setup-nix` at all. They run a `Locate nix` step
+  So the self-hosted jobs do not use `setup-nix` at all. They run a `Locate nix` step
   that finds nix on PATH, or at `/nix/var/nix/profiles/default/bin` or
   `~/.nix-profile/bin`, and fails with a pointer here if it is genuinely absent.
   The explicit profile path matters because a multi-user install exports nix
   through `/etc/profile.d/nix.sh`, which a **non-login** job shell never sources.
   `setup-nix` is still used by the depot `lint` job, where it works.
 
-  The install itself belongs in the gitops role, roughly:
+  The install itself belongs in the box's provisioning, roughly:
 
   ```yaml
   - name: Check whether nix is installed
@@ -160,11 +152,11 @@ Unlike a hosted VM, nothing is reinstalled per run:
 job: it installs an eBPF egress monitor and needs sudo, and only supports
 GitHub-hosted runners.
 
-### Dedicating the runners — one gitops change still open
+### Dedicating the runners — one infrastructure change still open
 
 A throughput number is only comparable to another number from the same idle
 machine, so the runners have to be **dedicated to hopr-integration-tests**, and ideally a box
-runs one job at a time. Neither is achievable from this repo — both are gitops / org settings:
+runs one job at a time. Neither is achievable from this repo — both are provisioning / org settings:
 
 1. **Restrict the runners to this repository.** They are registered at the _org_
    level, so today any hoprnet repo can schedule onto them. The mechanism is a
@@ -176,7 +168,7 @@ runs one job at a time. Neither is achievable from this repo — both are gitops
 2. **One job per box** — one runner instance each (above). The PR unit tests run on
    depot for the same reason: nothing else should take a box from an integration job.
 
-All runners register the _same_ `hetzner` label, so a run lands on any of them — a
+All runners register the _same_ label, so a run lands on any of them — a
 baseline established on one box is only a baseline for that box. If the boxes ever
 differ in spec, give this workflow its own label.
 
@@ -315,7 +307,7 @@ gate merges into those branches — the `merge_group` condition in their `pr.yam
 gates can never fire for a release branch, and only their `run-integration` label
 path works on demand.
 
-The nightly `schedule` here fills that hole, and runs two jobs one after another: v4 (every
+The nightly `schedule` here fills that hole, and runs two jobs side by side: v4 (every
 suite) and the v5 `nightly` tier. The v5 `pr` tier is left out: it runs on every PR label, queue
 and v5 gate.
 On v4 it falls through to `run.sh`'s defaults, which are exactly the v4 lines:
@@ -396,5 +388,5 @@ stack.
   ```
 
 Concurrency: a new push to a PR cancels that PR's in-progress run. Otherwise runs and
-their matrix legs (`max-parallel: 4`) start as soon as a `hetzner` runner is free — one
+their matrix legs (`max-parallel: 4`) start as soon as a self-hosted runner is free — one
 per box, two at once.

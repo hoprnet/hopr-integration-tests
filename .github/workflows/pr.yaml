@@ -148,7 +148,7 @@ jobs:
           '
   unit:
     name: Unit tests (${{ matrix.line }})
-    # Hosted, like lint: the hetzner boxes run one integration job each, and a unit job
+    # Hosted, like lint: the self-hosted boxes run one integration job each, and a unit job
     # queued behind a 40-80 min integration run would hold up every PR.
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 30
