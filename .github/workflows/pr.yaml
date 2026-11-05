@@ -150,6 +150,9 @@ jobs:
           '
   unit:
     name: Unit tests (${{ matrix.line }})
+    # Stage 2: runs only after the cheap hosted stage 1 (shell, lint) is green. No
+    # `always()`: a failed stage 1 skips this job and reds the merge gate.
+    needs: [shell, lint]
     # Self-hosted because it runs tests, not because these are slow. No `harden-runner`:
     # it needs sudo for an eBPF egress monitor and only supports GitHub-hosted runners.
     # Never on a fork PR: fork code would persist on the shared box (target dir,
