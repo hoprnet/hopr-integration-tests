@@ -24,16 +24,33 @@ stable hardware.
 
 The boxes are provisioned out of the **gitops** repo, not here:
 `ansible/playbooks/install-github-hetzner-runner.yaml` (see `ansible/README.md`
-there). Two servers (`hetzner-kvm-1/2`), each hosting two KVM VMs with half its
-physical cores pinned to each: `github-hetzner-runner-1..4`, **one** runner per VM,
-registered at the **org** level with the single label `hetzner`. So up to 4 jobs run at
-once, each on its own cores, ports, `/tmp` and nix store.
+there). Two servers, **two** runner instances each (`github_hetzner_runner_instances: 2`,
+gitops commit `93a9b86`), registered at the **org** level with the single label `hetzner`
+as `github-hetzner-runner-<box>-<instance>`. So up to 4 jobs run at once, two per box.
+
+Two jobs on one box share the OS, so the integration job keeps them apart itself: the
+"Claim this runner's ports and temp dir" step reads the instance number from `RUNNER_NAME`
+and, for instance N, shifts every port by `(N-1) * 1000` and roots the chain and socket
+folders at that runner's `RUNNER_TEMP`:
+
+| | instance 1 | instance 2 |
+| --- | --- | --- |
+| anvil (`ANVIL_PORT`) | 8545 | 9545 |
+| bloklid (`BLOKLI_API_PORT`) | 8080 | 9080 |
+| hoprd API (`HOPRD_API_PORT_BASE`) | 13000+ | 14000+ |
+| hoprd P2P (`HOPRD_P2P_PORT_BASE`) | 19000+ | 20000+ |
+| latency relays (`HOPRD_LATENCY_PORT_BASE`) | 9100+ | 10100+ |
+| chain + control sockets (`IT_TMP_ROOT`) | `runner-1/_work/_temp` | `runner-2/_work/_temp` |
+
+`reap_nodes`, `chain_stop` and the hygiene steps match processes by their full path under
+the job's own checkout, never by name, so neither job kills the other's nodes. Outside CI
+none of these variables is set and the defaults are the instance-1 column with `/tmp`.
 
 ```bash
 # gitops repo
 just install-github-hetzner-runner
 
-# in a VM (ssh -J <box> root@192.168.122.11)
+# on the box
 sudo journalctl -u 'github-hetzner-runner@*' -f
 sudo systemctl restart 'github-hetzner-runner@*'
 ```
@@ -141,8 +158,8 @@ GitHub-hosted runners.
 ### Dedicating the runners — one gitops change still open
 
 A throughput number is only comparable to another number from the same idle
-cores, so each runner has to be **dedicated to hopr-integration-tests** and **run one job at a
-time**. Neither is achievable from this repo — both are gitops / org settings:
+machine, so the runners have to be **dedicated to hopr-integration-tests**, and ideally a box
+runs one job at a time. Neither is achievable from this repo — both are gitops / org settings:
 
 1. **Restrict the runners to this repository.** They are registered at the _org_
    level, so today any hoprnet repo can schedule onto them. The mechanism is a
@@ -151,15 +168,15 @@ time**. Neither is achievable from this repo — both are gitops / org settings:
    repositories_ off), not a label — a label expresses a preference, it does not
    deny anyone. Renaming the label would also work but breaks every workflow
    referencing it, so prefer the group.
-2. ~~One job per runner~~ — **already done.** One runner per VM, and each VM's vCPUs
-   are pinned to physical cores no other VM uses, so a job cannot contend with itself
-   or with its neighbour for CPU.
+2. **One job per box — given up on purpose** for throughput of the queue: two runner
+   instances per box (above). Ports and state are kept apart; **CPU is not**. Both jobs
+   are scheduled across all cores, so a measurement taken while the other instance on
+   the same box is busy is a measurement on half a machine.
 
-What two VMs on one box still share is memory bandwidth, last-level cache and the disk.
-If a measurement is slow only while the sibling VM is busy, that is the explanation; the
-runner name in the job log tells which VM (and so which box) it ran on.
+If a run is slow, check the job log's runner name and whether the other instance on that
+box (`-<box>-1` vs `-<box>-2`) was running at the same time before blaming the stack.
 
-All four VMs register the _same_ `hetzner` label, so a run lands on any of them — a
+All four runners register the _same_ `hetzner` label, so a run lands on any of them — a
 baseline established on one box is only a baseline for that box. If the boxes ever
 differ in spec, give this workflow its own label.
 
@@ -366,7 +383,7 @@ stack.
 
 - **On a hopr-integration-tests PR:** `run-integration` runs the v5 `pr` tier,
   `run-integration-v4` the v4 suites, `run-integration-v5-nightly` the v5 `nightly` tier. Labels
-  add up; the jobs run side by side, one per runner VM.
+  add up; the jobs run side by side, up to four at once.
 - **Manual:** `gh workflow run integration.yaml -R hoprnet/hopr-integration-tests`
   then `gh run watch -R hoprnet/hopr-integration-tests --exit-status`.
 - **Simulate a merge trigger:**
@@ -380,4 +397,4 @@ stack.
 
 Concurrency: a new push to a PR cancels that PR's in-progress run. Otherwise runs and
 their matrix legs (`max-parallel: 4`) start as soon as a `hetzner` runner is free — up to
-four at once, one per VM.
+four at once, two per box.

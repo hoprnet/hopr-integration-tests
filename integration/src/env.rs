@@ -27,7 +27,7 @@ use edgli::{
 use crate::{
     Address,
     cluster::{
-        self, ClusterHandle, ClusterSummary, ExtraInfo, NodeInfo, P2P_PORT_BASE, cluster_size,
+        self, ClusterHandle, ClusterSummary, ExtraInfo, NodeInfo, cluster_size, p2p_port_base,
     },
 };
 
@@ -43,7 +43,7 @@ use crate::{
 /// always released by the time the next binds.
 fn edge_p2p_port() -> u16 {
     static BOOTS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
-    P2P_PORT_BASE
+    p2p_port_base()
         + cluster::MAX_CLUSTER_SIZE as u16
         + BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }

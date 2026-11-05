@@ -74,7 +74,7 @@ on:
 run-name: >-
   ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration {0} ({1} {2})', github.event.client_payload.line || 'v4', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly)' || 'Integration throughput test'))) }}
 # Only lets a new push supersede a PR's previous run; every other run is its own group.
-# Nothing else serialises runs: each runner is its own VM, and jobs wait for a free one.
+# Nothing else serialises runs: jobs wait for a free `hetzner` runner.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('integration-pr-{0}', github.event.pull_request.number) || format('integration-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -167,8 +167,8 @@ jobs:
     # `fail-fast: false` so a v5 break still reports the v4 verdict.
     strategy:
       fail-fast: false
-      # Legs run side by side: each `hetzner` runner is its own VM (one runner per VM, see
-      # runner/README.md), so the fixed ports 8545/8080/13000/19000 and /tmp/hopr-chain never meet.
+      # Legs run side by side. Two runners share each box; "Claim this runner's ports" below
+      # keeps their chains, clusters and temp dirs apart.
       max-parallel: 4
       matrix:
         include: ${{ fromJSON(needs.companions.outputs.matrix) }}
@@ -232,6 +232,22 @@ jobs:
           # No step pushes; edge-client/hoprd are public so cargo/gh fetch needs no token.
           persist-credentials: false
           ref: ${{ needs.companions.outputs.tests_sha }}
+      # Two runner instances share each box (github-hetzner-runner-<box>-<instance>). Each job
+      # shifts every port the stack binds by 1000 per instance and keeps its chain and socket
+      # folders under its own RUNNER_TEMP, so neither job sees the other's state.
+      - name: Claim this runner's ports and temp dir
+        run: |
+          instance="${RUNNER_NAME##*-}"
+          case "${instance}" in '' | *[!0-9]*) instance=1 ;; esac
+          offset=$(((instance - 1) * 1000))
+          {
+            echo "IT_TMP_ROOT=${RUNNER_TEMP}"
+            echo "ANVIL_PORT=$((8545 + offset))"
+            echo "BLOKLI_API_PORT=$((8080 + offset))"
+            echo "HOPRD_API_PORT_BASE=$((13000 + offset))"
+            echo "HOPRD_P2P_PORT_BASE=$((19000 + offset))"
+            echo "HOPRD_LATENCY_PORT_BASE=$((9100 + offset))"
+          } | tee -a "${GITHUB_ENV}"
       # The runner is persistent, so leftovers from a crashed previous run survive
       # into this one. Scope the kill to this job's workspace: the box runs several
       # runner instances, each with its own `_work` path, and every process we
@@ -422,16 +438,12 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: integration-logs-${{ matrix.line }}-${{ matrix.tier }}-${{ github.run_id }}-${{ github.run_attempt }}
-          # The cluster dir is a tempfile::TempDir under the dev shell's TMPDIR, so it
-          # lands at /tmp/nix-shell.*/nix-shell.*/hoprd-it-*/ — NOT /tmp/hoprd-it-*,
-          # which is what an earlier version of this globbed and never matched.
+          # Cluster dirs live under HOPR_LOG_DIR (logs/ci/); the shared chain under IT_TMP_ROOT.
+          # Nothing from /tmp: the other runner on this box writes there too.
           path: |
             nix-build.log
             logs/ci/
-            /tmp/hopr-chain/*.log
-            /tmp/nix-shell.*/**/hoprd-it-*/**/*.log
-            /tmp/hoprd-it-*/**/*.log
-            /tmp/hopr-nodes/**/*.log
+            ${{ runner.temp }}/hopr-chain/*.log
           if-no-files-found: warn
           retention-days: 14
       - name: Notify failure (Zulip)

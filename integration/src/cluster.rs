@@ -185,8 +185,29 @@ pub fn request_pix_settings(yaml: impl Into<String>) -> &'static str {
     REQUESTED_PIX_SETTINGS.get_or_init(|| yaml.into())
 }
 
-pub const API_PORT_BASE: u16 = 13000;
-pub const P2P_PORT_BASE: u16 = 19000;
+/// Overridable so two jobs on one host (CI sets these per runner) do not meet on a port.
+pub fn api_port_base() -> u16 {
+    port_from_env("HOPRD_API_PORT_BASE", 13000)
+}
+
+pub fn p2p_port_base() -> u16 {
+    port_from_env("HOPRD_P2P_PORT_BASE", 19000)
+}
+
+fn port_from_env(key: &str, default: u16) -> u16 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Root for the short control-socket folders; CI points it at the runner's own temp dir.
+fn short_tmp_root() -> PathBuf {
+    std::env::var_os("IT_TMP_ROOT")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+}
 pub const API_HOST: &str = "127.0.0.1";
 pub const API_TOKEN: &str = "test-token-localcluster";
 
@@ -621,9 +642,9 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         "--api-host",
         API_HOST,
         "--api-port-base",
-        &API_PORT_BASE.to_string(),
+        &api_port_base().to_string(),
         "--p2p-port-base",
-        &P2P_PORT_BASE.to_string(),
+        &p2p_port_base().to_string(),
         "--api-token",
         API_TOKEN,
         // Stated rather than defaulted: localcluster's own default has been observed to exhaust
@@ -815,7 +836,7 @@ const MAX_CONTROL_SOCKET_PATH: usize = 100;
 ///
 /// By default that is `<data_dir>/cluster.sock`, and `None` keeps that default. A data dir deep in
 /// `HOPR_LOG_DIR` can make the path too long for a Unix socket, and localcluster then fails at
-/// start-up. In that case the socket goes into a short new folder in `/tmp` instead, kept for the
+/// start-up. In that case the socket goes into a short new folder in `IT_TMP_ROOT` (default `/tmp`) instead, kept for the
 /// life of the cluster and removed by `lib.sh clean_tmp` like the other `hoprd-it-*` folders. The
 /// logs stay in the data dir.
 fn control_base_for(data_dir: &std::path::Path) -> anyhow::Result<Option<PathBuf>> {
@@ -823,7 +844,7 @@ fn control_base_for(data_dir: &std::path::Path) -> anyhow::Result<Option<PathBuf
         return Ok(None);
     }
     let short_root = if cfg!(unix) {
-        PathBuf::from("/tmp")
+        short_tmp_root()
     } else {
         std::env::temp_dir()
     };
@@ -959,7 +980,7 @@ where
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let results = futures::future::join_all(
-            (0..cluster_size()).map(|i| check_node(i, API_PORT_BASE + i as u16)),
+            (0..cluster_size()).map(|i| check_node(i, api_port_base() + i as u16)),
         )
         .await;
         if results.into_iter().all(|ok| ok) {
