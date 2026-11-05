@@ -35,11 +35,15 @@
 //!
 //! # How the unresolvable packet is created here
 //!
-//! A pseudonym's SURB ring buffer at the exit is dropped once no SURBs have arrived for
-//! `pseudonyms_lifetime`. The exit's own keep-alive stream keeps emitting return-routed packets for
-//! that pseudonym until the Session slot is closed. Abandoning a session at the entry — without
-//! closing it, so the exit never tears the slot down — puts those two on a collision course: the
-//! SURBs expire, the keep-alive fires, and there is nothing left to carry it.
+//! The exit's own keep-alive stream keeps emitting return-routed packets for a Session until the
+//! Session slot is closed, each on one of the Session's SURBs. Abandoning a session at the entry —
+//! without closing it, so the exit never tears the slot down — stops the SURB supply while the
+//! keep-alives go on: once the last SURB is spent, the next keep-alive has nothing to carry it.
+//!
+//! An admitted Session's SURB ring has no idle timeout, so on v5 the SURBs are spent, not expired.
+//! An exit that holds no SURBs back spends them all on the victim's warm-up echo. One that holds
+//! its data back for a keep-alive reserve leaves the last few to the keep-alives, which spend one per
+//! notify period (see `SURB_NOTIFY_PERIOD`).
 //!
 //! The production `pseudonyms_lifetime` is 600 s, which is longer than the Session idle timeout, so
 //! the scenario shortens it to the minimum the config validator accepts. That is the only setting
@@ -74,10 +78,16 @@ const SURB_PSEUDONYM_LIFETIME: Duration = Duration::from_secs(30);
 
 const SURB_LIFETIME_ENV: &str = "HOPR_INTERNAL_SURB_PSEUDONYM_LIFETIME_MS";
 
-/// Above the lifetime: each keep-alive pops a SURB, and the store's idle timer resets on every pop.
+/// Short enough for the keep-alives to empty the victim's last SURBs inside [`WEDGE_WINDOW`]. A v5
+/// exit holds its data back while a Session's SURB stock is down to the keep-alive reserve (1 % of
+/// the target the entry announced, at least 32, at most a quarter of it), so the victim's warm-up no
+/// longer drains its pool: twelve SURBs (a quarter of its target of 50) are left, and only the
+/// keep-alives spend them, one per period. At 5 s they are gone within a minute of the abandonment.
+/// An admitted Session's SURB ring has no idle timeout, so this, not the pseudonym lifetime, is how
+/// its return route goes unresolvable here.
 /// v5 only: on v4 the victim never holds SURBs, and the longer period starves the idle canary.
 #[cfg(feature = "v5")]
-const SURB_NOTIFY_PERIOD: Duration = Duration::from_secs(60);
+const SURB_NOTIFY_PERIOD: Duration = Duration::from_secs(5);
 
 #[cfg(feature = "v5")]
 const SURB_NOTIFY_PERIOD_ENV: &str = "HOPR_SESSION_SURB_BALANCE_NOTIFY_PERIOD_MS";
