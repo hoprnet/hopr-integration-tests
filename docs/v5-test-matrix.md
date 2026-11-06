@@ -37,7 +37,8 @@ and the fill aims at 540 s.
 | E8  | `return_path::a_two_hop_session_should_survive_relayer_loss`          | #82    | nightly  | L 2.7–2.9m                                                | 8     | SIGKILL (2,2)                        |
 | E9  | `return_path::a_three_hop_session_should_survive_relayer_loss`        | #82    | nightly  | L 3.0–3.1m                                                | 8     | SIGKILL (3,3)                        |
 | E10 | `return_path::a_three_hop_session_should_survive_a_stalling_relayer`  | #82    | nightly  | L 3.0–3.1m                                                | 8     | victim stalls every link (3,3)       |
-| E11 | `return_path::return_paths_should_spread_across_distinct_relayers`    | main   | held out | L 0.4–0.6m                                                | 5     | –                                    |
+| E11 | `return_path::return_paths_should_spread_across_distinct_relayers`    | main   | nightly  | L 0.4–0.6m                                                | 5     | –                                    |
+| E12 | `return_path::return_paths_should_track_the_tempered_score`         | #82    | held out | L 0.4–0.6m (as E11)                                       | 5     | – (finding, hoprnet#8331)            |
 | F1  | `pix_relay_loss::a_pix_cycle_survives_a_relay_death_on_both_paths`    | #83    | nightly  | #83 7.5m (≈24m at production size)                        | 3     | kill half the return relays (1,1)    |
 | F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`   | #83    | nightly  | #83 7.6m                                                  | 3     | (0,1)                                |
 | F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`   | #83    | nightly  | #83 8.6m                                                  | 4     | (0,2)                                |
@@ -121,7 +122,7 @@ S = strict assertion, w = exercised but weakly or not asserted.
 | Tier      | Trigger                                             | v5 suites                                                                                     |
 | --------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `pr`      | `run-integration` label, merge queue, v5 dispatches | integration, pix, pix_shapes mixed                                                            |
-| `nightly` | `run-integration-v5-nightly` label, `schedule`      | exit_origination, the other four pix_shapes, return_path (all but E11), pix_relay_loss        |
+| `nightly` | `run-integration-v5-nightly` label, `schedule`      | exit_origination, the other four pix_shapes, return_path (all but E12), pix_relay_loss        |
 
 - `run.sh` picks the suites from `TIER`. v4 ignores it and runs everything, as before.
 - Each tier is its own job. The merge queue and v5 dispatches run `pr` only; the schedule runs v4

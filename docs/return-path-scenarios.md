@@ -102,7 +102,11 @@ two-per-packet flattening from the pre-fix run (ideal 6.67 measured 4.63, ×0.69
 below the lowest pre-fix measurement. Re-derive from a measured tempered baseline before
 treating a pass as evidence.
 
-_Test:_ `return_paths_should_spread_across_distinct_relayers`.
+_Test:_ `return_paths_should_spread_across_distinct_relayers` gates concentration only: at least
+three of the four candidates carry 5 % or more, and the busiest at most two fair shares. That
+passed all 40 v5 runs recorded 2026-11-03 to 11-06 (busiest at most 48 %). The ratio above is
+`return_paths_should_track_the_tempered_score`, held out of every tier: over the same 40 runs it
+ranged 1.27 to 4.47 and exceeded its bound of 3.0 in 17, because it follows the run's live scores.
 
 ### S2 — Return relayer dies (SIGKILL) · **implemented, characterisation only**
 
