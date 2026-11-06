@@ -497,7 +497,7 @@ run_tier() {
   # it asserts a ratio on a random draw, so a red says nothing.
   #
   # v4 runs the 1-hop scenarios only: it mitigates a dead relayer one hop deep (hoprnet#8498) and the
-  # two-hop ones wait for the v5 fix. v5 runs them all, in the nightly tier, but only when
+  # 2- and 3-hop ones wait for the v5 fix. v5 runs them all, in the nightly tier, but only when
   # RETURN_PATH_V5=1: the multi-hop scenarios need a hopr-lib with the dead-relayer recovery
   # (hoprnet#8506, #8576, #8581) in edge-client's lock, and a localcluster with link cuts, stalls and
   # up to 8 nodes (hoprnet/hoprd#248). Off by default so the step stays green until both are in;
@@ -510,6 +510,8 @@ run_tier() {
     if [ "${LINE}" = v4 ]; then
       held_out="${held_out} a_two_hop_session_should_survive_exit_losing_its_return_relayer"
       held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
+      held_out="${held_out} a_three_hop_session_should_survive_relayer_loss"
+      held_out="${held_out} a_three_hop_session_should_survive_a_stalling_relayer"
     fi
     for scenario in ${scenarios}; do
       case " ${held_out} " in *" ${scenario} "*) continue ;; esac
