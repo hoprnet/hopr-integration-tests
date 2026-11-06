@@ -94,7 +94,7 @@ contracts and starts bloklid, and localcluster connects to it with `--chain-url`
 | `HOPR_LOG_DIR`           | keep each run's logs in a folder under it (see below)                                                                                          |
 | `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files, also when start-up fails                                                                                  |
 | `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture`                                                                                   |
-| `TEST_PROFILE=release`   | build and run the test binary in release; timing-sensitive suites such as `return_path` at 3 hops run the test process at ~1800 % CPU in debug |
+| `TEST_PROFILE=debug`     | build and run the test binary in debug instead of the default release; slower, and timing-sensitive suites (`return_path` at 3 hops, v5 PIX) fail on a starved test process |
 
 To keep the logs of each run:
 
