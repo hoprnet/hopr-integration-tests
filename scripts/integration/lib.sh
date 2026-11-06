@@ -484,6 +484,12 @@ run_tier() {
       mixed=a_mixed_session_sustains_its_cycles
       in_tier pr && SCENARIOS="${mixed}" run_suite pix_shapes
       in_tier nightly && run_suite pix_shapes "${mixed}"
+      # Each scenario kills a cluster node, so one cluster each, like return_path.
+      if in_tier nightly; then
+        for scenario in $(list_scenarios pix_relay_loss); do
+          SCENARIOS="${scenario}" run_suite pix_relay_loss
+        done
+      fi
     else
       echo "::error::${HOPRD_LOCALCLUSTER_BIN} has no --pix-config, so the pix_shapes suite cannot" >&2
       echo "state its geometry. Use a newer hoprd ref." >&2
@@ -497,12 +503,9 @@ run_tier() {
   # it asserts a ratio on a random draw, so a red says nothing.
   #
   # v4 runs the 1-hop scenarios only: it mitigates a dead relayer one hop deep (hoprnet#8498) and the
-  # 2- and 3-hop ones wait for the v5 fix. v5 runs them all, in the nightly tier, but only when
-  # RETURN_PATH_V5=1: the multi-hop scenarios need a hopr-lib with the dead-relayer recovery
-  # (hoprnet#8506, #8576, #8581) in edge-client's lock, and a localcluster with link cuts, stalls and
-  # up to 8 nodes (hoprnet/hoprd#248). Off by default so the step stays green until both are in;
-  # flip it in pr.yaml then.
-  if [ "${LINE}" = v4 ] || { in_tier nightly && [ "${RETURN_PATH_V5:-0}" = 1 ]; }; then
+  # 2- and 3-hop ones wait for the v5 fix. v5 runs them all in the nightly tier: the multi-hop
+  # scenarios need the dead-relayer recovery (hoprnet#8506, #8576, #8581) in edge-client's lock.
+  if [ "${LINE}" = v4 ] || in_tier nightly; then
     chain_stop
     chain_start
     scenarios="$(list_scenarios return_path)"
