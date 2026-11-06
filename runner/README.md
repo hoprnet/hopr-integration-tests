@@ -28,8 +28,10 @@ dir, `~/.cargo/config.toml`, `~/.ssh`, a `git` or `nix` shim on `PATH`) would ru
 later gate jobs. Unit tests, lint and title checks therefore run on hosted depot runners.
 Only `integration.yaml` → `integration` uses `[self-hosted, hetzner]`. That job also
 runs on `pull_request`, but only for a PR a maintainer has labelled `run-integration*`.
-Do not label a fork PR until you have read its diff. Do not move a new job onto
-`[self-hosted, hetzner]` unless it is trusted (merge queue, dispatch, schedule, labelled PR).
+**Never label a fork PR `run-integration*`**: the label routes its code to the persistent
+runner, and reading the diff does not isolate that box. Push the branch to this repository
+instead. Do not move a new job onto `[self-hosted, hetzner]` unless it is trusted (merge
+queue, dispatch, schedule, or a labelled PR from a branch of this repository).
 Rule from hoprnet/hopr-devops#355.
 
 ## Provisioning
