@@ -19,7 +19,7 @@ and the fill aims at 540 s.
 | ID  | Binary::test                                                          | Origin | Tier     | Wall                                                      | Nodes | Fault                                |
 | --- | --------------------------------------------------------------------- | ------ | -------- | --------------------------------------------------------- | ----- | ------------------------------------ |
 | A1  | `integration::zero_one_two_hop` (was `one_hop` + `zero_hop`)          | main   | pr       | CI 2.1m for the old two (+2.2m first bring-up), 2-hop new | 3     | –                                    |
-| B1  | `exit_origination::exit_should_keep_originating_…`                    | main   | nightly  | CI 4.2m                                                   | 3     | leaked SURB-starved session          |
+| B1  | `exit_origination::exit_should_keep_originating_…`                    | main   | nightly  | CI 4.2m                                                   | 3     | abandoned session: v4 starves it; v5 must not (hoprnet#8629) |
 | C1  | `pix::a_session_should_close_when_the_entry_can_no_longer_deposit`    | main   | pr       | CI ~3.5m                                                  | 3     | entry budget exhausted               |
 | C2  | `pix::edgli_entry_deposits_should_be_swept_into_the_exit_safe`        | main   | pr       | CI ~2.3m                                                  | 3     | –                                    |
 | D2  | `pix_shapes::a_browsing_session_sustains_its_cycles`                  | main   | nightly  | CI 9.2m                                                   | 3     | –                                    |
