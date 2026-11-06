@@ -20,6 +20,18 @@ Format, clippy and the unit tests stay on depot deliberately: they saturate ever
 given and would otherwise contend with a measurement, and they gain nothing from
 stable hardware.
 
+## Trust boundary
+
+Untrusted fork-PR code must never run on the persistent self-hosted runner. The box is
+shared with the trusted merge-gate jobs, and anything a PR leaves behind (cargo target
+dir, `~/.cargo/config.toml`, `~/.ssh`, a `git` or `nix` shim on `PATH`) would run inside
+later gate jobs. Unit tests, lint and title checks therefore run on hosted depot runners.
+Only `integration.yaml` → `integration` uses `[self-hosted, hetzner]`. That job also
+runs on `pull_request`, but only for a PR a maintainer has labelled `run-integration*`.
+Do not label a fork PR until you have read its diff. Do not move a new job onto
+`[self-hosted, hetzner]` unless it is trusted (merge queue, dispatch, schedule, labelled PR).
+Rule from hoprnet/hopr-devops#355.
+
 ## Provisioning
 
 The boxes are provisioned from the internal infrastructure repo, not here. Two boxes,
