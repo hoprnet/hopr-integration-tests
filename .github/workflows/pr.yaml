@@ -1,8 +1,8 @@
 name: PR
 # Validate PR metadata and check the integration crate. Split by what each step
 # actually needs: `fmt`/`clippy` are pure compile-time checks and run on a hosted
-# depot runner, and unit tests run on a hosted depot runner too (main moved them off the
-# self-hosted box so they cannot queue behind integration runs). The heavy end-to-end run lives in
+# depot runner, and unit tests run on a hosted depot runner too, so they cannot queue
+# behind integration runs on the self-hosted box. The heavy end-to-end run lives in
 # integration.yaml. See runner/README.md.
 #
 # Both jobs fan out over the two release lines: shared source, two dependency sets
@@ -152,10 +152,8 @@ jobs:
     # Stage 2: runs only after the cheap hosted stage 1 (shell, lint) is green. No
     # `always()`: a failed stage 1 skips this job and reds the merge gate.
     needs: [shell, lint]
-    # Never on a fork PR (hoprnet/hopr-devops#355); `unit-gate` and `merge-gate` accept that skip.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    # Hosted, like lint: the self-hosted boxes run one integration job each, and a unit job
-    # queued behind a 40-80 min integration run would hold up every PR.
+    # Hosted, like lint, so fork code runs in a throwaway VM and the job never queues behind
+    # a 40-80 min integration run on the self-hosted box.
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 30
     permissions:
@@ -225,7 +223,7 @@ jobs:
           [ ! -e "${runs[0]}/chain" ]
           [ ! -e "${runs[0]}/client-integration.log" ]
           BASH
-  # Fan-in jobs. The matrix names each job per line, so the bare contexts the ruleset
+  # Fan-in job. The matrix names each job per line, so the bare context the ruleset
   # requires would never report and every queue entry would hang until its timeout.
   lint-gate:
     name: Format + clippy
@@ -240,24 +238,6 @@ jobs:
         run: |
           echo "lint matrix result: ${RESULT}"
           [ "${RESULT}" = success ] || { echo "::error::lint result is '${RESULT}'"; exit 1; }
-  unit-gate:
-    name: Unit tests
-    needs: unit
-    if: always()
-    # Hosted, like the unit matrix.
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - env:
-          RESULT: ${{ needs.unit.result }}
-          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
-        run: |
-          echo "unit matrix result: ${RESULT} (fork PR: ${IS_FORK})"
-          # Unit tests never run for a fork PR, so skipped is
-          # expected there and nowhere else.
-          [ "${RESULT}" = skipped ] && [ "${IS_FORK}" = true ] && exit 0
-          [ "${RESULT}" = success ] || { echo "::error::unit result is '${RESULT}'"; exit 1; }
   # Single aggregate merge gate: green only if every other job in this run
   # succeeded. Runs on a hosted runner.
   # `if: always()` runs it even when a dependency fails;
@@ -272,7 +252,6 @@ jobs:
       - lint
       - unit
       - lint-gate
-      - unit-gate
     runs-on: depot-ubuntu-24.04
     permissions: {}
     steps:
@@ -280,6 +259,5 @@ jobs:
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
-          # validate-pr-title runs on pull_request only. `unit` is skipped only for a
-          # fork PR (see the `unit` job); every other event must run it.
-          allowed-skips: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'validate-pr-title, unit' || 'validate-pr-title' }}
+          # validate-pr-title runs on pull_request only; every other job must run.
+          allowed-skips: validate-pr-title
