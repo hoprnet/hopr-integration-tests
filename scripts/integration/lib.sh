@@ -424,10 +424,9 @@ cluster_wait() {
 # The one cargo invocation. Skips the dev-shell wrap when already inside one — `just ci` and CI
 # both enter it before calling the runner, which used to open a second shell per scenario.
 # Extra args after the target are libtest filters; SKIP_SCENARIOS names tests to hold out.
-# TEST_PROFILE=release builds and runs the test binary in release: timing-sensitive suites
-# (return_path at three hops) run the test process at about 1800 % CPU in debug, and the
-# measurement is then of the test process. `list_scenarios` takes the same profile, so listing and
-# running share one binary.
+# The test binary builds in release unless TEST_PROFILE=debug: in debug, return_path at three hops
+# pins the test process at ~1800 % CPU and v5's in-process PIX Entry starves and over-fills.
+# `list_scenarios` takes the same profile, so listing and running share one binary.
 cargo_it() {
   local target="${1:?usage: cargo_it <test-target> [filter...]}"
   shift
@@ -435,7 +434,7 @@ cargo_it() {
   [ -z "${IN_NIX_SHELL:-}" ] && [ "${HOPRNET_SHELL:-}" != none ] &&
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
   local -a test_args cargo_features profile=() skips=()
-  [ "${TEST_PROFILE:-}" = release ] && profile=(--release)
+  [ "${TEST_PROFILE:-release}" = release ] && profile=(--release)
   read -r -a test_args <<<"${TEST_ARGS:-}"
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
   local held
@@ -603,7 +602,7 @@ list_scenarios() {
   local -a wrap=() cargo_features profile=()
   [ -z "${IN_NIX_SHELL:-}" ] && [ "${HOPRNET_SHELL:-}" != none ] &&
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
-  [ "${TEST_PROFILE:-}" = release ] && profile=(--release)
+  [ "${TEST_PROFILE:-release}" = release ] && profile=(--release)
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
   ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
     ${profile[@]+"${profile[@]}"} ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" -- --list |
