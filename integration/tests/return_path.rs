@@ -175,6 +175,9 @@ struct Topology {
     cut_exit_link: bool,
     /// Stall the exit's link to the victim instead: it stays connected but trickles.
     stall_exit_link: bool,
+    /// Stall every cluster link of the victim instead: alive and connected everywhere, slow in any
+    /// position of a path.
+    stall_victim: bool,
 }
 
 /// Replies travel over one relay; the request path is direct.
@@ -187,6 +190,7 @@ const RETURN_PATH: Topology = Topology {
     nodes: NODES,
     cut_exit_link: false,
     stall_exit_link: false,
+    stall_victim: false,
 };
 
 /// The mirror image: requests travel over one relay, replies come back directly.
@@ -202,6 +206,7 @@ const FORWARD_PATH: Topology = Topology {
     nodes: NODES,
     cut_exit_link: false,
     stall_exit_link: false,
+    stall_victim: false,
 };
 
 /// One relay in each direction: what a real deployment runs.
@@ -216,6 +221,7 @@ const SYMMETRIC: Topology = Topology {
     nodes: NODES,
     cut_exit_link: false,
     stall_exit_link: false,
+    stall_victim: false,
 };
 
 /// Replies over one relay whose link to the exit is cut while Edgli still reaches it.
@@ -226,6 +232,7 @@ const RETURN_EXIT_CUT: Topology = Topology {
     nodes: LARGE_NODES,
     cut_exit_link: true,
     stall_exit_link: false,
+    stall_victim: false,
 };
 
 /// As [`RETURN_EXIT_CUT`] over two-hop return paths.
@@ -236,6 +243,7 @@ const TWO_HOP_RETURN_EXIT_CUT: Topology = Topology {
     nodes: LARGE_NODES,
     cut_exit_link: true,
     stall_exit_link: false,
+    stall_victim: false,
 };
 
 /// Replies over one relay whose link to the exit stalls periodically: alive, connected, too slow.
@@ -246,6 +254,7 @@ const RETURN_EXIT_STALL: Topology = Topology {
     nodes: LARGE_NODES,
     cut_exit_link: false,
     stall_exit_link: true,
+    stall_victim: false,
 };
 
 /// Two relays each way, busiest one killed: the victim can sit anywhere on either path,
@@ -257,6 +266,30 @@ const TWO_HOP_SYMMETRIC: Topology = Topology {
     nodes: LARGE_NODES,
     cut_exit_link: false,
     stall_exit_link: false,
+    stall_victim: false,
+};
+
+/// Three relays each way: a killed relayer sits in the middle or last position of most paths
+/// through it, where the exit cannot see it.
+const THREE_HOP_SYMMETRIC: Topology = Topology {
+    direction: "three-hop-symmetric",
+    forward_hops: 3,
+    return_hops: 3,
+    nodes: LARGE_NODES,
+    cut_exit_link: false,
+    stall_exit_link: false,
+    stall_victim: false,
+};
+
+/// Three relays each way with the busiest one stalling on every link.
+const THREE_HOP_STALL: Topology = Topology {
+    direction: "three-hop-stall",
+    forward_hops: 3,
+    return_hops: 3,
+    nodes: LARGE_NODES,
+    cut_exit_link: false,
+    stall_exit_link: false,
+    stall_victim: true,
 };
 
 /// Warm-up payload: enough packets to make the relayer histogram unambiguous, no more.
@@ -685,7 +718,26 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         cut_exit_link = topology.cut_exit_link,
         "taking out the busiest relayer for the direction under test"
     );
-    if topology.cut_exit_link || topology.stall_exit_link {
+    let stall_timing = |key: &str, fallback: u64| {
+        Duration::from_millis(
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(fallback),
+        )
+    };
+    if topology.stall_victim {
+        let cluster = env.cluster()?;
+        for node in cluster.nodes.iter().filter(|n| n.address != victim.address) {
+            cluster.stall_link(
+                node.address,
+                victim.address,
+                stall_timing("HOPRD_STALL_PERIOD_MS", 5_000),
+                stall_timing("HOPRD_STALL_MS", 4_000),
+                stall_timing("HOPRD_STALL_DELAY_MS", 3_000),
+            )?;
+        }
+    } else if topology.cut_exit_link || topology.stall_exit_link {
         let cluster = env.cluster()?;
         let exit = cluster
             .nodes
@@ -827,6 +879,20 @@ async fn a_one_hop_session_should_survive_a_stalling_return_relayer() -> anyhow:
 #[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
 async fn a_two_hop_session_should_survive_relayer_loss() -> anyhow::Result<()> {
     session_should_survive_relayer_loss(TWO_HOP_SYMMETRIC).await
+}
+
+/// Three relays each way with the busiest one killed.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn a_three_hop_session_should_survive_relayer_loss() -> anyhow::Result<()> {
+    session_should_survive_relayer_loss(THREE_HOP_SYMMETRIC).await
+}
+
+/// Three relays each way with the busiest one stalling in every position.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn a_three_hop_session_should_survive_a_stalling_relayer() -> anyhow::Result<()> {
+    session_should_survive_relayer_loss(THREE_HOP_STALL).await
 }
 
 /// Phase tag for the payload offered *while the outage is in effect*.

@@ -173,9 +173,9 @@ jobs:
       max-parallel: 4
       matrix:
         include: ${{ fromJSON(needs.companions.outputs.matrix) }}
-    # Per job: ~40 min of tests on v4, ~29 on v5 pr and ~44 on v5 nightly (one shared chain each),
+    # Per job: ~40 min of tests on v4, ~29 on v5 pr and ~100 on v5 nightly (one shared chain each),
     # plus 15-20 min of build on a Cachix miss.
-    timeout-minutes: 150
+    timeout-minutes: 180
     env:
       # Which branch + dependency set run.sh resolves; the rest override within it.
       LINE: ${{ matrix.line }}

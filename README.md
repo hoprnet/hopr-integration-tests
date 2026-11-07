@@ -20,17 +20,17 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 
 ## Test binaries
 
-| Binary (`integration/tests/`) | What it checks                                                     | In CI   | Local                         |
-| ----------------------------- | ------------------------------------------------------------------ | ------- | ----------------------------- |
-| `integration.rs`              | 0-, 1- and 2-hop UDP loopback: at least 99% arrival, no corruption | yes     | `just integration-binchain`   |
-| `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved     | yes     | `just exit-origination`       |
-| `pix.rs`                      | PIX settlement with `edgli` as the paying entry                    | v5 only | `LINE=v5 just pix`            |
-| `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)           | v5 only | `LINE=v5 just pix-shapes`     |
-| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies       | v4 only | `just return-path`            |
-| `pix_relay_loss.rs`           | a PIX cycle survives half its return relays dying, and is paid     | no      | `LINE=v5 just pix-relay-loss` |
-| `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line        | no      | see `run.sh`                  |
-| `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`)  | no      | `just rotsee`                 |
-| `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no      | `just profile`                |
+| Binary (`integration/tests/`) | What it checks                                                     | In CI                | Local                         |
+| ----------------------------- | ------------------------------------------------------------------ | -------------------- | ----------------------------- |
+| `integration.rs`              | 0-, 1- and 2-hop UDP loopback: at least 99% arrival, no corruption | yes                  | `just integration-binchain`   |
+| `exit_origination.rs`         | the exit keeps sending when one return path cannot be resolved     | yes                  | `just exit-origination`       |
+| `pix.rs`                      | PIX settlement with `edgli` as the paying entry                    | v5 only              | `LINE=v5 just pix`            |
+| `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)           | v5 only              | `LINE=v5 just pix-shapes`     |
+| `return_path.rs`              | reply spread over relayers, and survival when a relayer dies       | v4 1-hop, v5 nightly | `just return-path`            |
+| `pix_relay_loss.rs`           | a PIX cycle survives half its return relays dying, and is paid     | v5 nightly           | `LINE=v5 just pix-relay-loss` |
+| `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line        | no                   | see `run.sh`                  |
+| `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`)  | no                   | `just rotsee`                 |
+| `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no                   | `just profile`                |
 
 v5 is split in two tiers, chosen with `TIER` (see [`docs/v5-test-matrix.md`](docs/v5-test-matrix.md)
 for what each test covers and costs): `pr` (integration, pix, the mixed shape) is the fast
@@ -40,12 +40,9 @@ Every run ends with a summary of each test, naming the step a failed test broke 
 
 CI runs 8 scenarios on v4 (6 of them `return_path`). Suites share one chain per
 `run.sh` invocation, warm with frozen identities after the first. `return_path` runs last on v4,
-on a fresh chain and one cluster per scenario, and only its 1-hop scenarios: the two-hop ones wait
-for the v5 fix and `spread` is held out for asserting a ratio on a random draw. v5 waits on stack
-fixes (branch `em/return-path-v5`). The v5 `return_path` step is wired in the nightly tier behind
-`RETURN_PATH_V5=1`, off by default: its multi-hop scenarios need a hopr-lib with the dead-relayer
-recovery (hoprnet#8506, #8576, #8581) in edge-client's lock, and a localcluster with link faults and up to
-8 nodes (hoprnet/hoprd#248, the `Requires:` line). Flip the variable in `pr.yaml` once both are in.
+on a fresh chain and one cluster per scenario, and only its 1-hop scenarios: the 2- and 3-hop ones wait
+for the v5 fix and `spread` is held out for asserting a ratio on a random draw. The v5 nightly tier
+runs every `return_path` scenario but `spread`, and every `pix_relay_loss` one, one cluster each.
 
 Every scenario is `#[ignore]` because it needs external binaries. Thresholds are constants in
 the test files, and there are no settings to change. Shared code is in `integration/src/`:
@@ -63,7 +60,7 @@ just ci-v5                      # the same for v5 (TIER=pr|nightly); PIX suites 
 # PIX hoprd + localcluster from HOPRD_SRC (a v5 hoprd git checkout, e.g. a `git worktree` of
 # hoprd main), since the flake has no darwin one.
 LINE=v5 HOPRD_SRC=../hoprd-main just tier pr        # integration, pix, mixed shape (~30 min)
-LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly   # exit_origination, the other shapes (~45 min)
+LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly   # exit_origination, other shapes, return_path, pix_relay_loss
 just tier                                           # v4: every suite
 
 just build build-chain          # hoprd + localcluster, bloklid + deployer + anvil (nix, cached)
