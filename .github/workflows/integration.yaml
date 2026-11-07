@@ -426,7 +426,7 @@ jobs:
       - name: Record the pass
         if: >-
           success() && env.IT_FINGERPRINT != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: it-pass-${{ env.IT_FINGERPRINT }}
           path: it-pass.txt
@@ -436,7 +436,7 @@ jobs:
       # goes red. Only on failure, so a green run stores nothing.
       - name: Upload logs
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: integration-logs-${{ matrix.line }}-${{ matrix.tier }}-${{ github.run_id }}-${{ github.run_attempt }}
           # Cluster dirs live under HOPR_LOG_DIR (logs/ci/); the shared chain under IT_TMP_ROOT.
@@ -449,7 +449,7 @@ jobs:
           retention-days: 14
       - name: Notify failure (Zulip)
         if: failure()
-        uses: zulip/github-actions-zulip/send-message@bd8ec52de371d139ae8313661b7d8318c19266aa # v2.0.1
+        uses: zulip/github-actions-zulip/send-message@f675f2b4eb2a95fae974215476dcb7ad8dfeff6b # v2.0.2
         with:
           api-key: ${{ secrets.ZULIP_API_KEY }}
           email: ${{ secrets.ZULIP_EMAIL }}
