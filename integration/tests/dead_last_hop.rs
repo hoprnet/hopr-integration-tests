@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use hoprd_integration_test::{
     IntegrationEnv,
-    cluster::{request_cluster_size, request_latency_profile},
+    cluster::{self, request_cluster_size, request_latency_profile},
     origination,
     pump::{PumpOpts, pump_halves, tagged_payload},
     relayers, step,
@@ -104,6 +104,33 @@ async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_e
         .find(|n| n.address == exit)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("exit {exit} is not a cluster node"))?;
+
+    // The channels the entry will route over must be open on chain and funded, so the entry can see
+    // them: the fault is in the traffic, not in the channel.
+    for relay in dead {
+        let open = cluster::open_outgoing_channels(relay).await?;
+        let to_exit = open
+            .iter()
+            .find(|(peer, _)| peer.eq_ignore_ascii_case(&exit.to_string()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} has no open channel to the exit {exit}: {open:?}",
+                    relay.address
+                )
+            })?;
+        anyhow::ensure!(
+            to_exit
+                .1
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<f64>().ok())
+                .is_some_and(|v| v > 0.0),
+            "the channel from {} to the exit holds no funds: {}",
+            relay.address,
+            to_exit.1
+        );
+        tracing::info!(relay = %relay.address, balance = %to_exit.1, "channel to the exit is open and funded");
+    }
 
     step("learning", async {
         tokio::time::sleep(LEARNING_PERIOD).await;

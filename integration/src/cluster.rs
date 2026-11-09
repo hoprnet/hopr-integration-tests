@@ -948,6 +948,41 @@ fn node_auth_header(node: &NodeInfo) -> Option<String> {
     node.api_token.as_ref().map(|t| format!("Bearer {t}"))
 }
 
+/// `node`'s open outgoing channels as `(destination, balance)`, as its REST API reports them from the
+/// chain it indexes. The entry reads the same chain through blokli, so a channel listed here is one
+/// the entry can see, whatever the network does to the traffic over it.
+pub async fn open_outgoing_channels(node: &NodeInfo) -> anyhow::Result<Vec<(String, String)>> {
+    let mut req = node_http_client().get(format!(
+        "{}/api/v4/channels?includingClosed=false",
+        node.api_url
+    ));
+    if let Some(header) = node_auth_header(node) {
+        req = req.header("Authorization", header);
+    }
+    let body: serde_json::Value = req
+        .send()
+        .await
+        .context("GET /api/v4/channels")?
+        .json()
+        .await
+        .context("reading /api/v4/channels body")?;
+    Ok(body["outgoing"]
+        .as_array()
+        .map(|channels| {
+            channels
+                .iter()
+                .filter(|ch| ch["status"].as_str() == Some("Open"))
+                .map(|ch| {
+                    (
+                        ch["peerAddress"].as_str().unwrap_or("").to_string(),
+                        ch["balance"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Fetch one node's Prometheus exposition, as text.
 ///
 /// Shared so that every reader of `/metrics` builds the request the same way: the readiness polling
