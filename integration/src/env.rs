@@ -279,7 +279,7 @@ impl IntegrationEnv {
     }
 
     /// Session destination for a given hop count, resolved against the network.
-    fn dest_for(&self, hops: usize) -> anyhow::Result<Address> {
+    pub fn dest_for(&self, hops: usize) -> anyhow::Result<Address> {
         Ok(match (&self.targets, hops) {
             (Targets::Local { dest_zero_hop, .. }, 0) => *dest_zero_hop,
             (Targets::Local { dest_one_hop, .. }, 1..=3) => *dest_one_hop,

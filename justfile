@@ -116,6 +116,15 @@ exit-origination: build build-chain
     export TEST_TARGET=exit_origination
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
+# A relay that acknowledges everything and delivers nothing toward the exit (GNO-1183): does a
+# 1-hop session avoid it? See integration/tests/dead_last_hop.rs. Manual, NOT run in CI.
+# `EDGLI_REF=<branch>` runs an unmerged edge-client.
+dead-last-hop: build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TEST_TARGET=dead_last_hop
+    HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
+
 # End-to-end PIX with edgli as the paying entry (binary chain; manual, NOT run in CI).
 # Builds hoprd from HOPRD_SRC (default ../hoprd) because the nix flake has no PIX binary.
 # See integration/tests/pix.rs. Optional args = test-name filters.
