@@ -143,6 +143,11 @@ async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_e
     })
     .await?;
 
+    tracing::info!(
+        "entry's graph after learning:\n{}",
+        env.graph_report().await
+    );
+
     let session = step("open", env.open_unreliable_session(1)).await?;
     let (mut rx, mut tx) = tokio::io::split(session);
 

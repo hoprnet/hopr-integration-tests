@@ -312,6 +312,65 @@ impl IntegrationEnv {
         })
     }
 
+    /// Every edge the entry's graph holds, with what it has measured, one line per edge. Nodes are named
+    /// by the first characters of their offchain key, as the planner's debug log prints them. For
+    /// diagnosing why routing picked or dropped a relay; the verdict itself is not exposed, but a
+    /// starved edge reads a score of 0 and no latency.
+    pub async fn graph_report(&self) -> String {
+        use edgli::hopr_lib::api::graph::{
+            NetworkGraphView,
+            traits::{
+                EdgeImmediateProtocolObservable, EdgeLinkObservable, EdgeNetworkObservableRead,
+                EdgeObservableRead, EdgeProtocolObservable,
+            },
+        };
+        use futures::StreamExt as _;
+
+        let graph = self.edgli.graph();
+        let nodes: Vec<_> = graph.nodes().collect().await;
+        let short =
+            |key: &dyn std::fmt::Display| key.to_string().chars().take(8).collect::<String>();
+        let mut lines = Vec::new();
+        for from in &nodes {
+            for to in &nodes {
+                if from == to {
+                    continue;
+                }
+                let Some(obs) = graph.edge(from, to) else {
+                    continue;
+                };
+                let immediate = obs.immediate_qos().map(|i| {
+                    format!(
+                        "connected={:?} ack={:?} latency={:?} score={:?}",
+                        i.is_connected(),
+                        i.ack_rate(),
+                        i.average_latency(),
+                        i.score()
+                    )
+                });
+                let intermediate = obs.intermediate_qos().map(|i| {
+                    format!(
+                        "rate={:?} latency={:?} balance={:?} score={:?}",
+                        i.average_probe_rate(),
+                        i.average_latency(),
+                        i.balance().is_some(),
+                        i.score()
+                    )
+                });
+                lines.push(format!(
+                    "{} -> {}  total={:?}  imm[{}]  int[{}]",
+                    short(from),
+                    short(to),
+                    obs.score(),
+                    immediate.unwrap_or_default(),
+                    intermediate.unwrap_or_default()
+                ));
+            }
+        }
+        lines.sort();
+        lines.join("\n")
+    }
+
     /// The cluster this env owns; an error for a Rotsee env, which has none.
     pub fn cluster(&self) -> anyhow::Result<&ClusterSummary> {
         self._cluster
