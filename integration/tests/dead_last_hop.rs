@@ -36,6 +36,7 @@
 //! ```text
 //! LINE=v5 just dead-last-hop
 //! LINE=v5 EDGLI_REF=<branch> just dead-last-hop      # an unmerged edge-client
+//! LINE=v5 EDGLI_REF=<branch> NETWORK_GRAPH_REF=<branch> just dead-last-hop   # and an unreleased graph
 //! ```
 //!
 //! Manual, one cluster, never in CI.
@@ -142,6 +143,10 @@ async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_e
     let (mut rx, mut tx) = tokio::io::split(session);
 
     let before = relayers::sample(&relays).await;
+    anyhow::ensure!(
+        before.covers(&relays),
+        "a relay's metrics did not answer before the pump, so its share cannot be measured"
+    );
     let exit_before = origination::sample(&exit_node).await?;
     let payload = tagged_payload(PAYLOAD_PHASE, PAYLOAD_BYTES);
     let transfer = step(
@@ -159,7 +164,12 @@ async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_e
         ),
     )
     .await?;
-    let spread = relayers::spread(&before, &relayers::sample(&relays).await);
+    let after = relayers::sample(&relays).await;
+    anyhow::ensure!(
+        after.covers(&relays),
+        "a relay's metrics did not answer after the pump, so its share cannot be measured"
+    );
+    let spread = relayers::spread(&before, &after);
     let exit_received = origination::sample(&exit_node)
         .await?
         .received
