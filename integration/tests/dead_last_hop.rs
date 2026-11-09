@@ -45,7 +45,7 @@ use std::time::Duration;
 
 use hoprd_integration_test::{
     IntegrationEnv,
-    cluster::{self, request_cluster_size, request_latency_profile},
+    cluster::{self, request_cluster_size, request_latency_profile, request_probe_interval},
     origination,
     pump::{PumpOpts, pump_halves, tagged_payload},
     relayers, step,
@@ -56,6 +56,9 @@ const RELAYS: usize = 3;
 
 /// Link cuts need the latency relays, so a profile is required; flat, so no path wins on latency.
 const FLAT_LATENCY: &str = "default: \"10ms\"\n";
+
+/// Neighbour probing round and timeout: fast, because the question is how quickly the entry learns.
+const PROBE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Time the entry gets to probe before the session opens.
 const LEARNING_PERIOD: Duration = Duration::from_secs(120);
@@ -73,6 +76,7 @@ async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_e
 -> anyhow::Result<()> {
     request_cluster_size(1 + RELAYS);
     request_latency_profile(FLAT_LATENCY);
+    request_probe_interval(PROBE_INTERVAL);
 
     // Cut before the entry boots: the broken state is there from its first packet, so nothing it
     // learns at startup says otherwise. The exit has to be named up front for the same reason.

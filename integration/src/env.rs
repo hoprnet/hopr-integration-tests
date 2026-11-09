@@ -14,7 +14,7 @@ use edgli::{
             node::{HasChainApi as _, HasTransportApi as _, HoprSessionClientOperations},
             types::internal::channels::{ChannelEntry, ChannelStatus},
         },
-        config::{HoprLibConfig, HostConfig, HostType, SafeModule},
+        config::{HoprLibConfig, HostConfig, HostType, ProbeConfig, SafeModule},
         exports::transport::{
             HoprSession, SESSION_MTU, SURB_SIZE, SessionCapability, SessionTarget,
             SurbBalancerConfig,
@@ -121,6 +121,7 @@ struct NetTuning {
     prefer_local: bool,
     probe_local: bool,
     path_planner: PathPlannerConfig,
+    probe: ProbeConfig,
     strategy_tick: Duration,
     channel_open_timeout: Duration,
 }
@@ -137,6 +138,15 @@ impl NetTuning {
                 min_ack_rate: 0.1, // local cluster probes succeed
                 ..Default::default()
             },
+            probe: cluster::requested_probe_interval().map_or_else(
+                ProbeConfig::default,
+                |interval| ProbeConfig {
+                    timeout: interval,
+                    interval,
+                    recheck_threshold: interval * 10,
+                    ..Default::default()
+                },
+            ),
             strategy_tick: Duration::from_secs(10),
             channel_open_timeout: LOCAL_CHANNEL_OPEN_TIMEOUT,
         }
@@ -754,6 +764,7 @@ fn edgli_config(
                 prefer_local_addresses: tuning.prefer_local,
             },
             path_planner: tuning.path_planner,
+            probe: tuning.probe,
             // Experiment: hopr-lib 61120e77 reuses this 2 s default as a write-stall timeout that evicts
             // a peer's stream with every queued packet and ack. Raised to test it as the 1-hop regression.
             stream: StreamProtocolConfig {

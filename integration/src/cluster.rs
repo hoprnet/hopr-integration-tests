@@ -77,6 +77,25 @@ pub fn request_latency_profile(yaml: impl Into<String>) -> &'static str {
     REQUESTED_LATENCY.get_or_init(|| yaml.into())
 }
 
+static REQUESTED_PROBE_INTERVAL: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+
+/// Ask for faster neighbour probing on the entry, before the entry boots.
+///
+/// `interval` becomes both the probe timeout and the delay between probing rounds (the library
+/// requires `interval >= timeout`), and the recheck threshold is ten rounds. On a loopback cluster a
+/// probe answers in milliseconds, so the library's 3 s timeout and 5 s round are dead time. A scenario
+/// about how fast the entry learns wants this; the default stands for everything else. The loopback
+/// prober's own 3 s interval is fixed inside edge-client and is not reachable from here. First call in
+/// a test binary wins.
+pub fn request_probe_interval(interval: Duration) -> Duration {
+    *REQUESTED_PROBE_INTERVAL.get_or_init(|| interval)
+}
+
+/// The interval asked for through [`request_probe_interval`], if any.
+pub fn requested_probe_interval() -> Option<Duration> {
+    REQUESTED_PROBE_INTERVAL.get().copied()
+}
+
 static REQUESTED_NODE_ENV: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
 
 /// Ask for environment variables to be set on every cluster `hoprd`, before the first
