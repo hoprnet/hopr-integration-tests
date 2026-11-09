@@ -10,7 +10,7 @@
 //! # The fault
 //!
 //! Entry, an Exit and three relays. Two relays lose their link to the Exit
-//! ([`ClusterSummary::cut_link`]), in both directions. Everything else stays up:
+//! ([`ClusterSummary::cut_link`]), in both directions, before the entry boots. Everything else stays up:
 //!
 //! * the entry still reaches both of them, so their pings and their acknowledgements to the entry
 //!   are healthy: the ack rate gate cannot tell them from the third relay;
@@ -45,13 +45,13 @@ use std::time::Duration;
 use hoprd_integration_test::{
     IntegrationEnv,
     cluster::{request_cluster_size, request_latency_profile},
+    origination,
     pump::{PumpOpts, pump_halves, tagged_payload},
     relayers, step,
 };
 
 /// Healthy relay plus the ones whose link to the Exit is cut.
 const RELAYS: usize = 3;
-const DEAD_RELAYS: usize = 2;
 
 /// Link cuts need the latency relays, so a profile is required; flat, so no path wins on latency.
 const FLAT_LATENCY: &str = "default: \"10ms\"\n";
@@ -68,26 +68,42 @@ const MIN_HEALTHY_SHARE: f64 = 0.9;
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
-async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_exit() -> anyhow::Result<()> {
+async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_exit()
+-> anyhow::Result<()> {
     request_cluster_size(1 + RELAYS);
     request_latency_profile(FLAT_LATENCY);
 
-    let env = step("setup", IntegrationEnv::setup()).await?;
+    // Cut before the entry boots: the broken state is there from its first packet, so nothing it
+    // learns at startup says otherwise. The exit has to be named up front for the same reason.
+    let env = step(
+        "setup",
+        IntegrationEnv::setup_with(|cluster| {
+            anyhow::ensure!(
+                cluster.nodes.len() == 1 + RELAYS,
+                "expected {} nodes, the cluster has {}",
+                1 + RELAYS,
+                cluster.nodes.len()
+            );
+            let exit = cluster.nodes[RELAYS].address;
+            for relay in &cluster.nodes[1..RELAYS] {
+                cluster.cut_link(relay.address, exit)?;
+            }
+            Ok(Some(exit))
+        }),
+    )
+    .await?;
     let exit = env.dest_for(1)?;
     let relays = env.relayer_candidates(exit)?;
-    anyhow::ensure!(
-        relays.len() == RELAYS,
-        "expected {RELAYS} relays besides the exit, the cluster has {}",
-        relays.len()
-    );
-    let (dead, healthy) = relays.split_at(DEAD_RELAYS);
-    let healthy = &healthy[0];
-
-    let cluster = env.cluster()?;
-    for relay in dead {
-        cluster.cut_link(relay.address, exit)?;
-    }
-    tracing::info!(%exit, healthy = %healthy.address, dead = ?dead.iter().map(|n| n.address).collect::<Vec<_>>(), "links to the exit cut");
+    let healthy = &relays[0];
+    let dead = &relays[1..];
+    tracing::info!(%exit, healthy = %healthy.address, dead = ?dead.iter().map(|n| n.address).collect::<Vec<_>>(), "links to the exit cut before the entry booted");
+    let exit_node = env
+        .cluster()?
+        .nodes
+        .iter()
+        .find(|n| n.address == exit)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("exit {exit} is not a cluster node"))?;
 
     step("learning", async {
         tokio::time::sleep(LEARNING_PERIOD).await;
@@ -99,6 +115,7 @@ async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_e
     let (mut rx, mut tx) = tokio::io::split(session);
 
     let before = relayers::sample(&relays).await;
+    let exit_before = origination::sample(&exit_node).await?;
     let payload = tagged_payload(PAYLOAD_PHASE, PAYLOAD_BYTES);
     let transfer = step(
         "pump",
@@ -116,6 +133,10 @@ async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_e
     )
     .await?;
     let spread = relayers::spread(&before, &relayers::sample(&relays).await);
+    let exit_received = origination::sample(&exit_node)
+        .await?
+        .received
+        .saturating_sub(exit_before.received);
     tracing::info!("forwarded packets per relay: {}", spread.summary());
 
     let healthy_share = spread
@@ -124,6 +145,23 @@ async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_e
         .find(|(address, _)| *address == healthy.address)
         .map_or(0.0, |(_, n)| *n as f64 / spread.total.max(1) as f64);
 
+    // The premise: nothing crossed a cut link. The exit only receives from relays, so what it received
+    // must be what the healthy relay forwarded, give or take the cluster's own background traffic.
+    let healthy_forwarded = spread
+        .per_relayer
+        .iter()
+        .find(|(address, _)| *address == healthy.address)
+        .map_or(0, |(_, n)| *n);
+    tracing::info!(
+        exit_received,
+        healthy_forwarded,
+        "packets the exit received against what the healthy relay forwarded"
+    );
+    anyhow::ensure!(
+        exit_received <= healthy_forwarded + healthy_forwarded / 20 + 100,
+        "the exit received {exit_received} packets but the healthy relay forwarded only {healthy_forwarded}: \
+         packets crossed a cut link, so the fault is not 100% and the run proves nothing"
+    );
     anyhow::ensure!(
         transfer.arrival_pct() >= MIN_ARRIVAL_PCT,
         "only {:.2}% of the payload returned, need >= {MIN_ARRIVAL_PCT:.0}%; the healthy relay carried \

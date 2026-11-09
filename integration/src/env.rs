@@ -165,8 +165,21 @@ impl IntegrationEnv {
     /// Bring up the local cluster, boot Edgli on the pre-funded extra identity, start
     /// the channel strategy, and wait until at least one outgoing channel is open.
     pub async fn setup() -> anyhow::Result<Self> {
+        Self::setup_with(|_| Ok(None)).await
+    }
+
+    /// As [`Self::setup`], but `prepare` runs on the running cluster before the entry boots, so a
+    /// fault it injects is there from the entry's first packet rather than discovered later.
+    ///
+    /// Returns the exit the 1-hop sessions should use, or `None` to leave the choice to the entry.
+    /// A scenario that cuts links to one node has to name that node, since it is chosen before the
+    /// entry can look at its peers.
+    pub async fn setup_with(
+        prepare: impl FnOnce(&ClusterSummary) -> anyhow::Result<Option<Address>>,
+    ) -> anyhow::Result<Self> {
         let cluster = cluster::bring_up_shared().await?;
         let summary = cluster.summary.clone();
+        let exit = prepare(&summary)?;
         let extra = summary.extras[0].clone();
 
         let (edgli, reactor) = boot_edgli(
@@ -179,6 +192,7 @@ impl IntegrationEnv {
         .await?;
 
         let (dest_zero_hop, dest_one_hop) = select_session_targets(&edgli).await?;
+        let dest_one_hop = exit.unwrap_or(dest_one_hop);
 
         Ok(Self {
             edgli,
