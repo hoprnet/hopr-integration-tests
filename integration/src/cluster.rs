@@ -982,6 +982,8 @@ pub async fn open_outgoing_channels(node: &NodeInfo) -> anyhow::Result<Vec<(Stri
         .send()
         .await
         .context("GET /api/v4/channels")?
+        .error_for_status()
+        .context("GET /api/v4/channels returned an error status")?
         .json()
         .await
         .context("reading /api/v4/channels body")?;
