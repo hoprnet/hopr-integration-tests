@@ -117,7 +117,7 @@ exit-origination: build build-chain
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
 # A relay that acknowledges everything and delivers nothing toward the exit (GNO-1183): does a
-# 1-hop session avoid it? See integration/tests/dead_last_hop.rs. Manual, NOT run in CI. v5 only.
+# 1-hop session avoid it? See integration/tests/dead_last_hop.rs. Also runs in the v5 `pr` tier of CI. v5 only.
 # `EDGLI_REF=<branch|sha>` runs an unmerged edge-client; `NETWORK_GRAPH_REF=<branch>` also patches
 # an unreleased hopr-network-graph from hoprnet/hopr-impls (Cargo ignores edge-client's own patch).
 # Both need `gh` logged in, to resolve the ref and read edge-client's manifest.

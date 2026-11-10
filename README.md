@@ -33,7 +33,7 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 | `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no      | `just profile`                |
 
 v5 is split in two tiers, chosen with `TIER` (see [`docs/v5-test-matrix.md`](docs/v5-test-matrix.md)
-for what each test covers and costs): `pr` (integration, pix, the mixed shape) is the fast
+for what each test covers and costs): `pr` (integration, dead_last_hop, pix, the mixed shape) is the fast
 happy-path set, `nightly` runs the rest. v4 runs everything on either tier. Which jobs each trigger
 runs is listed under [CI](#ci).
 Every run ends with a summary of each test, naming the step a failed test broke in.

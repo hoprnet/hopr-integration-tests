@@ -39,7 +39,7 @@
 //! LINE=v5 EDGLI_REF=<branch> NETWORK_GRAPH_REF=<branch> just dead-last-hop   # and an unreleased graph
 //! ```
 //!
-//! Manual, one cluster, never in CI.
+//! One cluster. CI runs it in the v5 `pr` tier.
 
 use std::time::Duration;
 

@@ -470,6 +470,8 @@ run_tier() {
 
   echo "running integration tests (binary chain, ${LINE}, tier ${TIER}) ..."
   in_tier pr && run_suite integration
+  # v5 only: the scenario drives the embedded edgli, which the v4 dependency set does not carry.
+  [ "${LINE}" = v5 ] && in_tier pr && run_suite dead_last_hop
   in_tier nightly && run_suite exit_origination
   # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore
   # FAILS against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there.
