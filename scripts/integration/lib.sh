@@ -723,7 +723,7 @@ warn_if_trace_capped() {
   find "${dir}" -name '*.log' ${newer[@]+"${newer[@]}"} -exec grep -qs 'the static max level is' {} \; -print |
     grep -q . || return 0
   echo "note: RUST_LOG asks for TRACE, but some binaries were built without TRACE logs." >&2
-  echo "      Run \`just integration-trace\` to build hoprd with TRACE logs." >&2
+  echo '      Run `just integration-trace` to build hoprd with TRACE logs.' >&2
 }
 
 # What "the state" is, in one place. Was four divergent lists. Under IT_TMP_ROOT, which CI sets

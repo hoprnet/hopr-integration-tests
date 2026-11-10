@@ -85,15 +85,15 @@ local hoprnet checkout for the dev shell. `just pix` builds hoprd from `HOPRD_SR
 The chain does not need docker: `scripts/integration/lib.sh chain_up` starts anvil, deploys the
 contracts and starts bloklid, and localcluster connects to it with `--chain-url`.
 
-| Env var                  | Meaning                                                                                                                                        |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HOPRD_BIN`              | `hoprd` binary (default `result-hoprd/bin/hoprd`)                                                                                              |
-| `HOPRD_LOCALCLUSTER_BIN` | `hoprd-localcluster` binary                                                                                                                    |
-| `HOPRD_CHAIN_URL`        | bloklid to connect to (default `http://localhost:8080`)                                                                                        |
-| `HOPRD_CLUSTER_DATA_DIR` | use an already-running cluster instead of starting one                                                                                         |
-| `HOPR_LOG_DIR`           | keep each run's logs in a folder under it (see below)                                                                                          |
-| `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files, also when start-up fails                                                                                  |
-| `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture`                                                                                   |
+| Env var                  | Meaning                                                                                                                                                                     |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HOPRD_BIN`              | `hoprd` binary (default `result-hoprd/bin/hoprd`)                                                                                                                           |
+| `HOPRD_LOCALCLUSTER_BIN` | `hoprd-localcluster` binary                                                                                                                                                 |
+| `HOPRD_CHAIN_URL`        | bloklid to connect to (default `http://localhost:8080`)                                                                                                                     |
+| `HOPRD_CLUSTER_DATA_DIR` | use an already-running cluster instead of starting one                                                                                                                      |
+| `HOPR_LOG_DIR`           | keep each run's logs in a folder under it (see below)                                                                                                                       |
+| `HOPRD_KEEP_ARTIFACTS=1` | keep per-node `hoprd_<i>.log` files, also when start-up fails                                                                                                               |
+| `RUST_LOG`, `TEST_ARGS`  | CI uses `warn,hoprd_integration_test=info` and `--nocapture`                                                                                                                |
 | `TEST_PROFILE=debug`     | build and run the test binary in debug instead of the default release; slower, and timing-sensitive suites (`return_path` at 3 hops, v5 PIX) fail on a starved test process |
 
 To keep the logs of each run:
