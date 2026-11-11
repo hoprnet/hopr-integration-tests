@@ -2,7 +2,7 @@
 
 What every v5 test checks, what it costs in CI, which ones overlap, and which tier runs it.
 Issues: #63 (combine overlapping scenarios), #65 (PR vs nightly tiers). Rows marked #82 / #83 come
-from those PRs and are not on `main` yet.
+from those PRs.
 
 Wall times are per scenario, setup included:
 
@@ -121,7 +121,7 @@ S = strict assertion, w = exercised but weakly or not asserted.
 | Tier      | Trigger                                             | v5 suites                                                                                     |
 | --------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `pr`      | `run-integration` label, merge queue, v5 dispatches | integration, dead_last_hop, pix, pix_shapes mixed                                             |
-| `nightly` | `run-integration-v5-nightly` label, `schedule`      | exit_origination, the other four pix_shapes; return_path and pix_relay_loss once #82/#83 land |
+| `nightly` | `run-integration-v5-nightly` label, `schedule`      | exit_origination, the other four pix_shapes, return_path (all but E11), pix_relay_loss        |
 
 - `run.sh` picks the suites from `TIER`. v4 ignores it and runs everything, as before.
 - Each tier is its own job. The merge queue and v5 dispatches run `pr` only; the schedule runs v4
