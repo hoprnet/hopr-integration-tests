@@ -140,9 +140,13 @@ dead-last-hop: build build-chain
       fi
       exec bash scripts/integration/run-binchain.sh'
 
-# End-to-end PIX with edgli as the paying entry (binary chain; manual, NOT run in CI).
+# End-to-end PIX with edgli as the paying entry (binary chain; CI's v5 `pr` tier runs it too).
 # Builds hoprd from HOPRD_SRC (default ../hoprd) because the nix flake has no PIX binary.
 # See integration/tests/pix.rs. Optional args = test-name filters.
+#
+# The Entry is linked into the test binary, so it is whatever edgli the manifest names. Like
+# `just tier`, this and the other PIX recipes pin edgli to the line's edge-client head (`EDGLI_REF`
+# overrides it) rather than the committed v5 lock, which trails it; `gh` must be logged in.
 pix *scenarios:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -152,20 +156,26 @@ pix *scenarios:
     just build-chain
     pix_check_hoprd "${HOPRD_BIN}"
 
-    export SCENARIOS='{{scenarios}}' TEST_TARGET=pix
+    export SCENARIOS='{{scenarios}}' LINE='{{line}}' TEST_TARGET=pix HOPRNET_SHELL='{{hoprnet}}'
     # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
-    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/with-v5-deps.sh \
-      bash scripts/integration/run-binchain.sh
+    # The pin and the run share one v5 dependency set: each `with-v5-deps.sh` starts again from the
+    # committed manifest, which would undo the pin.
+    bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      pin_line_deps
+      exec bash scripts/integration/run-binchain.sh'
 
-# PIX under end-user traffic shapes (binary chain; manual, NOT run in CI, hours per full pass).
+# PIX under end-user traffic shapes (binary chain, hours per full pass; CI's v5 tier runs the mixed
+# shape on PRs and the rest nightly).
 #
 # Same build path as `just pix`, but at a geometry whose cycle is long enough for a traffic shape
 # to exist inside it — see integration/src/shapes.rs. Needs a HOPRD_SRC carrying the Exit-side PIX
 # fill (hoprnet#8396); the idle scenario measures exactly that, and against a hoprd without it an
 # idle cycle strands its deposit by design.
 #
-# Optional args = test-name filters.
+# Optional args = test-name filters. Pins the Entry's edgli like `just pix` does.
 pix-shapes *scenarios:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -176,11 +186,15 @@ pix-shapes *scenarios:
     pix_check_hoprd "${HOPRD_BIN}"
     pix_check_localcluster "${HOPRD_LOCALCLUSTER_BIN}"
 
+    export SCENARIOS='{{scenarios}}' LINE='{{line}}'
     export TEST_TARGET=pix_shapes HOPRNET_SHELL='{{hoprnet}}'
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
-    runner=(bash scripts/integration/with-v5-deps.sh bash scripts/integration/run-binchain.sh)
-
-    SCENARIOS='{{scenarios}}' "${runner[@]}"
+    # The pin and the run share one v5 dependency set; see `pix`.
+    bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      pin_line_deps
+      exec bash scripts/integration/run-binchain.sh'
 
 # Run a CI tier locally: the same suites as `run.sh` (lib.sh `run_tier`), from the binaries built
 # here rather than resolved refs. v5 also builds the PIX hoprd + localcluster from HOPRD_SRC, a v5
@@ -205,13 +219,16 @@ tier name="pr": build build-chain
     # v5 runs against edge-client's line head, like CI: the committed v5 lock trails `main`.
     {{v5_deps}} bash -c 'source scripts/integration/lib.sh; if [ "${LINE}" = v5 ]; then pin_line_deps; fi; run_tier'
 
-# PIX when half the return relays die mid-cycle (binary chain; manual, NOT run in CI, about ten
-# minutes per scenario at the default geometry). See integration/tests/pix_relay_loss.rs and
-# docs/pix-relay-loss.md. Same build path as `just pix`.
+# PIX when half the return relays die mid-cycle (binary chain; CI's v5 nightly tier runs it too;
+# about ten minutes per scenario at the default geometry, ~20 for the one that sustains three
+# cycles). See integration/tests/pix_relay_loss.rs and docs/pix-relay-loss.md. Same build path as
+# `just pix`.
 #
 # One cluster PER SCENARIO, like `return-path` and for the same reason: each kills a cluster node.
 # They share one chain, started once. `HOPRD_PIX_*` (surplus, geometry, SURB buffer, rate) are
 # forwarded to the test; docs/pix-relay-loss.md lists them. Optional args = test-name filters.
+#
+# Pins the Entry's edgli like `just pix` does, once, so every scenario runs the same Entry.
 pix-relay-loss *scenarios:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -222,23 +239,58 @@ pix-relay-loss *scenarios:
     pix_check_hoprd "${HOPRD_BIN}"
 
     it_env
-    export TEST_TARGET=pix_relay_loss HOPRNET_SHELL='{{hoprnet}}'
+    export LINE='{{line}}' TEST_TARGET=pix_relay_loss HOPRNET_SHELL='{{hoprnet}}'
+    export SCENARIO_FILTERS='{{scenarios}}'
     # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
-    scenarios='{{scenarios}}'
-    # Listed under the v5 dependency set: the target is `#![cfg(feature = "v5")]` and lists nothing
-    # without it.
-    [ -n "${scenarios}" ] || scenarios="$(bash scripts/integration/with-v5-deps.sh \
-      bash -c 'source scripts/integration/lib.sh; list_scenarios pix_relay_loss')"
     chain_start
     trap chain_stop EXIT
     export CHAIN_SHARED=1
-    rc=0
-    for scenario in ${scenarios}; do
-      SCENARIOS="${scenario}" bash scripts/integration/with-v5-deps.sh \
-        bash scripts/integration/run-binchain.sh || rc=1
-    done
-    exit "${rc}"
+    # One v5 dependency set for the pin, the listing and every scenario: each `with-v5-deps.sh`
+    # starts again from the committed manifest, which would undo the pin. The target is
+    # `#![cfg(feature = "v5")]`, so it also lists nothing outside that set.
+    bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      pin_line_deps
+      scenarios="${SCENARIO_FILTERS}"
+      [ -n "${scenarios}" ] || scenarios="$(list_scenarios pix_relay_loss)"
+      rc=0
+      for scenario in ${scenarios}; do
+        SCENARIOS="${scenario}" bash scripts/integration/run-binchain.sh || rc=1
+      done
+      exit "${rc}"'
+
+# PIX at the DEPLOYED configuration (binary chain; manual, NOT run in CI, about ten minutes).
+#
+# Same build path as `just pix`, but at the geometry hoprnet#8519 ships as its default —
+# `4096 x (32 + 79)`, a cycle of 454 656 packets and a 629.6 MiB quota — with the Exit's upstream
+# PIX defaults, rather than the demo geometry `just pix` uses. No fault is injected: this is the
+# deployed-configuration control for `just pix-relay-loss`. See integration/tests/pix_prod.rs.
+# Optional args = test-name filters. Pins the Entry's edgli like `just pix` does.
+pix-prod *scenarios:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ '{{line}}' = v5 ] || { echo "PIX is v5-only — run: LINE=v5 just pix-prod" >&2; exit 2; }
+    source scripts/integration/lib.sh
+    pix_build '{{hoprd_src}}'
+    just build-chain
+    pix_check_hoprd "${HOPRD_BIN}"
+
+    export SCENARIOS='{{scenarios}}' LINE='{{line}}' TEST_TARGET=pix_prod HOPRNET_SHELL='{{hoprnet}}'
+    # Release, not debug, whatever TEST_PROFILE says: the Entry is linked into this binary and
+    # generating 4096 polynomials per cycle is CPU-bound enough that a debug build cannot keep up
+    # with the Exit's commitment deadline — measured, it stretched the SSA commitment past
+    # max_ssa_delivery_time and every cycle failed.
+    export TEST_PROFILE=release
+    # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
+    # The pin and the run share one v5 dependency set; see `pix`.
+    bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      pin_line_deps
+      exec bash scripts/integration/run-binchain.sh'
 
 # Run a single test against a fresh env (e.g. `just scenario zero_one_two_hop`).
 scenario name:

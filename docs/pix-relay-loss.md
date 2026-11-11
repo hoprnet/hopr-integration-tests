@@ -7,14 +7,17 @@ The scenario is `integration/tests/pix_relay_loss.rs`; the profile is
 `integration/src/relay_loss.rs`.
 
 ```bash
-HOPRD_SRC=../hoprd LINE=v5 just pix-relay-loss                                 # the three scenarios
+HOPRD_SRC=../hoprd LINE=v5 just pix-relay-loss                                 # every scenario
 HOPRD_PIX_ADDITIONAL_SHARES=16 HOPRD_SRC=../hoprd LINE=v5 just pix-relay-loss  # shipped surplus
 HOPRD_SRC=../hoprd LINE=v5 just pix-relay-loss a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe
 ```
 
 `just pix-relay-loss` builds a PIX-enabled hoprd the way `just pix` does, starts **one chain**, and runs
 each scenario in an invocation of its own on it: each kills a cluster node, so a cluster is never
-shared. Manual, never in CI. Name scenarios to run only those. It forwards the environment:
+shared. The Entry is linked into the test binary, so before the first scenario the recipe pins its
+edgli to edge-client's `main`, as CI and `just tier` do, rather than to the committed v5 lock, which
+trails it. `EDGLI_REF` picks another edge-client ref, and `gh` must be logged in. CI's v5 nightly
+tier runs every scenario too. Name scenarios to run only those. It forwards the environment:
 
 | variable | meaning | default |
 | --- | --- | --- |
@@ -190,11 +193,14 @@ would deploy. The depth stays at the deployed ratio and the surplus pays for the
 
 ## What the scenario does
 
-Three scenarios, each on a cluster of its own. **Symmetric** and **return-only** use an Exit and
+Four scenarios, each on a cluster of its own. **Symmetric** and **return-only** use an Exit and
 **two** relay candidates (three nodes), so killing one is killing half: one hop each way, or direct
 requests and relayed replies. **Return-two-hop** uses three relay candidates (four nodes), direct
 requests and two-hop return paths over them, so the SURBs with the victim at hop two are ones the
-Exit cannot recognise as dead and only the Entry's invalidation removes them. PIX derives the share
+Exit cannot recognise as dead and only the Entry's invalidation removes them. **Return-only,
+sustained** is return-only carried on until three cycles are swept rather than one: the others stop
+at the cycle in flight, so they show its successor was requested but not that the Entry funded it
+past the burst's shortfall in returned packets (hoprnet#8523, #8525). PIX derives the share
 key from the first *return* relayer's acknowledgement, so a zero-hop return path carries no share at
 all; the forward path may be direct. Traffic is offered at 150 pkt/s against the Exit's loopback,
 so one chunk offered is one reply packet and therefore one share.
@@ -207,7 +213,8 @@ so one chunk offered is one reply packet and therefore one share.
    either everything or nothing, and either way says nothing about losing *half*.
 3. SIGKILL the busiest. SIGKILL rather than a clean stop: a crashed relay announces nothing and
    closes no channel, so the invalidation path keyed on channel closure never fires.
-4. Keep offering traffic, and wait for the Exit to sweep.
+4. Keep offering traffic, and wait for the Exit to sweep: one cycle, or three for the sustained
+   scenario.
 
 It then asserts, in order of what each rules out:
 
@@ -218,11 +225,14 @@ It then asserts, in order of what each rules out:
   A share the Exit's store drops for capacity is lost for good, and no outcome assertion below
   names it.
 - **No deposit timed out** — separates a cycle lost to the outage from one lost to a slow chain.
-- **A cycle was swept** — every one of the 512 polynomials reached threshold despite the burst.
-- **Exactly one cycle requested and recovered, none failed** (`hopr_pix_cycles_total`). A sweep and
-  an empty closure count can come from a successor cycle; this is what shows that the cycle in
-  flight at the kill survived.
-- **The Exit's Safe rose by at least one cycle's deposit.** The counters alone cannot establish
+- **A cycle was swept** (three for the sustained scenario) — every one of the 512 polynomials
+  reached threshold despite the burst.
+- **Exactly one cycle requested and recovered, none failed** (`hopr_pix_cycles_total`; three of
+  each for the sustained scenario). A sweep and an empty closure count can come from a successor
+  cycle; this is what shows that the cycle in flight at the kill survived. A successor the Entry
+  refused at first is still one request: the Exit's re-sends are `hopr_pix_ssa_requests_resent_total`,
+  which the scenario logs.
+- **The Exit's Safe rose by at least one cycle's deposit** (three for the sustained scenario). The counters alone cannot establish
   this: `keys_recovered` and `sweeps` both increment on the "already swept" path, where a key is
   recovered against a stealth address the deposit never reached.
 

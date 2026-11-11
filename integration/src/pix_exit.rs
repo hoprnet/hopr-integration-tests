@@ -110,6 +110,11 @@ const EVICTIONS_RENDERED: &str = "hopr_surb_store_evictions_count_total";
 /// own while this census says the scenario's Session is the only one there.
 const SESSIONS_ACTIVE: &str = "hopr_pix_sessions_active";
 
+/// Successor `SsaRequest`s re-sent because the Entry had not answered them (hoprnet#8525).
+///
+/// A `SimpleCounter`, so it carries no labels and is read with the `&[]` label set.
+const SSA_REQUESTS_RESENT: &str = "hopr_pix_ssa_requests_resent_total";
+
 /// Packets served while one cycle held the accounting front, observed once at finalization.
 const CYCLE_EGRESS: &str = "hopr_pix_cycle_egress_packets";
 
@@ -296,6 +301,20 @@ impl ExitTelemetry {
     /// Cycle transitions of one `event`.
     pub fn cycles(&self, event: &str) -> Option<u64> {
         self.counter(CYCLES, "event", event)
+    }
+
+    /// Successor `SsaRequest`s the Exit had to re-send because the Entry had not answered them
+    /// (hoprnet#8525).
+    ///
+    /// The direct evidence that the successor-request path is being exercised rather than merely
+    /// survived: an Entry whose gate is shut for longer than the Exit asks early refuses the first
+    /// request, and before #8525 that refusal ended the Session.
+    ///
+    /// `None` until the Exit's first re-send: hoprnet registers the counter lazily and increments it
+    /// only when a re-send happens, so an Exit that never had to re-send exports no series — and
+    /// neither does one that predates #8525. On an Exit known to carry #8525, read `None` as zero.
+    pub fn ssa_requests_resent(&self) -> Option<u64> {
+        self.counter_series(SSA_REQUESTS_RESENT, &[])
     }
 
     /// Per-cycle egress distribution for one `outcome` — `"recovered"` or `"failed"`.

@@ -1,4 +1,4 @@
-//! End-to-end PIX with **edgli as the paying Entry** (manual; NOT run in CI).
+//! End-to-end PIX with **edgli as the paying Entry** (CI's v5 `pr` tier; `just pix` locally).
 //!
 //! hoprd's own `session_pix` covers hoprd-Entry ↔ hoprd-Exit over the REST API. This covers the
 //! configuration that actually ships: `gnosis_vpn-client` embeds edgli, so in production the node
@@ -87,7 +87,7 @@
 //!
 //! | participant | role | comes from |
 //! | ----------- | ---- | ---------- |
-//! | entry (`edgli`, in-process) | opens the Session, mints SURBs, **pays the deposits** | the `edgli` git dependency, compiled into this binary |
+//! | entry (`edgli`, in-process) | opens the Session, mints SURBs, **pays the deposits** | the `edgli` git dependency, compiled into this binary; `just pix` pins it to edge-client's `main` |
 //! | relay + Exit | forward packets, reply, recover keys, **sweep** | `$HOPRD_BIN` at runtime |
 //!
 //! Compile-time on one side and runtime on the other, so the two can silently disagree — and both
