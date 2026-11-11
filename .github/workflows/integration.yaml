@@ -1,5 +1,7 @@
 name: Integration throughput test
-# Runs the 0-hop + 1-hop throughput test (full stack). Triggered by:
+# Runs the integration suites (full stack). v5 is split in a `pr` and a `nightly` tier, see
+# docs/v5-test-matrix.md; v4 runs every suite on either. Which jobs a trigger runs is the
+# `plan` step below (table in README "CI"). Triggered by:
 #   * hoprd, blokli or edge-client merging to the branch the chosen line names (via
 #     workflow_dispatch / repository_dispatch from those repos),
 #   * a nightly schedule, which is the ONLY coverage the v4 release lines get: a
@@ -8,12 +10,11 @@ name: Integration throughput test
 #   * manual workflow_dispatch,
 #   * the MERGE QUEUE for this repo's own `main` — so a change here cannot land
 #     without the test passing, whether or not anyone remembered the label,
-#   * a hopr-integration-tests PR labelled `run-integration` (to run it before queueing).
+#   * a hopr-integration-tests PR labelled `run-integration` (v5 pr tier), `run-integration-v4`
+#     or `run-integration-v5-nightly` (to run it before queueing).
 #
-# One release line per run; README has the branch table. The dispatching project supplies its
-# rev, everything else resolves to the head of its branch on that line. A dispatch picks the
-# line; runs that gate THIS repo fan out over both through `strategy.matrix.line` below, since
-# the test bodies are shared source.
+# README has the branch table. The dispatching project supplies its rev, everything else
+# resolves to the head of its branch on that line.
 on:
   repository_dispatch:
     types: [integration]
@@ -25,6 +26,12 @@ on:
         type: choice
         default: "v4"
         options: ["v4", "v5"]
+      tier:
+        description: "v5 suites to run: all (both tiers, a job each), pr (happy paths) or nightly (the rest)"
+        required: false
+        type: choice
+        default: "pr"
+        options: ["all", "pr", "nightly"]
       project:
         description: "Triggering project (hoprd | edge-client | blokli); empty = every ref defaults to the head of its branch on the chosen line"
         required: false
@@ -38,8 +45,8 @@ on:
         # return a run id and the API does not expose dispatch inputs on a run. So
         # the caller passes a unique marker, `run-name` below puts it in the run
         # title, and the caller polls for the run whose title carries it. Matching
-        # on "newest run" instead is a race: several repos dispatch here, and the
-        # `integration` concurrency group makes runs queue rather than start.
+        # on "newest run" instead is a race: several repos dispatch here, and a run
+        # queues rather than starts while every runner is busy.
         description: "Opaque tag echoed into the run name, so a caller can find this run"
         required: false
         default: ""
@@ -65,18 +72,19 @@ on:
 # Uniform indentation on purpose: `>-` only folds lines at the SAME indent as the
 # first one, so an indented continuation would leave real newlines in this string.
 run-name: >-
-  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration {0} ({1} {2})', github.event.client_payload.line || 'v4', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly v4)' || 'Integration throughput test'))) }}
+  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration {0} ({1} {2})', github.event.client_payload.line || 'v4', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly)' || 'Integration throughput test'))) }}
 # Only lets a new push supersede a PR's previous run; every other run is its own group.
-# Serialising on the box is the `integration` job's concurrency, not this one.
+# Nothing else serialises runs: jobs wait for a free self-hosted runner.
+permissions: {}
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('integration-pr-{0}', github.event.pull_request.number) || format('integration-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # On a hosted runner so `gh` need not exist on the hetzner box. See README "Breaking upstream changes".
+  # On a hosted runner so `gh` need not exist on the self-hosted box. See README "Breaking upstream changes".
   companions:
     name: Resolve companion PRs
     if: >-
-      github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-integration')
+      github.event_name != 'pull_request' || contains(join(github.event.pull_request.labels.*.name, ' '), 'run-integration')
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -84,7 +92,42 @@ jobs:
       pull-requests: read
     outputs:
       tests_sha: ${{ steps.resolve.outputs.tests_sha }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
+      # One job per (line, tier). Gates (merge queue, upstream dispatches) run the pr tier only; the
+      # v5 nightly tier runs on the schedule or when asked for (label, tier=nightly).
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          LINE: ${{ inputs.line || github.event.client_payload.line || 'v4' }}
+          TIER: ${{ inputs.tier || github.event.client_payload.tier || 'pr' }}
+        run: |
+          set -euo pipefail
+          jobs=()
+          case "${EVENT}" in
+          schedule) jobs=(v4:pr v5:nightly) ;;
+          merge_group) jobs=(v4:pr v5:pr) ;;
+          pull_request)
+            while read -r label; do
+              case "${label}" in
+              run-integration) jobs+=(v5:pr) ;;
+              run-integration-v4) jobs+=(v4:pr) ;;
+              run-integration-v5-nightly) jobs+=(v5:nightly) ;;
+              esac
+            done < <(jq -r '.[]' <<<"${LABELS}")
+            ;;
+          *)
+            case "${LINE}:${TIER}" in
+            v4:*) jobs=(v4:pr) ;;
+            v5:all) jobs=(v5:pr v5:nightly) ;;
+            *) jobs=("${LINE}:${TIER}") ;;
+            esac
+            ;;
+          esac
+          matrix=$(printf '%s\n' "${jobs[@]}" | jq -Rnc '[inputs | select(length > 0) | split(":") | {line: .[0], tier: .[1]}]')
+          echo "jobs: ${matrix}"
+          echo "matrix=${matrix}" >>"${GITHUB_OUTPUT}"
       - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
@@ -109,42 +152,34 @@ jobs:
             echo "tests_sha=${tests_sha}"
           } >>"${GITHUB_OUTPUT}"
   integration:
-    name: Integration throughput (${{ matrix.line }})
+    # The pr tier keeps the bare line name, which is what upstream gates and required checks match.
+    name: Integration throughput (${{ matrix.line }}${{ matrix.tier == 'nightly' && ', nightly' || '' }})
     needs: companions
-    # PR runs only when the `run-integration` label is present; dispatch/manual always run.
-    if: >-
-      github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-integration')
+    # Empty on a PR with no `run-integration*` label.
+    if: needs.companions.outputs.matrix != '[]'
     # Dedicated self-hosted machine rather than a hosted VM: the onion encoder is
     # CPU-bound and the throughput thresholds only mean anything on a stable core count.
     runs-on: [self-hosted, hetzner]
-    # One job on the box at a time (shared ports). `queue: max` because the default keeps a single
-    # pending run and cancels it on the next arrival, which fails the upstream merge-queue entry.
-    concurrency:
-      group: integration
-      queue: max
     # `actions: read` lets run.sh find a matching earlier green; the rest is what it used before.
     permissions:
       contents: read
       pull-requests: read
       actions: read
-    # Both lines for the triggers that gate this repo, one dispatched line otherwise.
-    # `fail-fast: false` so a v5 break still reports the v4 verdict. NOTE the job name
-    # carries the line, so required checks must name "Integration throughput (v4|v5)".
+    # `fail-fast: false` so a v5 break still reports the v4 verdict.
     strategy:
       fail-fast: false
-      # One line at a time. The box hosts several runner instances sharing these labels, so
-      # without this both legs start at once and collide on anvil 8545, bloklid 8080, node ports
-      # 13000/19000 and /tmp/hopr-chain — which the hygiene steps also delete under each other.
-      max-parallel: 1
+      # Legs run side by side. Two runners share each box; "Claim this runner's ports" below
+      # keeps their chains, clusters and temp dirs apart.
+      max-parallel: 4
       matrix:
-        line: >-
-          ${{ fromJSON((github.event_name == 'merge_group' || github.event_name == 'pull_request') && '["v4","v5"]' || format('["{0}"]', inputs.line || github.event.client_payload.line || 'v4')) }}
-    # Per LINE, not per run: ~45 min of tests on v4 (9 scenarios), ~50 on v5 (11; one shared chain)
-    # plus 15-20 min of build on a Cachix miss. Each line is its own job.
-    timeout-minutes: 150
+        include: ${{ fromJSON(needs.companions.outputs.matrix) }}
+    # Per job: ~40 min of tests on v4, ~29 on v5 pr and ~100 on v5 nightly (one shared chain each),
+    # plus 15-20 min of build on a Cachix miss.
+    timeout-minutes: 180
     env:
       # Which branch + dependency set run.sh resolves; the rest override within it.
       LINE: ${{ matrix.line }}
+      TIER: ${{ matrix.tier }}
       PROJECT: ${{ inputs.project || github.event.client_payload.project }}
       OVERRIDE_REV: ${{ inputs.rev || github.event.client_payload.rev }}
       # `workflow_dispatch` delivers its arguments under `inputs.*` while
@@ -170,6 +205,7 @@ jobs:
       # per-node hoprd_<i>.log files are gone before the upload step runs — which is
       # exactly what left run 34098266229 undiagnosable.
       HOPRD_KEEP_ARTIFACTS: 1
+      HOPR_LOG_DIR: ${{ github.workspace }}/logs/ci
       RUST_LOG: warn,hoprd_integration_test=info,return_path=info
       HOPRD_NODE_RUST_LOG: info
       # Without this libtest captures a PASSING test's output, so a green run would
@@ -192,11 +228,27 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No step pushes; edge-client/hoprd are public so cargo/gh fetch needs no token.
           persist-credentials: false
           ref: ${{ needs.companions.outputs.tests_sha }}
+      # In case several runner instances share a box (RUNNER_NAME ends in -<instance>): each job
+      # shifts every port the stack binds by 1000 per instance and keeps its chain and socket
+      # folders under its own RUNNER_TEMP, so neither job sees the other's state.
+      - name: Claim this runner's ports and temp dir
+        run: |
+          instance="${RUNNER_NAME##*-}"
+          case "${instance}" in '' | *[!0-9]*) instance=1 ;; esac
+          offset=$(((instance - 1) * 1000))
+          {
+            echo "IT_TMP_ROOT=${RUNNER_TEMP}"
+            echo "ANVIL_PORT=$((8545 + offset))"
+            echo "BLOKLI_API_PORT=$((8080 + offset))"
+            echo "HOPRD_API_PORT_BASE=$((13000 + offset))"
+            echo "HOPRD_P2P_PORT_BASE=$((19000 + offset))"
+            echo "HOPRD_LATENCY_PORT_BASE=$((9100 + offset))"
+          } | tee -a "${GITHUB_ENV}"
       # The runner is persistent, so leftovers from a crashed previous run survive
       # into this one. Scope the kill to this job's workspace: the box runs several
       # runner instances, each with its own `_work` path, and every process we
@@ -225,7 +277,7 @@ jobs:
       # back to `install-nix-action` when `nix` is not on PATH, which needs root —
       # and the `runner` user has no sudo, so it dies with "sudo: a password is
       # required" after a screenful of installer output. On this box nix is part of
-      # the machine, installed by gitops/ansible, so the job's job is to *find* it,
+      # the machine, installed by its provisioning, so the job's job is to *find* it,
       # not to install it. The profile path is checked explicitly because a
       # multi-user install exports nix through /etc/profile.d/nix.sh, which a
       # non-login job shell never sources.
@@ -242,7 +294,7 @@ jobs:
               exit 0
             fi
           done
-          echo "::error::nix is not installed on this runner. It is a prerequisite of the box, not of the workflow — install it from gitops/ansible (multi-user) and put its profile bin dir on the runner user's PATH. See runner/README.md." >&2
+          echo "::error::nix is not installed on this runner. It is a prerequisite of the box, not of the workflow — install it with the box's provisioning (multi-user) and put its profile bin dir on the runner user's PATH. See runner/README.md." >&2
           exit 1
       # Nix evaluation shells out to the `git` BINARY to fetch git dependencies
       # (hoprd's flake pulls hopr-lib from github.com/hoprnet/hoprnet), and the
@@ -306,8 +358,7 @@ jobs:
           # that can carry a marker and so be waited on), so switching on the event
           # would have labelled every hoprd merge gate a "manual run".
           if [ "${EVENT}" = "schedule" ]; then
-            # Nightly carries no inputs, so LINE falls through to its v4 default.
-            echo "TRIGGER=nightly v4 line"
+            echo "TRIGGER=nightly"
           elif [ "${EVENT}" = "merge_group" ]; then
             # Fans out over both lines; ${LINE} says which one this job is.
             # This repo's own merge queue: the candidate is this PR merged into main.
@@ -331,16 +382,51 @@ jobs:
             echo "TESTS_FROM=, tests from [#${TESTS_PR}](https://github.com/${GITHUB_REPOSITORY}/pull/${TESTS_PR})" >>"${GITHUB_ENV}"
           fi
       - name: Resolve versions, build stack, run test
+        id: integration
         # Pinned rather than left to run.sh's native default: the runners are x86_64-linux,
         # and the suffixed outputs are the static musl builds CI has always run.
         env:
           NIX_SYSTEM_SUFFIX: x86_64-linux
-        run: nix develop github:hoprnet/hoprnet --command bash scripts/integration/run.sh
+        run: |
+          code=0
+          nix develop github:hoprnet/hoprnet --command bash scripts/integration/run.sh || code=$?
+          echo "exit_code=${code}" >>"${GITHUB_OUTPUT}"
+          exit "${code}"
+      # Check the real suites' artifacts, including failed runs. A reused pass or a
+      # stack build failure never starts the suites and has no run folders to check.
+      - name: Verify run logs and final status
+        if: ${{ !cancelled() && steps.integration.outputs.tests_started == 'true' }}
+        env:
+          EXIT_CODE: ${{ steps.integration.outputs.exit_code }}
+        run: |
+          runs=("${HOPR_LOG_DIR}"/run-*)
+          failed=0
+          for dir in "${runs[@]}"; do
+            [ -s "${dir}/run.env" ]
+            [ -s "${dir}/run.status" ]
+            if grep -qx 'status=passed' "${dir}/run.status"; then
+              grep -qx 'exit_code=0' "${dir}/run.status"
+              # The harness footer proves the retained log was drained to completion.
+              for log in "${dir}"/client-*.log; do
+                grep -Eq '^test [^ ]+ \.\.\. ' "${log}"
+                grep -q '^test result: ok\.' "${log}"
+              done
+            else
+              grep -Eq '^status=(failed|interrupted)$' "${dir}/run.status"
+              grep -Eq '^exit_code=[1-9][0-9]*$' "${dir}/run.status"
+              failed=1
+            fi
+          done
+          if [ "${EXIT_CODE}" = 0 ]; then
+            [ "${failed}" = 0 ]
+          else
+            [ "${failed}" = 1 ]
+          fi
       # The marker a later merge-queue run of the same stack, here or upstream, looks up instead of rerunning.
       - name: Record the pass
         if: >-
           success() && env.IT_FINGERPRINT != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: it-pass-${{ env.IT_FINGERPRINT }}
           path: it-pass.txt
@@ -350,23 +436,20 @@ jobs:
       # goes red. Only on failure, so a green run stores nothing.
       - name: Upload logs
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: integration-logs-${{ github.run_id }}-${{ github.run_attempt }}
-          # The cluster dir is a tempfile::TempDir under the dev shell's TMPDIR, so it
-          # lands at /tmp/nix-shell.*/nix-shell.*/hoprd-it-*/ — NOT /tmp/hoprd-it-*,
-          # which is what an earlier version of this globbed and never matched.
+          name: integration-logs-${{ matrix.line }}-${{ matrix.tier }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Cluster dirs live under HOPR_LOG_DIR (logs/ci/); the shared chain under IT_TMP_ROOT.
+          # Nothing from /tmp: the other runner on this box writes there too.
           path: |
             nix-build.log
-            /tmp/hopr-chain/*.log
-            /tmp/nix-shell.*/**/hoprd-it-*/**/*.log
-            /tmp/hoprd-it-*/**/*.log
-            /tmp/hopr-nodes/**/*.log
+            logs/ci/
+            ${{ runner.temp }}/hopr-chain/*.log
           if-no-files-found: warn
           retention-days: 14
       - name: Notify failure (Zulip)
         if: failure()
-        uses: zulip/github-actions-zulip/send-message@bd8ec52de371d139ae8313661b7d8318c19266aa # v2.0.1
+        uses: zulip/github-actions-zulip/send-message@f675f2b4eb2a95fae974215476dcb7ad8dfeff6b # v2.0.2
         with:
           api-key: ${{ secrets.ZULIP_API_KEY }}
           email: ${{ secrets.ZULIP_EMAIL }}
@@ -379,11 +462,14 @@ jobs:
           # job died before run.sh got as far as resolving them (a runner/setup problem
           # rather than a stack problem), which is itself the useful signal.
           content: |
-            **Integration throughput test FAILED** (${{ env.RESOLVED_LINE || matrix.line }}) — ${{ env.TRIGGER }}${{ env.TESTS_FROM }}
+            **Integration throughput test FAILED** (${{ env.RESOLVED_LINE || matrix.line }}, ${{ matrix.tier }} tier) — ${{ env.TRIGGER }}${{ env.TESTS_FROM }}
             * hoprd `${{ env.RESOLVED_HOPRD || 'unresolved' }}`
             * edge-client `${{ env.RESOLVED_EDGLI || 'unresolved' }}`
             * blokli `${{ env.RESOLVED_BLOKLI || 'unresolved' }}`
             [Run #${{ github.run_number }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) · logs are attached to the run as an artifact.
+            ```
+            ${{ env.IT_SUMMARY || 'no test summary: the run failed before or outside the tests' }}
+            ```
       - name: Post-run hygiene
         if: always()
         run: |
@@ -421,7 +507,7 @@ jobs:
           # `skipped` is the unlabelled-PR case; a merge group must never pass that way.
           if [ "${RESULT}" = success ]; then exit 0; fi
           if [ "${RESULT}" = skipped ] && [ "${EVENT}" != merge_group ]; then
-            echo "suite did not run for this ${EVENT} (no run-integration label)"
+            echo "suite did not run for this ${EVENT} (no run-integration* label)"
             exit 0
           fi
           echo "::error::integration result is '${RESULT}'"

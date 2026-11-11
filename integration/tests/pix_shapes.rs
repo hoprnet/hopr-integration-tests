@@ -31,7 +31,7 @@ use hoprd_integration_test::{
     pix::{self, PixCounters},
     pix_exit::{self, ExitTelemetry, Trace},
     pump::{self, PumpOpts},
-    shapes, udp_service,
+    shapes, step, udp_service,
 };
 
 /// Relays between Entry and Exit. At least one: PIX derives the share encryption key from the
@@ -242,8 +242,9 @@ async fn close_session(
 /// * Surplus shares were accepted, more than the gate tolerates without progress. Rules that out,
 ///   but not surplus arriving in scattered fragments the gate never had to serve *through*.
 /// * The longest contiguous surplus-only run clears the same bar. That is the run the emission
-///   window actually produces — upstream emits one per window, so a cycle of 512 polynomials
-///   contains two — and it needs the trace, because a before/after pair cannot see contiguity.
+///   window actually produces — upstream emits one per window, so a cycle of 1024 polynomials
+///   contains two at the 512 window — and it needs the trace, because a before/after pair cannot see
+///   contiguity.
 /// * A recovered cycle's accepted-share fraction sits above 1.0. Independent of the trace's
 ///   sampling entirely: the Exit itself recorded, at finalization, that it accepted more shares
 ///   than the cycle's useful target. A sampling cadence too coarse to catch the run cannot make
@@ -286,6 +287,18 @@ fn assert_the_gate_served_the_surplus(gate: &ExitTelemetry, trace: &Trace) {
         "the gate parked on share lag at some point mid-scenario and had resumed by the end, so \
          the before/after counters look clean: {}",
         trace.summary()
+    );
+
+    // No share was lost to the Exit's SURB store overflowing. The store gives up share-less SURBs
+    // first, so a `ring_share` eviction means it held nothing but shares: a share lost for good,
+    // which no surplus-run assertion below would name. (A generation advance clears the store
+    // without evicting, and is not counted here.)
+    assert_eq!(
+        0,
+        gate.ring_share_evictions(),
+        "the Exit's SURB store evicted share-bearing SURBs for capacity during the scenario, each \
+         a PIX share lost for good. {}",
+        gate.summary()
     );
 
     let surplus = gate.shares("surplus").unwrap_or(0);
@@ -489,103 +502,6 @@ async fn drain_for(
         }
     }
     Ok(received)
-}
-
-/// The spike: does a cluster at this geometry admit the Session and complete a cycle at all?
-///
-/// Everything else in this file rests on that, and none of it had ever been run — `tests/pix.rs`
-/// exercises a cycle 1 280x smaller, and hoprd's own soak a different geometry again through a
-/// different harness. What this proves, in order: `--pix-config` reaches the nodes, the Entry's
-/// announced quota lands inside the window the Exit was given, the deposit clears a per-deposit
-/// ceiling derived from a price two orders of magnitude below the demo's, and a cycle of 40 960
-/// packets recovers and sweeps within three nominal cycle lengths.
-///
-/// A failure here is a configuration failure, not a shape failure, which is why it is separate:
-/// the shapes below cannot be read at all until this passes.
-#[test_log::test(tokio::test(flavor = "multi_thread"))]
-#[ignore = "requires PIX-enabled hoprd/hoprd-localcluster binaries and a chain"]
-async fn the_profile_geometry_completes_a_cycle() -> anyhow::Result<()> {
-    shapes::install_profile();
-    cluster::request_cluster_size(3);
-
-    let env = IntegrationEnv::setup_pix_with(shapes::entry_config()?).await?;
-    let (session, exit_addr) = env
-        .open_pix_session_with(
-            HOPS,
-            HOPS,
-            shapes::surb_balancer(),
-            hoprd_integration_test::SessionTarget::ExitNode(0),
-        )
-        .await?;
-    let exit = node_for(&env, exit_addr)?;
-
-    let before = pix::sample_exit(&exit).await?;
-    let paid_before = pix::node_balances(&exit).await?;
-    anyhow::ensure!(
-        before.observable(),
-        "the Exit exposes no hopr_strategy_pix_* counters at all — it was built without \
-         `hopr-strategy/telemetry`, so nothing here can be measured"
-    );
-
-    let gate_before = pix_exit::sample(&exit).await?;
-    let sampler = pix_exit::Sampler::start(&exit);
-
-    let (mut rx, mut tx) = tokio::io::split(session);
-    let payload = payload_for(0, 1);
-    tracing::info!(
-        bytes = payload.len(),
-        cycle_packets = shapes::CYCLE_PACKETS,
-        "offering one cycle of traffic"
-    );
-
-    let transfer = pump::pump_halves(
-        &mut rx,
-        &mut tx,
-        &payload,
-        "spike",
-        sweep_budget(1),
-        PumpOpts {
-            pace: Some(PACE),
-            chunk: Some(CHUNK),
-            ..Default::default()
-        },
-    )
-    .await?;
-    tracing::info!(
-        arrival_pct = transfer.arrival_pct(),
-        mbps = transfer.throughput_at(0.9).unwrap_or(0.0),
-        outcome = ?transfer.outcome,
-        "traffic finished"
-    );
-    anyhow::ensure!(
-        transfer.arrival_pct() > 0.0,
-        "not one byte came back, so the Session never carried traffic: {:?}",
-        transfer.outcome
-    );
-    assert_intact(&transfer, "spike");
-
-    let delta = await_sweeps(&exit, &before, 1, sweep_budget(1)).await?;
-    let trace = sampler.finish().await;
-    let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
-    assert_eq!(
-        0,
-        delta.deposits_timed_out().unwrap_or(0),
-        "the Exit gave up waiting for a deposit, so the geometry's deadlines and the Entry's \
-         tracking window disagree: {}",
-        delta.summary()
-    );
-    assert!(
-        delta.sweeps().unwrap_or(0) >= 1,
-        "no cycle was swept at the profile geometry, so nothing below can be measured: {}",
-        delta.summary()
-    );
-
-    assert_the_gate_served_the_surplus(&gate, &trace);
-    assert_exit_was_paid(&exit, &paid_before, delta.sweeps().unwrap_or(0), 1).await?;
-
-    close_session(&mut tx, &exit).await;
-    tracing::info!(summary = %delta.summary(), "profile geometry spike PASSED");
-    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1007,23 +923,37 @@ async fn an_upload_session_completes_on_fill() -> anyhow::Result<()> {
 ///
 /// Phases are tagged so each is attributed its own arrivals, and separated by `drain_until_quiet`
 /// so a phase's tail is not counted as the next one's.
+///
+/// It is also the geometry check every other shape rests on, which is why it runs in the PR tier:
+/// its bulk phase is a whole cycle at the full rate, so a `settlement` step that sweeps nothing
+/// means `--pix-config` did not reach the nodes, the Entry's quota fell outside the Exit's window,
+/// or a cycle of 40 960 packets cannot recover within three nominal cycle lengths.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires PIX-enabled hoprd/hoprd-localcluster binaries and a chain"]
 async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
     shapes::install_profile();
     cluster::request_cluster_size(3);
 
-    let env = IntegrationEnv::setup_pix_with(shapes::entry_config()?).await?;
-    let (session, exit_addr) = env
-        .open_pix_session_with(
-            HOPS,
-            HOPS,
-            shapes::surb_balancer(),
-            hoprd_integration_test::SessionTarget::ExitNode(0),
-        )
-        .await?;
-    let exit = node_for(&env, exit_addr)?;
-    let before = pix::sample_exit(&exit).await?;
+    let (_env, session, exit, before) = step("setup", async {
+        let env = IntegrationEnv::setup_pix_with(shapes::entry_config()?).await?;
+        let (session, exit_addr) = env
+            .open_pix_session_with(
+                HOPS,
+                HOPS,
+                shapes::surb_balancer(),
+                hoprd_integration_test::SessionTarget::ExitNode(0),
+            )
+            .await?;
+        let exit = node_for(&env, exit_addr)?;
+        let before = pix::sample_exit(&exit).await?;
+        anyhow::ensure!(
+            before.observable(),
+            "the Exit exposes no hopr_strategy_pix_* counters at all — it was built without \
+             `hopr-strategy/telemetry`, so nothing here can be measured"
+        );
+        Ok((env, session, exit, before))
+    })
+    .await?;
     let paid_before = pix::node_balances(&exit).await?;
     let gate_before = pix_exit::sample(&exit).await?;
     let sampler = pix_exit::Sampler::start(&exit);
@@ -1033,37 +963,42 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
     //    cycle would take twenty minutes to offer, and the point of this phase is only that the
     //    cycle is *part*-finished by the application when it stops — so fill has a real remainder
     //    to plan against rather than a whole cycle.
-    let browsing = pump::pump_halves(
-        &mut rx,
-        &mut tx,
-        &burst_payload_for(
-            0,
-            40 * 1024,
-            Duration::from_secs(3),
-            Duration::from_secs(180),
-        ),
-        "mixed/browsing",
-        Duration::from_secs(300),
-        PumpOpts {
-            pace: Some(PACE),
-            chunk: Some(CHUNK),
-            phase: Some(0),
-            shape: Some(pump::Shape::Burst {
-                on: 40 * 1024,
-                off: Duration::from_secs(3),
-            }),
-            idle_budget: Some(Duration::from_secs(60)),
-            ..Default::default()
-        },
-    )
+    step("browsing", async {
+        let browsing = pump::pump_halves(
+            &mut rx,
+            &mut tx,
+            &burst_payload_for(
+                0,
+                40 * 1024,
+                Duration::from_secs(3),
+                Duration::from_secs(180),
+            ),
+            "mixed/browsing",
+            Duration::from_secs(300),
+            PumpOpts {
+                pace: Some(PACE),
+                chunk: Some(CHUNK),
+                phase: Some(0),
+                shape: Some(pump::Shape::Burst {
+                    on: 40 * 1024,
+                    off: Duration::from_secs(3),
+                }),
+                idle_budget: Some(Duration::from_secs(60)),
+                ..Default::default()
+            },
+        )
+        .await?;
+        tracing::info!(
+            arrival_pct = browsing.arrival_pct(),
+            "mixed: browsing phase done"
+        );
+        assert_intact(&browsing, "mixed/browsing");
+        let leftover =
+            pump::drain_until_quiet(&mut rx, Duration::from_secs(5), "mixed/drain").await;
+        tracing::info!(leftover, "mixed: settled before going quiet");
+        Ok(())
+    })
     .await?;
-    tracing::info!(
-        arrival_pct = browsing.arrival_pct(),
-        "mixed: browsing phase done"
-    );
-    assert_intact(&browsing, "mixed/browsing");
-    let leftover = pump::drain_until_quiet(&mut rx, Duration::from_secs(5), "mixed/drain").await;
-    tracing::info!(leftover, "mixed: settled before going quiet");
 
     // 2. Quiet: no application traffic at all for two minutes. The cycle keeps its deadline.
     tracing::info!("mixed: going quiet for 120s");
@@ -1071,40 +1006,45 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
 
     // 3. Bulk: a whole cycle at the full rate, which is what a client resuming a transfer looks
     //    like — and what makes fill have to yield rather than keep sending on top of it.
-    let bulk = pump::pump_halves(
-        &mut rx,
-        &mut tx,
-        &payload_for(1, 1),
-        "mixed/bulk",
-        sweep_budget(2),
-        PumpOpts {
-            pace: Some(PACE),
-            chunk: Some(CHUNK),
-            phase: Some(1),
-            idle_budget: Some(Duration::from_secs(60)),
-            ..Default::default()
-        },
-    )
-    .await?;
-    tracing::info!(
-        arrival_pct = bulk.arrival_pct(),
-        foreign_bytes = bulk.foreign_bytes,
-        outcome = ?bulk.outcome,
-        "mixed: bulk phase done"
-    );
-    assert!(
-        bulk.arrival_pct() > 50.0,
-        "the Session did not carry traffic again after going quiet, so it did not survive the \
+    step("bulk", async {
+        let bulk = pump::pump_halves(
+            &mut rx,
+            &mut tx,
+            &payload_for(1, 1),
+            "mixed/bulk",
+            sweep_budget(2),
+            PumpOpts {
+                pace: Some(PACE),
+                chunk: Some(CHUNK),
+                phase: Some(1),
+                idle_budget: Some(Duration::from_secs(60)),
+                ..Default::default()
+            },
+        )
+        .await?;
+        tracing::info!(
+            arrival_pct = bulk.arrival_pct(),
+            foreign_bytes = bulk.foreign_bytes,
+            outcome = ?bulk.outcome,
+            "mixed: bulk phase done"
+        );
+        assert!(
+            bulk.arrival_pct() > 50.0,
+            "the Session did not carry traffic again after going quiet, so it did not survive the \
          transition: {:.0}% came back",
-        bulk.arrival_pct()
-    );
-    assert_intact(&bulk, "mixed/bulk");
+            bulk.arrival_pct()
+        );
+        assert_intact(&bulk, "mixed/bulk");
+        Ok(())
+    })
+    .await?;
 
     // The bulk phase finishes cycle 1 and leaves cycle 2 part-served, so fill finishes it, aiming at
     // `0.75 x MAX_RECOVERY_TIME` from the cycle's start. That start lies inside the bulk phase, so
     // the aim point measured from here bounds it. It is 540 s at this profile, inside
     // `sweep_budget(1)`, but a profile with a later aim point must not cut the wait short.
     let fill_aim = shapes::MAX_RECOVERY_TIME.mul_f64(shapes::FILL_FINISH_FRACTION);
+    step("settlement", async {
     let delta = await_sweeps(&exit, &before, 2, sweep_budget(1).max(fill_aim)).await?;
     let trace = sampler.finish().await;
     let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
@@ -1127,4 +1067,6 @@ async fn a_mixed_session_sustains_its_cycles() -> anyhow::Result<()> {
     close_session(&mut tx, &exit).await;
     tracing::info!(summary = %delta.summary(), "mixed shape PASSED");
     Ok(())
+    })
+    .await
 }

@@ -251,19 +251,25 @@ async fn edgli_entry_deposits_should_be_swept_into_the_exit_safe() -> anyhow::Re
     );
 
     let env = IntegrationEnv::setup_pix(budget).await?;
-    let (session, exit_addr) = env.open_unreliable_session_paths(HOPS, HOPS).await?;
-    let exit = node_for(&env, exit_addr)?;
-    tracing::info!(exit = %exit_addr, elapsed = ?t0.elapsed(), "PIX session open");
 
-    // Both sides move wxHOPR through their Safe: a deposit debits the entry's, a sweep credits the
-    // Exit's. Sampled after the channels are funded, so the stakes are already out.
-    let exit_before = pix::node_balances(&exit).await?;
-    let exit_counters_before = pix::sample_exit(&exit).await?;
+    // Sampled *before* the Session opens. Establishing it hands out SSA #1's deposit address and
+    // edgli deposits for it after a 500 ms buffer: the transfer is mined ~0.5 s after `open`
+    // returns, the Exit confirms it 3-6 s later. Sampling after `open` can land on the far side of
+    // that first deposit and drop one cycle from the entry's delta (8 vs 9 and 6 vs 7 in the two
+    // failing runs). A further channel open can still land in the widened window, but that only
+    // lowers the entry's Safe, which `safe_drop >= recovered` tolerates. The Exit's balance is read
+    // before its counters, as at the end: `recovered` is paired with `cycles` derived from it.
     let entry_before = env.entry_safe_balance().await?;
     let entry_counters_before = pix::sample_entry();
+
+    let (session, exit_addr) = env.open_unreliable_session_paths(HOPS, HOPS).await?;
+    let exit = node_for(&env, exit_addr)?;
+    let exit_before = pix::node_balances(&exit).await?;
+    let exit_counters_before = pix::sample_exit(&exit).await?;
     tracing::info!(
-        entry_safe = %entry_before, exit_safe = %exit_before.safe,
-        "balances before the session"
+        exit = %exit_addr, entry_safe = %entry_before, exit_safe = %exit_before.safe,
+        elapsed = ?t0.elapsed(),
+        "PIX session open; baselines taken just before it"
     );
 
     // The one precondition nothing else checks. The localcluster funds each extra identity with
@@ -506,13 +512,17 @@ async fn a_session_should_close_when_the_entry_can_no_longer_deposit() -> anyhow
     );
 
     let env = IntegrationEnv::setup_pix(budget).await?;
+    // The Entry's side is read before the Session opens: the Exit asks for the first cycle as the
+    // Session is established, and its deposit can land before the opening returns (the paced SURB
+    // fill makes the opening take longer than the deposit at a small SURB target). Read after it,
+    // the first deposit would be missing from the count the budget is asserted against.
+    let entry_counters_before = pix::sample_entry();
+    let entry_safe_before = env.entry_safe_balance().await?;
     let (session, exit_addr) = env.open_unreliable_session_paths(HOPS, HOPS).await?;
     let exit = node_for(&env, exit_addr)?;
 
     let exit_before = pix::node_balances(&exit).await?;
     let exit_counters_before = pix::sample_exit(&exit).await?;
-    let entry_counters_before = pix::sample_entry();
-    let entry_safe_before = env.entry_safe_balance().await?;
 
     // The budget has to be what binds, so the Safe must be able to cover it — otherwise the entry
     // runs dry first and the run ends for a reason with no assertion behind it.

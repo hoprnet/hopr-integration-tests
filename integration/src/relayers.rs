@@ -29,6 +29,14 @@ const FORWARDED_TYPE: &str = "forwarded";
 #[derive(Debug, Clone, Default)]
 pub struct ForwardedSample(HashMap<Address, u64>);
 
+impl ForwardedSample {
+    /// Whether every node in `nodes` answered. [`sample`] drops a node whose scrape failed, which
+    /// shrinks the denominator of any share computed from it.
+    pub fn covers(&self, nodes: &[NodeInfo]) -> bool {
+        nodes.iter().all(|node| self.0.contains_key(&node.address))
+    }
+}
+
 /// Per-relayer share of the return traffic observed between two samples.
 #[derive(Debug, Clone)]
 pub struct RelayerSpread {

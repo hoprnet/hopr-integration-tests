@@ -14,13 +14,13 @@ it_env() {
   export REPO_ROOT="${LIB_ROOT}"
   export HOPRD_BIN="${HOPRD_BIN:-${LIB_ROOT}/result-hoprd/bin/hoprd}"
   export HOPRD_LOCALCLUSTER_BIN="${HOPRD_LOCALCLUSTER_BIN:-${LIB_ROOT}/result-localcluster/bin/hoprd-localcluster}"
-  export HOPRD_CHAIN_URL="${HOPRD_CHAIN_URL:-http://localhost:8080}"
+  export BLOKLI_API_PORT="${BLOKLI_API_PORT:-8080}"
+  export HOPRD_CHAIN_URL="${HOPRD_CHAIN_URL:-http://localhost:${BLOKLI_API_PORT}}"
   export RUST_LOG="${RUST_LOG:-info,edgli=debug}"
   export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
   export HOPRD_PUMP_MBPS="${HOPRD_PUMP_MBPS:-0.5}"
-  export BLOKLI_API_PORT="${BLOKLI_API_PORT:-8080}"
   export ANVIL_PORT="${ANVIL_PORT:-8545}"
-  export CHAIN_DATA_DIR="${CHAIN_DATA_DIR:-/tmp/hopr-chain}"
+  export CHAIN_DATA_DIR="${CHAIN_DATA_DIR:-${IT_TMP_ROOT:-/tmp}/hopr-chain}"
   grep -qa 'frozen-identities' "${HOPRD_LOCALCLUSTER_BIN}" 2>/dev/null && export HOPRD_FROZEN_IDENTITIES=1
   return 0
 }
@@ -110,7 +110,7 @@ line_refs() {
   v5)
     HOPRD_LINE="${HOPRD_LINE:-main}"
     EDGLI_REF="${EDGLI_REF:-main}"
-    BLOKLI_DEFAULT="release/0.14"
+    BLOKLI_DEFAULT="${BLOKLI_DEFAULT:-main}"
     ;;
   *)
     echo "unknown LINE '${LINE}' (expected v4 or v5)" >&2
@@ -231,7 +231,7 @@ chain_up() {
   local anvil="${ANVIL_BIN:-${LIB_ROOT}/result-foundry/bin/anvil}"
   local bloklid="${BLOKLID_BIN:-${LIB_ROOT}/result-bloklid/bin/bloklid}"
   local deployer="${DEPLOYER_BIN:-${LIB_ROOT}/result-bloklid/bin/blokli-contract-deployer}"
-  local dir="${CHAIN_DATA_DIR:-/tmp/hopr-chain}"
+  local dir="${CHAIN_DATA_DIR:-${IT_TMP_ROOT:-/tmp}/hopr-chain}"
   local anvil_port="${ANVIL_PORT:-8545}"
   local api_port="${BLOKLI_API_PORT:-8080}"
   local rpc_url="http://127.0.0.1:${anvil_port}"
@@ -299,7 +299,6 @@ enable_logs_snapshot = false
 [indexer.subscription]
 event_bus_capacity = 100
 shutdown_signal_capacity = 10
-batch_size = 50
 
 [api]
 bind_address = "0.0.0.0:${api_port}"
@@ -325,7 +324,7 @@ EOF
 # Tails of the chain logs, at the moment they are worth reading. chain_up keeps them in files,
 # so a startup failure is otherwise a bare "chain died" with no cause.
 chain_logs() {
-  local dir="${CHAIN_DATA_DIR:-/tmp/hopr-chain}" f
+  local dir="${CHAIN_DATA_DIR:-${IT_TMP_ROOT:-/tmp}/hopr-chain}" f
   for f in bloklid.log anvil.log deployer.log; do
     [ -s "${dir}/${f}" ] || continue
     echo "── last 40 lines of ${dir}/${f} ──" >&2
@@ -357,27 +356,34 @@ chain_start() {
 # pkill matching nothing is the normal case, not a failure.
 chain_stop() {
   [ -n "${CHAIN_PID}" ] && kill "${CHAIN_PID}" 2>/dev/null || true
-  # Safety net for a chain whose wrapper died without running its trap.
-  pkill -f "result-bloklid/bin/bloklid" 2>/dev/null || true
-  pkill -f "result-foundry/bin/anvil" 2>/dev/null || true
+  # Safety net for a chain whose wrapper died without running its trap. Scoped to this
+  # checkout's binaries: another job on the same host runs the same ones from its own.
+  pkill -f "$(ere_escape "${LIB_ROOT}/result-bloklid/bin/bloklid")" 2>/dev/null || true
+  pkill -f "$(ere_escape "${LIB_ROOT}/result-foundry/bin/anvil")" 2>/dev/null || true
   wait "${CHAIN_PID}" 2>/dev/null || true
   CHAIN_PID=""
+}
+
+# `pkill -f`/`pgrep -f` read an ERE, so a `+`, `(` or `[` in a path would either stop the
+# pattern matching or make pgrep error.
+ere_escape() {
+  printf '%s' "$1" | sed 's/[][\.^$*+?(){}|]/\\&/g'
 }
 
 # The cargo test process tears its own cluster down, but localcluster's SIGINT→hoprd reaping is
 # async and can lag. Stray nodes steal CPU from the next scenario — on the crypto-heavy 1-hop
 # path that alone tanks arrival — so force-reap and let the machine idle first.
 #
-# Matched against ${HOPRD_BIN} rather than a hardcoded path: `just pix` points it at a cargo
-# target dir. `pkill -f`/`pgrep -f` read an ERE, so a `+`, `(` or `[` in that path would either
-# stop the pattern matching or make pgrep error — escaped once here.
+# Matched against the full binary paths rather than names: `just pix` points them at a cargo
+# target dir, and another job on the same host runs the same binaries from its own checkout.
 reap_nodes() {
-  local bin_re
-  bin_re="$(printf '%s' "${HOPRD_BIN:-result-hoprd/bin/hoprd}" | sed 's/[][\.^$*+?(){}|]/\\&/g')"
-  pkill -f "hoprd-localcluster" 2>/dev/null || true
+  local bin_re lc_re
+  bin_re="$(ere_escape "${HOPRD_BIN:-result-hoprd/bin/hoprd}")"
+  lc_re="$(ere_escape "${HOPRD_LOCALCLUSTER_BIN:-hoprd-localcluster}")"
+  pkill -f "${lc_re}" 2>/dev/null || true
   pkill -f "${bin_re}" 2>/dev/null || true
   for _ in $(seq 1 30); do
-    pgrep -f "${bin_re}|hoprd-localcluster" >/dev/null 2>&1 || break
+    pgrep -f "${bin_re}|${lc_re}" >/dev/null 2>&1 || break
     sleep 1
   done
   sleep 5
@@ -392,7 +398,7 @@ cluster_up() {
   "${HOPRD_LOCALCLUSTER_BIN}" \
     --size "${HOPRD_CLUSTER_SIZE:-3}" --extra-identities 1 \
     --api-host 127.0.0.1 \
-    --api-port-base 13000 --p2p-port-base 19000 \
+    --api-port-base "${HOPRD_API_PORT_BASE:-13000}" --p2p-port-base "${HOPRD_P2P_PORT_BASE:-19000}" \
     --api-token test-token-localcluster \
     --hoprd-bin "${HOPRD_BIN}" \
     --chain-url "${HOPRD_CHAIN_URL}" \
@@ -417,32 +423,198 @@ cluster_wait() {
 # The one cargo invocation. Skips the dev-shell wrap when already inside one — `just ci` and CI
 # both enter it before calling the runner, which used to open a second shell per scenario.
 # Extra args after the target are libtest filters; SKIP_SCENARIOS names tests to hold out.
+# The test binary builds in release unless TEST_PROFILE=debug: in debug, return_path at three hops
+# pins the test process at ~1800 % CPU and v5's in-process PIX Entry starves and over-fills.
+# `list_scenarios` takes the same profile, so listing and running share one binary.
 cargo_it() {
   local target="${1:?usage: cargo_it <test-target> [filter...]}"
   shift
   local -a wrap=()
   [ -z "${IN_NIX_SHELL:-}" ] && [ "${HOPRNET_SHELL:-}" != none ] &&
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
-  local -a test_args cargo_features skips=()
+  local -a test_args cargo_features profile=() skips=()
+  [ "${TEST_PROFILE:-release}" = release ] && profile=(--release)
   read -r -a test_args <<<"${TEST_ARGS:-}"
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
   local held
   for held in ${SKIP_SCENARIOS:-}; do skips+=(--skip "${held}"); done
   # Bash 3.2 (macOS /bin/bash) treats empty arrays as unset under `set -u`.
   ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
-    ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" "$@" \
+    ${profile[@]+"${profile[@]}"} ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" "$@" \
     --no-fail-fast -- --include-ignored --test-threads=1 ${skips[@]+"${skips[@]}"} ${test_args[@]+"${test_args[@]}"}
+}
+
+# Runs LINE/TIER's suites on the chain the caller started, then prints the summary; non-zero if any
+# suite failed. Suites do not short-circuit, so a red run reports everything broken. v5 is tiered
+# (#65, docs/v5-test-matrix.md): `pr` gates merges on the happy paths, `nightly` runs the rest; v4
+# runs everything on either. PIX_BIN, a hoprd with the deposit pool, enables the PIX suites.
+# `rotsee` needs a funded Gnosis identity and `profiling` emits traces, so neither is a suite here.
+run_tier() {
+  local suite_rc=0 nodes_bin="${HOPRD_BIN}" mixed scenarios scenario held_out
+  export CHAIN_SHARED=1
+  IT_RESULTS="$(mktemp)" IT_STEP_LOG="$(mktemp)"
+  export IT_RESULTS IT_STEP_LOG
+
+  in_tier() { [ "${LINE}" = v4 ] || [ "${TIER}" = "$1" ]; }
+  run_suite() { # target, then any scenarios to HOLD OUT of it
+    local target="$1"
+    shift
+    echo "═══════ suite: ${target} ═══════"
+    if ! TEST_TARGETS="${target}" SCENARIOS="${SCENARIOS:-}" SCENARIOS_EXCEPT="$*" \
+      bash "${LIB_ROOT}/scripts/integration/run-binchain.sh"; then
+      echo "suite ${target} FAILED" >&2
+      suite_rc=1
+    fi
+  }
+
+  echo "running integration tests (binary chain, ${LINE}, tier ${TIER}) ..."
+  in_tier pr && run_suite integration
+  # v5 only: the scenario drives the embedded edgli, which the v4 dependency set does not carry.
+  [ "${LINE}" = v5 ] && in_tier pr && run_suite dead_last_hop
+  in_tier nightly && run_suite exit_origination
+  # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore
+  # FAILS against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there.
+
+  if [ -n "${PIX_BIN:-}" ]; then
+    HOPRD_BIN="${PIX_BIN}"
+    in_tier pr && run_suite pix
+    # `pix_shapes` also needs a localcluster that takes `--pix-config`: the bare `--enable-pix` is
+    # a 32-packet demo cycle no traffic shape fits inside, so it is probed rather than assumed.
+    if pix_check_localcluster "${HOPRD_LOCALCLUSTER_BIN}" 2>/dev/null; then
+      # The mixed shape also proves the production geometry completes a cycle, so it gates PRs.
+      mixed=a_mixed_session_sustains_its_cycles
+      in_tier pr && SCENARIOS="${mixed}" run_suite pix_shapes
+      in_tier nightly && run_suite pix_shapes "${mixed}"
+      # Each scenario kills a cluster node, so one cluster each, like return_path.
+      if in_tier nightly; then
+        for scenario in $(list_scenarios pix_relay_loss); do
+          SCENARIOS="${scenario}" run_suite pix_relay_loss
+        done
+      fi
+    else
+      echo "::error::${HOPRD_LOCALCLUSTER_BIN} has no --pix-config, so the pix_shapes suite cannot" >&2
+      echo "state its geometry. Use a newer hoprd ref." >&2
+      suite_rc=1
+    fi
+    HOPRD_BIN="${nodes_bin}"
+  fi
+
+  # `return_path` last and on a fresh chain: its clusters leave nodes channelled but offline, and
+  # the scenarios kill nodes or cut links, so one cluster each. The tempering finding is held out on
+  # both lines: its busiest/least-busy ratio follows the run's live scores (1.27 to 4.47 over 40 v5
+  # runs against a bound of 3.0), so a red says nothing. The spread gate runs on v5, where it
+  # passed all 40 (busiest relayer at most 48 % against 50 %); v4 keeps it out, untested there.
+  #
+  # v4 runs the 1-hop scenarios only: it mitigates a dead relayer one hop deep (hoprnet#8498) and the
+  # 2- and 3-hop ones wait for the v5 fix. v5 runs them all in the nightly tier: the multi-hop
+  # scenarios need the dead-relayer recovery (hoprnet#8506, #8576, #8581) in edge-client's lock.
+  if [ "${LINE}" = v4 ] || in_tier nightly; then
+    chain_stop
+    chain_start
+    scenarios="$(list_scenarios return_path)"
+    held_out="return_paths_should_track_the_tempered_score"
+    if [ "${LINE}" = v4 ]; then
+      held_out="${held_out} return_paths_should_spread_across_distinct_relayers"
+      held_out="${held_out} a_two_hop_session_should_survive_exit_losing_its_return_relayer"
+      held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
+      held_out="${held_out} a_three_hop_session_should_survive_relayer_loss"
+      held_out="${held_out} a_three_hop_session_should_survive_a_stalling_relayer"
+    fi
+    for scenario in ${scenarios}; do
+      case " ${held_out} " in *" ${scenario} "*) continue ;; esac
+      SCENARIOS="${scenario}" run_suite return_path
+    done
+  fi
+
+  print_summary
+  return "${suite_rc}"
+}
+
+# Appends `target<TAB>test<TAB>ok|FAILED<TAB>error` to IT_RESULTS from one cargo run's output. With
+# one test thread libtest prints `test NAME ... `, then the test's own output, then `ok`/`FAILED`
+# (on the same line only when the test printed nothing). The error is the test's `Error:` line or
+# panic message, inline under --nocapture or in the `---- NAME stdout ----` block otherwise.
+record_results() { # target, captured output, cargo rc
+  local target="$1" out="$2" rc="$3" before
+  [ -n "${IT_RESULTS:-}" ] || return 0
+  before="$(wc -l <"${IT_RESULTS}")"
+  awk -v target="${target}" '
+    {
+      line = $0
+      if (match(line, /^test [^ ]+ \.\.\. /)) {
+        split(line, f, " "); cur = f[2]; line = substr(line, RLENGTH + 1)
+      }
+      if (line == "ok" || line == "FAILED") {
+        if (cur != "" && !(cur in status)) { order[++n] = cur; status[cur] = line }
+        if (!(cur in err) && pending != "") err[cur] = pending
+        pending = ""
+        next
+      }
+      if (match(line, /^---- [^ ]+ stdout ----$/)) { split(line, f, " "); cur = f[2]; failures = 1; next }
+      msg = ""
+      if ((i = index(line, "Error: ")) > 0) msg = substr(line, i + 7)
+      else if (index(line, "panicked at") > 0 && (getline nxt) > 0) msg = nxt
+      # Printed before its `test NAME` line when stdout and stderr reach the log separately.
+      if (msg == "") next
+      if (failures || (cur != "" && !(cur in status))) err[cur] = msg
+      else pending = msg
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        t = order[i]
+        printf "%s\t%s\t%s\t%s\n", target, t, status[t], (status[t] == "FAILED" ? err[t] : "")
+      }
+    }
+  ' "${out}" >>"${IT_RESULTS}"
+  if [ "${rc}" != 0 ] && [ "$(wc -l <"${IT_RESULTS}")" = "${before}" ]; then
+    printf '%s\t*\tFAILED\tno test ran (build or harness error)\n' "${target}" >>"${IT_RESULTS}"
+  fi
+}
+
+# pytest-style end-of-run report from IT_RESULTS, naming the failing step from IT_STEP_LOG. Mirrored
+# into the job summary, and its failures into IT_SUMMARY for the failure notification.
+print_summary() {
+  [ -s "${IT_RESULTS:-}" ] || return 0
+  local report
+  report="$(awk -F'\t' -v steps="${IT_STEP_LOG:-/dev/null}" -v secs="${SECONDS}" '
+    BEGIN {
+      while ((getline l < steps) > 0) {
+        split(l, s, "\t")
+        if (s[3] == "failed") step[s[1]] = "step `" s[2] "`: " s[4]
+      }
+    }
+    $3 == "ok" { print "PASSED " $1 "::" $2; p++; next }
+    {
+      print "FAILED " $1 "::" $2; f++
+      why = ($2 in step) ? step[$2] : $4
+      if (why != "") print "       " why
+    }
+    END { printf "%d passed, %d failed in %dm%02ds\n", p, f, secs / 60, secs % 60 }
+  ' "${IT_RESULTS}")"
+  printf '═══════ summary ═══════\n%s\n' "${report}"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    local fence='```'
+    printf '### Integration (%s)\n%s\n%s\n%s\n' "${LINE:-}${TIER:+, ${TIER}}" "${fence}" "${report}" "${fence}" >>"${GITHUB_STEP_SUMMARY}"
+  fi
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    {
+      echo "IT_SUMMARY<<IT_SUMMARY_EOF"
+      grep -vE '^PASSED ' <<<"${report}"
+      echo "IT_SUMMARY_EOF"
+    } >>"${GITHUB_ENV}"
+  fi
 }
 
 # Ask the binary what it carries, so a new scenario runs the moment it is written.
 list_scenarios() {
   local target="${1:?usage: list_scenarios <test-target>}"
-  local -a wrap=() cargo_features
+  local -a wrap=() cargo_features profile=()
   [ -z "${IN_NIX_SHELL:-}" ] && [ "${HOPRNET_SHELL:-}" != none ] &&
     wrap=(nix develop "${HOPRNET_SHELL:-github:hoprnet/hoprnet}" -c)
+  [ "${TEST_PROFILE:-release}" = release ] && profile=(--release)
   read -r -a cargo_features <<<"${CARGO_FEATURES:-}"
   ${wrap[@]+"${wrap[@]}"} cargo test --manifest-path "${LIB_ROOT}/integration/Cargo.toml" \
-    ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" -- --list |
+    ${profile[@]+"${profile[@]}"} ${cargo_features[@]+"${cargo_features[@]}"} --test "${target}" -- --list |
     sed -n 's/: test$//p' | tr '\n' ' '
 }
 
@@ -483,10 +655,90 @@ pix_build() {
   export HOPRD_LOCALCLUSTER_BIN="${src}/target/release/hoprd-localcluster"
 }
 
-# What "the state" is, in one place. Was four divergent lists.
+# Build hoprd + hoprd-localcluster from a hoprd checkout with TRACE logs compiled in.
+#
+# hopr-lib turns on `tracing/release_max_level_debug`, which removes every TRACE call from a
+# release build. That cap only applies while debug assertions are off, so this build turns them
+# on (the same trick as `[profile.tracer]` in integration/Cargo.toml). Cargo reads profile
+# settings from the environment, so hoprd needs no change for it.
+#
+# Debug assertions change the binary: `debug_assert!` checks run, and code under
+# `cfg(debug_assertions)` is compiled in. LTO is also off and codegen units are up, to keep the
+# build fast. These binaries are for reading logs, never a performance baseline.
+#
+# They go to `<hoprd>/target/trace/`, apart from a normal release build. The settings and the exact
+# hopr-* dependency revisions are written next to them in `trace-build.txt`.
+#
+# Args: <hoprd-src> [expected-branch]. With an expected branch (the release line's `hoprd_ref`),
+# a checkout on another branch is reported, because the binaries would not match that line.
+trace_build() {
+  local src expected_ref="${2:-}"
+  src="$(cd "${1:?usage: trace_build <hoprd-src> [expected-branch]}" 2>/dev/null && pwd)" || {
+    echo "HOPRD_SRC '${1}' is not a directory — point it at a hoprd checkout." >&2
+    return 2
+  }
+  local target_dir="${src}/target/trace"
+  local branch rev dirty=""
+  branch="$(git -C "${src}" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  rev="$(git -C "${src}" rev-parse HEAD 2>/dev/null)"
+  git -C "${src}" diff --quiet HEAD 2>/dev/null || dirty="-dirty"
+  # A detached checkout (e.g. a worktree of origin/release/4.1) has no branch name; it matches
+  # the line when it is at the tip of the remote branch.
+  [ "${branch}" = HEAD ] && branch="(detached)"
+  if [ -n "${expected_ref}" ] && [ "${branch}" != "${expected_ref}" ] &&
+    [ "${rev}" != "$(git -C "${src}" rev-parse --verify -q "origin/${expected_ref}" 2>/dev/null)" ]; then
+    echo "note: ${src} is on '${branch}', not '${expected_ref}' (this line's hoprd branch)." >&2
+  fi
+  echo "building hoprd + hoprd-localcluster with TRACE logs from ${src} (${branch} ${rev:0:10}${dirty})"
+  (
+    cd "${src}" || exit 1
+    export CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+      CARGO_PROFILE_RELEASE_LTO=false \
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+      CARGO_TARGET_DIR="${target_dir}"
+    # Same package and feature selection as the flake's binary-hoprd and
+    # binary-hoprd-localcluster: default features, no PIX test strategy (see `just pix`).
+    nix develop -c cargo build --release -p hoprd -p hoprd-api &&
+      nix develop -c cargo build --release -p hoprd-localcluster
+  ) || return 1
+  export HOPRD_BIN="${target_dir}/release/hoprd"
+  export HOPRD_LOCALCLUSTER_BIN="${target_dir}/release/hoprd-localcluster"
+  export HOPRD_TRACE_BUILD_INFO="${target_dir}/release/trace-build.txt"
+  {
+    echo "hoprd_src=${src}"
+    echo "hoprd_branch=${branch}"
+    echo "hoprd_rev=${rev}${dirty}"
+    echo "profile=release debug-assertions=true lto=false codegen-units=16"
+    # The dev shell prints a banner first; keep only rustc's own line.
+    echo "rustc=$(cd "${src}" && nix develop -c rustc --version 2>/dev/null | grep '^rustc ' | tail -1)"
+    echo "cargo_lock_sha256=$({ sha256sum "${src}/Cargo.lock" || shasum -a 256 "${src}/Cargo.lock"; } 2>/dev/null | cut -d' ' -f1)"
+    echo "# hopr-* crates in Cargo.lock: name version source"
+    awk '/^name = "hopr-/ { n = $3; getline; v = $3; getline; s = ($1 == "source") ? $3 : "(workspace)"; gsub(/"/, "", n); gsub(/"/, "", v); gsub(/"/, "", s); print n, v, s }' \
+      "${src}/Cargo.lock"
+  } >"${HOPRD_TRACE_BUILD_INFO}"
+  echo "build settings and dependency revisions: ${HOPRD_TRACE_BUILD_INFO}"
+}
+
+# Says so when a run asked for TRACE logs but a binary was built without them. tracing prints
+# "the static max level is `debug`" at start-up in that case, and otherwise nothing changes.
+# With a marker file, only logs written after it are checked, so older runs in the same
+# folder do not count.
+warn_if_trace_capped() {
+  local dir="${1:?usage: warn_if_trace_capped <log-dir> [marker-file]}" marker="${2:-}"
+  local -a newer=()
+  [ -n "${marker}" ] && newer=(-newer "${marker}")
+  find "${dir}" -name '*.log' ${newer[@]+"${newer[@]}"} -exec grep -qs 'the static max level is' {} \; -print |
+    grep -q . || return 0
+  echo "note: RUST_LOG asks for TRACE, but some binaries were built without TRACE logs." >&2
+  echo '      Run `just integration-trace` to build hoprd with TRACE logs.' >&2
+}
+
+# What "the state" is, in one place. Was four divergent lists. Under IT_TMP_ROOT, which CI sets
+# per runner, so a job never deletes the live state of another job on the same host.
 clean_tmp() {
-  rm -rf /tmp/hopr-chain /tmp/hopr-nodes /tmp/hopr-it /tmp/hoprd-it-* 2>/dev/null || true
-  find /tmp -maxdepth 3 -type d -name 'hoprd-it-*' -exec rm -rf {} + 2>/dev/null || true
+  local root="${IT_TMP_ROOT:-/tmp}"
+  rm -rf "${root}/hopr-chain" "${root}/hopr-nodes" "${root}/hopr-it" "${root}"/hoprd-it-* 2>/dev/null || true
+  find "${root}" -maxdepth 3 -type d -name 'hoprd-it-*' -exec rm -rf {} + 2>/dev/null || true
 }
 
 # Called as a script rather than sourced: dispatch to the named function. An `if` rather than

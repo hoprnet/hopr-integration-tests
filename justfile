@@ -27,12 +27,13 @@ line := env_var_or_default("LINE", "v4")
 # `service_registry`, which the v5 chain API requires; against v0.13.0 or earlier
 # `hoprd-localcluster` exits during bootstrap with "contract addresses not a valid JSON: missing
 # field `service_registry`". Override: `just blokli_ref=… build-chain`, or set BLOKLI_REF.
-blokli_ref := env_var_or_default("BLOKLI_REF", if line == "v5" { "release/0.14" } else { "release/0.13" })
+blokli_ref := env_var_or_default("BLOKLI_REF", if line == "v5" { "main" } else { "release/0.13" })
 
 # hoprd branch the binaries are built from (override: `just hoprd_ref=… build`, or HOPRD_REF).
 hoprd_ref := env_var_or_default("HOPRD_REF", if line == "v5" { "main" } else { "release/4.1" })
 
-# hoprd checkout to build the PIX binaries from. hoprd's flake does expose
+# hoprd checkout to build the PIX binaries (`just pix`) and the TRACE binaries
+# (`just integration-trace`) from. hoprd's flake does expose
 # `binary-hoprd-pix-test`, but for x86_64-linux only — which is what CI uses and what a darwin
 # workstation cannot build — so `just pix` compiles hoprd from this tree instead.
 hoprd_src := env_var_or_default("HOPRD_SRC", "../hoprd")
@@ -61,11 +62,25 @@ build-chain:
 
 # Build hoprd + the binary chain, then run the scenarios on one locally-built anvil+bloklid
 # and one cluster (via --chain-url). Optional args = scenarios, e.g.
-# `just integration-binchain zero_hop`.
+# `just integration-binchain zero_one_two_hop`.
 integration-binchain *scenarios: build build-chain
     #!/usr/bin/env bash
     set -euo pipefail
     # run-binchain.sh enters the dev shell itself, so no outer wrap.
+    [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
+    HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
+
+# Like `integration-binchain`, but hoprd and hoprd-localcluster are built from HOPRD_SRC
+# (default ../hoprd) with TRACE logs compiled in (see `trace_build` in lib.sh), and each run keeps
+# all its logs in its own folder under HOPR_LOG_DIR (default ./logs). Not a performance baseline:
+# debug assertions are on.
+#   RUST_LOG=info,hopr_protocol_session=trace just integration-trace zero_hop
+integration-trace *scenarios: build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/integration/lib.sh
+    trace_build '{{hoprd_src}}' '{{hoprd_ref}}'
+    export HOPR_LOG_DIR="${HOPR_LOG_DIR:-$PWD/logs}"
     [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
@@ -100,6 +115,30 @@ exit-origination: build build-chain
     set -euo pipefail
     export TEST_TARGET=exit_origination
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
+
+# A relay that acknowledges everything and delivers nothing toward the exit (GNO-1183): does a
+# 1-hop session avoid it? See integration/tests/dead_last_hop.rs. Also runs in the v5 `pr` tier of CI. v5 only.
+# `EDGLI_REF=<branch|sha>` runs an unmerged edge-client; `NETWORK_GRAPH_REF=<branch>` also patches
+# an unreleased hopr-network-graph from hoprnet/hopr-impls (Cargo ignores edge-client's own patch).
+# Both need `gh` logged in, to resolve the ref and read edge-client's manifest.
+dead-last-hop: build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ '{{line}}' = v5 ] || { echo "run: LINE=v5 just dead-last-hop" >&2; exit 2; }
+    # Inherited, it would replace TEST_TARGET in run-binchain.sh and run another suite.
+    unset TEST_TARGETS
+    export TEST_TARGET=dead_last_hop
+    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      if [ -n "${NETWORK_GRAPH_REF:-}" ]; then
+        printf "\n[patch.crates-io]\nhopr-network-graph = { git = \"https://github.com/hoprnet/hopr-impls\", branch = \"%s\" }\n" \
+          "${NETWORK_GRAPH_REF}" >>integration/Cargo.toml
+      fi
+      if [ -n "${EDGLI_REF:-}" ]; then
+        pin_edgli "$(resolve_sha hoprnet/edge-client "${EDGLI_REF}")"
+      fi
+      exec bash scripts/integration/run-binchain.sh'
 
 # End-to-end PIX with edgli as the paying entry (binary chain; manual, NOT run in CI).
 # Builds hoprd from HOPRD_SRC (default ../hoprd) because the nix flake has no PIX binary.
@@ -141,16 +180,65 @@ pix-shapes *scenarios:
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
     runner=(bash scripts/integration/with-v5-deps.sh bash scripts/integration/run-binchain.sh)
 
-    # Named scenarios run as asked; the full pass puts the geometry spike in its own invocation
-    # first, because a cluster serves one invocation and a failed spike makes every shape after
-    # it unreadable.
-    if [ -n '{{scenarios}}' ]; then
-      SCENARIOS='{{scenarios}}' "${runner[@]}"
-    else
-      spike=the_profile_geometry_completes_a_cycle
-      SCENARIOS="${spike}" "${runner[@]}"
-      SCENARIOS_EXCEPT="${spike}" "${runner[@]}"
+    SCENARIOS='{{scenarios}}' "${runner[@]}"
+
+# Run a CI tier locally: the same suites as `run.sh` (lib.sh `run_tier`), from the binaries built
+# here rather than resolved refs. v5 also builds the PIX hoprd + localcluster from HOPRD_SRC, a v5
+# hoprd git checkout, since the flake's PIX binary is x86_64-linux only. See docs/v5-test-matrix.md.
+#   LINE=v5 HOPRD_SRC=../hoprd-main just tier pr
+#   LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly
+tier name="pr": build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/integration/lib.sh
+    it_env
+    export LINE='{{line}}' TIER='{{name}}' HOPRNET_SHELL='{{hoprnet}}' PIX_BIN=""
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
+    if [ "${LINE}" = v5 ]; then
+      nodes_bin="${HOPRD_BIN}"
+      pix_build '{{hoprd_src}}'
+      pix_check_hoprd "${HOPRD_BIN}"
+      PIX_BIN="${HOPRD_BIN}" HOPRD_BIN="${nodes_bin}"
     fi
+    chain_start
+    trap chain_stop EXIT
+    # v5 runs against edge-client's line head, like CI: the committed v5 lock trails `main`.
+    {{v5_deps}} bash -c 'source scripts/integration/lib.sh; if [ "${LINE}" = v5 ]; then pin_line_deps; fi; run_tier'
+
+# PIX when half the return relays die mid-cycle (binary chain; manual, NOT run in CI, about ten
+# minutes per scenario at the default geometry). See integration/tests/pix_relay_loss.rs and
+# docs/pix-relay-loss.md. Same build path as `just pix`.
+#
+# One cluster PER SCENARIO, like `return-path` and for the same reason: each kills a cluster node.
+# They share one chain, started once. `HOPRD_PIX_*` (surplus, geometry, SURB buffer, rate) are
+# forwarded to the test; docs/pix-relay-loss.md lists them. Optional args = test-name filters.
+pix-relay-loss *scenarios:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ '{{line}}' = v5 ] || { echo "PIX is v5-only — run: LINE=v5 just pix-relay-loss" >&2; exit 2; }
+    source scripts/integration/lib.sh
+    pix_build '{{hoprd_src}}'
+    just build-chain
+    pix_check_hoprd "${HOPRD_BIN}"
+
+    it_env
+    export TEST_TARGET=pix_relay_loss HOPRNET_SHELL='{{hoprnet}}'
+    # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
+    scenarios='{{scenarios}}'
+    # Listed under the v5 dependency set: the target is `#![cfg(feature = "v5")]` and lists nothing
+    # without it.
+    [ -n "${scenarios}" ] || scenarios="$(bash scripts/integration/with-v5-deps.sh \
+      bash -c 'source scripts/integration/lib.sh; list_scenarios pix_relay_loss')"
+    chain_start
+    trap chain_stop EXIT
+    export CHAIN_SHARED=1
+    rc=0
+    for scenario in ${scenarios}; do
+      SCENARIOS="${scenario}" bash scripts/integration/with-v5-deps.sh \
+        bash scripts/integration/run-binchain.sh || rc=1
+    done
+    exit "${rc}"
 
 # PIX at the DEPLOYED geometry.
 #
@@ -171,14 +259,17 @@ pix-prod *scenarios:
     pix_check_hoprd "${HOPRD_BIN}"
 
     export TEST_TARGET=pix_prod HOPRNET_SHELL='{{hoprnet}}'
-    # Release, not debug: the Entry is linked into this binary and generating 4096 polynomials per
-    # cycle is CPU-bound enough that a debug build cannot keep up with the Exit's commitment
-    # deadline — measured, it stretched the SSA commitment past max_ssa_delivery_time and every
-    # cycle failed.
-    export CARGO_FEATURES='--release'
+    # Release, not debug, whatever TEST_PROFILE says: the Entry is linked into this binary and
+    # generating 4096 polynomials per cycle is CPU-bound enough that a debug build cannot keep up
+    # with the Exit's commitment deadline — measured, it stretched the SSA commitment past
+    # max_ssa_delivery_time and every cycle failed.
+    export TEST_PROFILE=release
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
     scenarios='{{scenarios}}'
-    [ -n "${scenarios}" ] || scenarios="$(list_scenarios pix_prod)"
+    # Listed under the v5 dependency set: the target is `#![cfg(feature = "v5")]` and lists nothing
+    # without it.
+    [ -n "${scenarios}" ] || scenarios="$(bash scripts/integration/with-v5-deps.sh \
+      bash -c 'source scripts/integration/lib.sh; list_scenarios pix_prod')"
     runner=(bash scripts/integration/with-v5-deps.sh bash scripts/integration/run-binchain.sh)
 
     rc=0
@@ -187,7 +278,7 @@ pix-prod *scenarios:
     done
     exit "${rc}"
 
-# Run a single test against a fresh env (e.g. `just scenario zero_hop`).
+# Run a single test against a fresh env (e.g. `just scenario zero_one_two_hop`).
 scenario name:
     @just integration-binchain '{{name}}'
 
@@ -206,7 +297,7 @@ cluster-up: build build-chain
     wait "${CLUSTER_PID}"
 
 # Run tests against the persistent cluster from `cluster-up` (no bring-up).
-# Optional args = test-name filters (e.g. `just attach one_hop`).
+# Optional args = test-name filters (e.g. `just attach zero_one_two_hop`).
 attach *filter:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -255,7 +346,7 @@ lint:
 ci:
     nix develop {{hoprnet}} -c bash scripts/integration/run.sh
 
-# Same, on the v5 line: hoprd/edge-client `main`, blokli `release/0.14`, PIX suite included.
+# Same, on the v5 line: hoprd/edge-client `main`, blokli `main`, PIX suite included.
 # run.sh swaps `integration/Cargo.v5.toml` in for the run and restores it on exit.
 ci-v5:
     LINE=v5 nix develop {{hoprnet}} -c bash scripts/integration/run.sh

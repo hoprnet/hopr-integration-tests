@@ -14,7 +14,7 @@ use edgli::{
             node::{HasChainApi as _, HasTransportApi as _, HoprSessionClientOperations},
             types::internal::channels::{ChannelEntry, ChannelStatus},
         },
-        config::{HoprLibConfig, HostConfig, HostType, SafeModule},
+        config::{HoprLibConfig, HostConfig, HostType, ProbeConfig, SafeModule},
         exports::transport::{
             HoprSession, SESSION_MTU, SURB_SIZE, SessionCapability, SessionTarget,
             SurbBalancerConfig,
@@ -27,17 +27,25 @@ use edgli::{
 use crate::{
     Address,
     cluster::{
-        self, ClusterHandle, ClusterSummary, ExtraInfo, NodeInfo, P2P_PORT_BASE, cluster_size,
+        self, ClusterHandle, ClusterSummary, ExtraInfo, NodeInfo, cluster_size, p2p_port_base,
     },
 };
 
-/// Edgli's P2P port — one slot beyond the cluster nodes, then one per boot.
+/// Edgli's P2P port — one slot beyond the largest cluster, then one per boot.
+///
+/// Beyond the largest cluster rather than the current one: a chain shared by several clusters keeps
+/// the announcements of every frozen node identity that ever ran on it, and a smaller cluster after a
+/// larger one put Edgli on the port a node of the earlier cluster was announced at. The new cluster's
+/// nodes then dialled Edgli as that node, every connection closed at the handshake, and the scenario
+/// timed out waiting for Edgli's peers (the 3-node relay-loss scenarios after the 4-node one).
 ///
 /// A shared cluster boots several edglis in one process, and the previous one's listener is not
 /// always released by the time the next binds.
 fn edge_p2p_port() -> u16 {
     static BOOTS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
-    P2P_PORT_BASE + cluster_size() as u16 + BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    p2p_port_base()
+        + cluster::MAX_CLUSTER_SIZE as u16
+        + BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Strategies appended to the channel-lifecycle one `default_strategy_cfg` yields.
@@ -113,6 +121,7 @@ struct NetTuning {
     prefer_local: bool,
     probe_local: bool,
     path_planner: PathPlannerConfig,
+    probe: ProbeConfig,
     strategy_tick: Duration,
     channel_open_timeout: Duration,
 }
@@ -129,6 +138,15 @@ impl NetTuning {
                 min_ack_rate: 0.1, // local cluster probes succeed
                 ..Default::default()
             },
+            probe: cluster::requested_probe_interval().map_or_else(
+                ProbeConfig::default,
+                |interval| ProbeConfig {
+                    timeout: interval,
+                    interval,
+                    recheck_threshold: interval * 10,
+                    ..Default::default()
+                },
+            ),
             strategy_tick: Duration::from_secs(10),
             channel_open_timeout: LOCAL_CHANNEL_OPEN_TIMEOUT,
         }
@@ -157,8 +175,21 @@ impl IntegrationEnv {
     /// Bring up the local cluster, boot Edgli on the pre-funded extra identity, start
     /// the channel strategy, and wait until at least one outgoing channel is open.
     pub async fn setup() -> anyhow::Result<Self> {
+        Self::setup_with(|_| Ok(None)).await
+    }
+
+    /// As [`Self::setup`], but `prepare` runs on the running cluster before the entry boots, so a
+    /// fault it injects is there from the entry's first packet rather than discovered later.
+    ///
+    /// Returns the exit the 1-hop sessions should use, or `None` to leave the choice to the entry.
+    /// A scenario that cuts links to one node has to name that node, since it is chosen before the
+    /// entry can look at its peers.
+    pub async fn setup_with(
+        prepare: impl FnOnce(&ClusterSummary) -> anyhow::Result<Option<Address>>,
+    ) -> anyhow::Result<Self> {
         let cluster = cluster::bring_up_shared().await?;
         let summary = cluster.summary.clone();
+        let exit = prepare(&summary)?;
         let extra = summary.extras[0].clone();
 
         let (edgli, reactor) = boot_edgli(
@@ -171,6 +202,7 @@ impl IntegrationEnv {
         .await?;
 
         let (dest_zero_hop, dest_one_hop) = select_session_targets(&edgli).await?;
+        let dest_one_hop = exit.unwrap_or(dest_one_hop);
 
         Ok(Self {
             edgli,
@@ -271,13 +303,72 @@ impl IntegrationEnv {
     }
 
     /// Session destination for a given hop count, resolved against the network.
-    fn dest_for(&self, hops: usize) -> anyhow::Result<Address> {
+    pub fn dest_for(&self, hops: usize) -> anyhow::Result<Address> {
         Ok(match (&self.targets, hops) {
             (Targets::Local { dest_zero_hop, .. }, 0) => *dest_zero_hop,
             (Targets::Local { dest_one_hop, .. }, 1..=3) => *dest_one_hop,
             (Targets::Rotsee { exit }, 0..=3) => *exit,
             (_, n) => anyhow::bail!("unsupported hop count {n} (at most 3)"),
         })
+    }
+
+    /// Every edge the entry's graph holds, with what it has measured, one line per edge. Nodes are named
+    /// by the first characters of their offchain key, as the planner's debug log prints them. For
+    /// diagnosing why routing picked or dropped a relay; the verdict itself is not exposed, but a
+    /// starved edge reads a score of 0 and no latency.
+    pub async fn graph_report(&self) -> String {
+        use edgli::hopr_lib::api::graph::{
+            NetworkGraphView,
+            traits::{
+                EdgeImmediateProtocolObservable, EdgeLinkObservable, EdgeNetworkObservableRead,
+                EdgeObservableRead, EdgeProtocolObservable,
+            },
+        };
+        use futures::StreamExt as _;
+
+        let graph = self.edgli.graph();
+        let nodes: Vec<_> = graph.nodes().collect().await;
+        let short =
+            |key: &dyn std::fmt::Display| key.to_string().chars().take(8).collect::<String>();
+        let mut lines = Vec::new();
+        for from in &nodes {
+            for to in &nodes {
+                if from == to {
+                    continue;
+                }
+                let Some(obs) = graph.edge(from, to) else {
+                    continue;
+                };
+                let immediate = obs.immediate_qos().map(|i| {
+                    format!(
+                        "connected={:?} ack={:?} latency={:?} score={:?}",
+                        i.is_connected(),
+                        i.ack_rate(),
+                        i.average_latency(),
+                        i.score()
+                    )
+                });
+                let intermediate = obs.intermediate_qos().map(|i| {
+                    format!(
+                        "rate={:?} latency={:?} balance={:?} score={:?}",
+                        i.average_probe_rate(),
+                        i.average_latency(),
+                        i.balance().is_some(),
+                        i.score()
+                    )
+                });
+                lines.push(format!(
+                    "{} -> {}  total={:?}  imm[{}]  int[{}]",
+                    short(from),
+                    short(to),
+                    obs.score(),
+                    immediate.unwrap_or_default(),
+                    intermediate.unwrap_or_default()
+                ));
+            }
+        }
+        lines.sort();
+        lines.join("\n")
     }
 
     /// The cluster this env owns; an error for a Rotsee env, which has none.
@@ -377,7 +468,12 @@ impl IntegrationEnv {
                             .ok()
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(10_000_000 / SESSION_MTU as u64),
-                        max_surbs_per_sec: 16_000_000 / (8 * SURB_SIZE as u64),
+                        // Experiment knob: HOPRD_SURB_MAX_PER_SEC caps the mint rate (default: the
+                        // 16 Mb/s SURB upstream gnosis_vpn-client provisions).
+                        max_surbs_per_sec: std::env::var("HOPRD_SURB_MAX_PER_SEC")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(16_000_000 / (8 * SURB_SIZE as u64)),
                         // Everything else stays at the default, because that is what the client
                         // does: `to_surb_balancer_config` in gnosis_vpn-lib sets exactly these two
                         // fields from the same formulas and then `..Default::default()`.
@@ -430,18 +526,13 @@ impl IntegrationEnv {
         forward_hops: usize,
         return_hops: usize,
     ) -> anyhow::Result<(HoprSession, Address)> {
-        // Only the *return* path needs a relay. PIX encrypts a share with the first return
-        // relayer's ticket-challenge solution, so a zero-hop return path is refused outright —
-        // but the forward path is free to be direct, and a scenario that wants to read the
-        // return-relayer histogram needs it to be: with a relay on the way out, that relayer's
-        // forwarded packets land in the same per-node counters and the histogram measures the
-        // forward hop as much as the return one. See `tests/return_path.rs`, which relies on
-        // exactly this.
+        // Only the *return* path needs a relay: the share encryption key derives from the first
+        // return relayer's acknowledgement. A direct forward path carries no share and needs none.
         anyhow::ensure!(
             return_hops >= 1,
-            "PIX needs at least one relay on the RETURN path (got {return_hops}): the share \
-             encryption key derives from the first relayer's acknowledgement, so a zero-hop \
-             return path is refused"
+            "PIX needs at least one relay on the return path (got {forward_hops} forward, \
+             {return_hops} return): the share encryption key derives from the first return \
+             relayer's acknowledgement, so a zero-hop return path is refused"
         );
         self.open_pix_session_with(
             forward_hops,
@@ -478,12 +569,13 @@ impl IntegrationEnv {
         surb_management: SurbBalancerConfig,
         target: SessionTarget,
     ) -> anyhow::Result<(HoprSession, Address)> {
-        // Return path only — see `open_pix_session`.
+        // Only the *return* path needs a relay: the share encryption key derives from the first
+        // return relayer's acknowledgement. A direct forward path carries no share and needs none.
         anyhow::ensure!(
             return_hops >= 1,
-            "PIX needs at least one relay on the RETURN path (got {return_hops}): the share \
-             encryption key derives from the first relayer's acknowledgement, so a zero-hop \
-             return path is refused"
+            "PIX needs at least one relay on the return path (got {forward_hops} forward, \
+             {return_hops} return): the share encryption key derives from the first return \
+             relayer's acknowledgement, so a zero-hop return path is refused"
         );
         let dest = self.dest_for(forward_hops)?;
         let base = HoprSessionClientConfig {
@@ -593,6 +685,8 @@ async fn boot_edgli(
         blokli_endpoint(blokli_url)?,
         Some(tuning.connector),
         tuning.probe_local,
+        #[cfg(feature = "v5")]
+        None,
         |s: EdgliInitState| tracing::info!(?s, "edgli init"),
     )
     .await?;
@@ -731,6 +825,7 @@ fn edgli_config(
                 prefer_local_addresses: tuning.prefer_local,
             },
             path_planner: tuning.path_planner,
+            probe: tuning.probe,
             // Experiment: hopr-lib 61120e77 reuses this 2 s default as a write-stall timeout that evicts
             // a peer's stream with every queued packet and ack. Raised to test it as the 1-hop regression.
             stream: StreamProtocolConfig {
@@ -748,11 +843,17 @@ fn edgli_config(
                 },
                 ..Default::default()
             },
+            // edgli's `Edgli::new` pins the mixer itself (Poisson, `max_delay` = 1 ms) and
+            // keeps only the configured `capacity`, so per-engine tuning here is dead on v5 —
+            // the old uniform `min_delay` / `delay_range` fields no longer exist. Default stands.
+            #[cfg(not(feature = "v5"))]
             mixer: MixerConfig {
                 min_delay: Duration::ZERO,
                 delay_range: Duration::from_millis(1),
                 ..Default::default()
             },
+            #[cfg(feature = "v5")]
+            mixer: MixerConfig::default(),
             // edgli derives the quota it announces from these dimensions and nothing else, and the
             // Exit refuses any Session whose quota falls outside its `quota_range`.
             #[cfg(feature = "v5")]
