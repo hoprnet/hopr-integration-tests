@@ -27,7 +27,7 @@
 //! 454 656 packets is a lot, and it is the reason the deployed cycle is quoted at 306 s nominal —
 //! but a cycle is bounded by *packets*, not by seconds, and a local cluster carries far more than
 //! the deployed network. hoprd's own soak and the PIX demo both measure ~4 000–8 500 datagrams/s
-//! each way on this class of machine, so a cycle lands at ~54–114 s rather than five minutes, and
+//! each way on this class of machine, so a cycle lands at ~53–113 s rather than five minutes, and
 //! the three cycles a scenario wants are ~6 min of traffic on top of the ~3 min of cluster
 //! bootstrap — a run that lands around ten minutes rather than under five.
 //!
@@ -92,10 +92,10 @@ pub const QUOTA_PER_SSA: u64 = CYCLE_PACKETS * QUOTA_BYTES_PER_SHARE;
 /// cannot hold stretches cycles into the Exit's deposit deadline.
 ///
 /// The figure is a *return* packet rate — one share rides on each Exit → Entry reply — so it is
-/// also the share rate, and a cycle takes `CYCLE_PACKETS / rate` seconds: 114 s nominal here,
-/// measured ~116 s (the Exit's egress is shaped by its SURB buffer, but at this rate the achieved
-/// cycle lands close to nominal). The deployed cycle is 306 s, so this is roughly a third of
-/// production's.
+/// also the share rate, and a cycle takes `CYCLE_PACKETS / rate` seconds: 113 s nominal here
+/// (454 656 / 4 000, truncated, as [`nominal_cycle_secs`] computes it), measured ~116 s (the
+/// Exit's egress is shaped by its SURB buffer, but at this rate the achieved cycle lands close to
+/// nominal). The deployed cycle is 306 s, so this is roughly a third of production's.
 pub const DEFAULT_PACKET_RATE: u64 = 4_000;
 
 /// Packets per second the scenario drives, honouring `HOPRD_PROD_PIX_RATE`.
@@ -272,8 +272,9 @@ const DEPOSIT_ROUND_TRIP_SECS: u64 = 5;
 ///
 /// Judged at the *default* rate rather than at a `HOPRD_PROD_PIX_RATE` override, because an
 /// override is an experiment and the guard exists to catch the default drifting into the race. At
-/// 4 000 packets/s a cycle is 114 s against a 5 s round trip — 23x — and the achieved cycle is
-/// longer still because the Exit's egress is shaped by its SURB buffer.
+/// 4 000 packets/s a cycle is 113 s by the integer division below against a 5 s round trip — over
+/// 22x — and the achieved cycle is longer still because the Exit's egress is shaped by its SURB
+/// buffer.
 const _: () = assert!(
     CYCLE_PACKETS / DEFAULT_PACKET_RATE >= 3 * DEPOSIT_ROUND_TRIP_SECS,
     "at the default rate a cycle is too close to a deposit round trip"
@@ -661,14 +662,25 @@ mod tests {
     }
 
     /// The rendered YAML names every field the profile means to move.
+    ///
+    /// The quota window is checked against the constants on both lines, and against hoprnet#8519's
+    /// published figures only on v5: the v4 line prices a share at its own `SESSION_MTU` (1 020 B
+    /// rather than 1 452), so the same geometry renders a smaller window there — see
+    /// [`the_deployed_arithmetic_holds`].
     #[test]
     fn the_rendered_yaml_carries_the_geometry() {
         let yaml = cluster_pix_yaml();
+        let quota_min = format!("quota_range_min: {QUOTA_RANGE_MIN}");
+        let quota_max = format!("quota_range_max: {QUOTA_RANGE_MAX}");
         for key in [
             "num_ssa_parts: 4096",
             "ssa_part_size: 32",
             "additional_shares: 79",
+            quota_min.as_str(),
+            quota_max.as_str(),
+            #[cfg(feature = "v5")]
             "quota_range_min: 165040128",
+            #[cfg(feature = "v5")]
             "quota_range_max: 660160512",
             "max_recovery_time: 14400s",
             "max_deposit_wait: 60s",
@@ -686,6 +698,9 @@ mod tests {
     #[test]
     fn the_deposit_is_affordable_from_the_configured_float() {
         let per_cycle = per_cycle_wxhopr();
+        // ~472 wxHOPR is the v5 line's figure, over its 629.6 MiB quota. The v4 line's smaller
+        // `SESSION_MTU` makes the same geometry's quota, and so its deposit, smaller (~332).
+        #[cfg(feature = "v5")]
         assert!(
             (400.0..550.0).contains(&per_cycle),
             "one cycle costs {per_cycle} wxHOPR, outside the ~472 the price implies"

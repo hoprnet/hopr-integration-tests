@@ -117,7 +117,7 @@ const CHUNK: usize = 1_400;
 ///
 /// Three: the first is the one the successor gate has to admit on, the second proves the gate
 /// admitted it, and the third gives the run a margin so a single slow cycle is not a failure.
-/// Measured at 4 000 packets/s the achieved cycle is ~116 s against a 114 s nominal, so three
+/// Measured at 4 000 packets/s the achieved cycle is ~116 s against a 113 s nominal, so three
 /// cycles is ~6 min of traffic — which is what sets [`TRAFFIC_BUDGET`], and the ~3 min of cluster
 /// bootstrap is what makes the whole run ~10 min rather than under 5.
 const TARGET_CYCLES: u64 = 3;
@@ -179,8 +179,8 @@ fn datagrams_for(budget: Duration) -> u64 {
 /// the configured rate — with a whole extra cycle of slack, so a run that lands on the target is
 /// not one that only just scraped it.
 ///
-/// Measured: this budget bought 5 cycles in a run that asserts 3, so the slack is real rather than
-/// nominal.
+/// Measured: this budget bought 4 cycles (1 888.06 wxHOPR = 4 × 472.01) in a run that asserts 3,
+/// so the slack is real rather than nominal.
 const TRAFFIC_BUDGET: Duration = Duration::from_secs(4 * 116);
 
 /// Budget for offering a payload of `traffic` seconds at the paced rate.
@@ -222,12 +222,12 @@ fn node_for(env: &IntegrationEnv, address: Address) -> anyhow::Result<NodeInfo> 
 ///
 /// **The whole payload is allocated up front.** The buffer is `datagrams_for(budget) × CHUNK`,
 /// which at the default 4 000 packets/s is ~2.6 GB for the happy path ([`TRAFFIC_BUDGET`] =
-/// 464 s → 1 856 000 datagrams × 1 400 B) and ~5.5 GB for the resilience scenario
-/// ([`KILL_TRAFFIC_BUDGET`] + [`KILL_SETTLE`] = 980 s → 3 920 000 datagrams). `pump::pump_halves`
+/// 464 s → 1 856 000 datagrams × 1 400 B) and ~2.8 GB for the resilience scenario
+/// ([`KILL_TRAFFIC_BUDGET`] + [`KILL_SETTLE`] = 500 s → 2 000 000 datagrams). `pump::pump_halves`
 /// adds a second buffer of the same order — it reserves `Vec::with_capacity(total_bytes)` and
 /// accumulates the return stream into it with `received.extend_from_slice` in its reader loop
 /// (`integration/src/pump.rs`) — so the peak is roughly twice the payload: ~5 GB on the happy
-/// path, ~11 GB for the kill scenario.
+/// path, ~6 GB for the kill scenario.
 ///
 /// It is left unbounded deliberately, because the retention is not local to this scenario.
 /// `pump_halves` is shared by ~9 suites, and both `sha_ok` (a full-payload digest of the returned
@@ -324,11 +324,18 @@ async fn assert_exit_was_paid(
 ///   commitment and never got it. Since hoprnet#8525 the Exit re-sends an unanswered request every
 ///   `ssa_request_resend_interval`, so reaching this deadline means the request was refused for the
 ///   whole window rather than merely lost once.
-/// * `DepositObserverClosed` / a deposit timeout — the Entry's `SsaCommit` arrived but its deposit
-///   did not land inside `max_deposit_wait`. That *is* the surplus failing.
+/// * `DepositTimeout` / `DepositObserverClosed` — the Entry's `SsaCommit` arrived but no deposit
+///   confirmation followed: the deadline expired, or the Exit's deposit observer went away. The
+///   deposit path failing, not the surplus.
 /// * `RecoveryIdle` — the cycle in flight stopped making progress. At this geometry that means the
 ///   lost share of the emission took polynomials below their threshold, which is the split's own
 ///   break-even rather than a control-plane fault.
+/// * `RecoveryDeadline` — the cycle outlived `max_recovery_time`. Four hours here, so in a run of
+///   minutes it means the deadline was misconfigured rather than that the cycle was slow.
+/// * `UnverifiableShares` — a polynomial's share set failed to open its commitment. Corrupted or
+///   mis-keyed shares, which no surplus can make up for.
+/// * `BatchServedOutOfOrder` — too much of the batch's recovery progress landed on cycles behind
+///   the front one, i.e. the Exit kept serving shares minted for an older cycle.
 ///
 /// Naming these apart is the whole point: a control-plane failure and a split that cannot carry
 /// the loss are different findings, and a test that reports them the same way is worse than none.
@@ -355,11 +362,35 @@ fn why_the_session_closed(env: &IntegrationEnv, exit: &NodeInfo) -> String {
              max_deposit_wait",
         ),
         (
+            "reason=DepositObserverClosed",
+            "the Exit's PIX supervisor closed the Session with DepositObserverClosed: its deposit \
+             observer went away before confirming the deposit, a fault in the Exit's chain \
+             connection rather than in the surplus",
+        ),
+        (
             "reason=RecoveryIdle",
             "the Exit's PIX supervisor closed the Session with RecoveryIdle: the cycle in flight \
              stopped making progress and its recovery idle deadline expired. At this geometry that \
              means the lost share of the emission took polynomials below their threshold — the \
              surplus's own break-even — rather than any control-plane fault",
+        ),
+        (
+            "reason=RecoveryDeadline",
+            "the Exit's PIX supervisor closed the Session with RecoveryDeadline: a cycle outlived \
+             max_recovery_time, which at four hours cannot happen inside this scenario's run and \
+             points at the cluster's PIX config rather than at the cycle",
+        ),
+        (
+            "reason=UnverifiableShares",
+            "the Exit's PIX supervisor closed the Session with UnverifiableShares: a polynomial's \
+             share set failed to open its commitment, so shares arrived corrupted or keyed to the \
+             wrong relayer — no surplus covers that",
+        ),
+        (
+            "reason=BatchServedOutOfOrder",
+            "the Exit's PIX supervisor closed the Session with BatchServedOutOfOrder: too much of the \
+             batch's recovery progress landed on cycles behind the front one, i.e. the Exit kept \
+             serving SURBs carrying an older cycle's shares after the kill",
         ),
     ];
     // `node_log_contains` reads the node's own log, which is the only place this is recorded: the
@@ -735,18 +766,42 @@ const KILL_SETTLE: Duration = Duration::from_secs(20);
 /// `tests/return_path.rs` states its `SURVIVAL_IDLE_BUDGET`.
 const KILL_IDLE_BUDGET: Duration = Duration::from_secs(90);
 
-/// Seconds of traffic the *resilience* scenario offers, which is longer than [`TRAFFIC_BUDGET`]
-/// for a measured reason.
+/// Seconds of traffic the *resilience* scenario offers after the kill.
 ///
-/// Losing half the return path does not halve the Exit's egress — measured, it keeps serving at
-/// the full rate once its gate releases — but it does stretch the achieved cycle, because a share
-/// reaches the Exit only on a reply that *arrives*, and half the replies now do not. Measured:
-/// ~116 s per cycle on the lossless path against ~240 s here, so the 464 s that buys four cycles
-/// there buys two.
+/// The kill costs the cycle in flight a burst, not a sustained halving of the share rate: the Entry
+/// re-plans around the dead relayer within seconds, and once the Exit's gate releases it serves at
+/// the full rate again. Measured over the four kill runs at 29–43 % loss: 9 cycles swept from 980 s
+/// of traffic, ~109 s per cycle — no longer than the lossless ~116 s, and not the ~240 s an earlier
+/// sizing assumed.
 ///
-/// Sized from that figure for [`TARGET_CYCLES`] plus a whole cycle of margin, so a run that lands
-/// on the target is not one that only just scraped it. This is the scenario's dominant cost.
-const KILL_TRAFFIC_BUDGET: Duration = Duration::from_secs(4 * 240);
+/// Sized at 120 s per cycle for [`TARGET_CYCLES`] plus a whole cycle of margin, so a run that lands
+/// on the target is not one that only just scraped it. Not larger, for the reason the guard below
+/// states: every extra cycle the traffic buys is another deposit against the Entry's
+/// [`prod_pix::BUDGETED_CYCLES`].
+const KILL_TRAFFIC_BUDGET: Duration = Duration::from_secs(4 * 120);
+
+/// Neither scenario may offer enough traffic for its deposits to exceed the Entry's budget.
+///
+/// The Entry deposits once per cycle the traffic completes plus up to [`MAX_SSAS_IN_FLIGHT`]
+/// successors funded ahead of recovery. Past [`prod_pix::BUDGETED_CYCLES`] it refuses to pay,
+/// `deposits_over_budget` moves and the scenario fails although the protocol behaved — which is
+/// what a 980 s kill budget risked: ~8.6 cycles of traffic and 9 swept left room for only one
+/// successor in flight against the two the pipelining allows. Judged at the default rate, rounded
+/// up to whole cycles; a raised `HOPRD_PROD_PIX_RATE` scales the deposits with it.
+const _: () = {
+    const fn deposits_for(traffic: Duration) -> u64 {
+        (prod_pix::DEFAULT_PACKET_RATE * traffic.as_secs()).div_ceil(prod_pix::CYCLE_PACKETS)
+            + MAX_SSAS_IN_FLIGHT
+    }
+    assert!(
+        deposits_for(TRAFFIC_BUDGET) <= prod_pix::BUDGETED_CYCLES,
+        "the happy path's traffic budget buys more deposits than the Entry is budgeted for"
+    );
+    assert!(
+        deposits_for(KILL_TRAFFIC_BUDGET.saturating_add(KILL_SETTLE)) <= prod_pix::BUDGETED_CYCLES,
+        "the kill scenario's traffic budget buys more deposits than the Entry is budgeted for"
+    );
+};
 
 /// How much of the return traffic the killed relayer may have been carrying, as a fraction.
 ///
@@ -1019,15 +1074,45 @@ async fn the_exit_should_recover_every_cycle_when_half_the_relayers_die() -> any
     assert!(
         cycles >= TARGET_CYCLES,
         "the Exit swept {cycles} cycles across the kill, expected at least {TARGET_CYCLES} \
-         ({recovered} recovered against a {per_cycle} per-cycle deposit). The killed relayer \
-         carried {:.1}% of the return traffic, so a cycle in flight when it died was short of \
-         about that fraction of its shares — which the deployed 79-share surplus exists to cover. \
-         A shortfall here means the surplus did not absorb the loss, or the successor gate refused \
-         the next batch. Entry {}; exit {}; gate {}",
+         ({recovered} recovered against a {per_cycle} per-cycle deposit). Before the kill the \
+         victim carried {:.1}% of the return traffic, so the cycle in flight lost the shares on \
+         the SURBs minted through it until the Entry re-planned — the burst the deployed 79-share \
+         surplus exists to cover. A shortfall here means the surplus did not absorb it, or the \
+         successor gate refused the next batch. Entry {}; exit {}; gate {}",
         measured_loss * 100.0,
         entry_counters.summary(),
         exit_counters.summary(),
         gate.summary(),
+    );
+
+    // The swept count says the Session survived, not that the cycle in flight at the kill did: if
+    // that cycle died and its successor took over, the Session keeps sweeping and the count above
+    // still passes. The supervisor books a cycle that did not recover as `failed`, whatever the
+    // reason — the discriminator `tests/pix_relay_loss.rs` relies on for the same question.
+    assert_eq!(
+        0,
+        gate.cycles("failed").unwrap_or(0),
+        "a PIX cycle failed across the kill and a successor took over, so the Session survived \
+         but the cycle in flight at the kill was lost. {} Gate {}",
+        why_the_session_closed(&env, &exit),
+        gate.summary(),
+    );
+
+    // The entry paid for every swept cycle and for hardly any more, as on the happy path. A cycle
+    // that died after its deposit landed shows up here as a deposit with no sweep behind it.
+    let deposited = entry_counters.deposits().unwrap_or_else(|| {
+        panic!(
+            "the entry exposed no hopr_strategy_pix_deposits_total series — it was built without \
+             `hopr-strategy/telemetry` ({})",
+            entry_counters.summary()
+        )
+    });
+    assert!(
+        (cycles..=cycles + MAX_SSAS_IN_FLIGHT).contains(&deposited),
+        "the entry deposited for {deposited} SSAs but only {cycles} were recovered and swept \
+         across the kill. Up to {MAX_SSAS_IN_FLIGHT} may legitimately be in flight thanks to \
+         early-recovery pipelining; more than that means deposits were made for SSAs that never \
+         completed."
     );
 
     assert_the_gate_served_the_surplus(&gate, &trace, "relayer kill");
