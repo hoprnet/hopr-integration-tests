@@ -1,46 +1,37 @@
-//! PIX at the **deployed geometry**, with the Exit as the only Exit and the relayers killable.
+//! PIX at the **deployed configuration**, with no fault injected.
 //!
 //! `tests/pix.rs` asks whether the deposit exchange happens at all, and answers it at a demo
 //! geometry of 8 polynomials x (2 + 2) — a cycle of 32 packets. `tests/pix_shapes.rs` asks whether
 //! a Session sustains its cycles under realistic traffic, at a profile whose whole design is that
 //! it is *not* the deployed one (see `crate::shapes`' argument that PIX is governed by ratios).
+//! `tests/pix_relay_loss.rs` kills relays mid-cycle, at its own geometry or, through `HOPRD_PIX_*`,
+//! at production dimensions — but always with its own quota window, deadlines and fill rate.
 //!
-//! This suite runs the third question, which neither of those can: **does the configuration that
-//! actually ships recover its cycles, and does it still recover them when half of the return
-//! relayers are killed mid-cycle?**
+//! This suite asks what none of them does: **does the configuration that actually ships admit a
+//! Session, recover its cycles, sweep them and get paid?** Not only the geometry: the Exit's quota
+//! window, deadlines and fill are upstream's defaults too, so a default that drifted into refusing
+//! or stalling its own cycles fails here, and nowhere else.
 //!
-//! # The geometry under test
+//! # The configuration under test
 //!
 //! `4096 × (32 + 79)`, hoprnet#8519's deployed default. A cycle is 454 656 packets and one deposit
 //! is `price_per_byte × 629.6 MiB`. See [`hoprd_integration_test::prod_pix`] for why running the
 //! real dimensions is not the same experiment as running a scaled profile that agrees with them on
-//! every ratio.
+//! every ratio, and for the Session sizing it sets itself (the SURB buffer and the egress gate that
+//! follows it).
 //!
-//! # The topology, and why three nodes is not an accident
+//! # The topology
 //!
 //! ```text
-//!   Entry (edgli, in-process)
-//!      │  forward, direct
-//!      ▼
-//!   relay A ──────► Exit          (one of three cluster nodes)
-//!      ▲              │
-//!      └──────────────┘  return, 1 hop — drawn per packet from {B, C}
+//!   Entry (edgli, in-process) ─── forward, direct ───► Exit
+//!        ▲                                               │
+//!        └──── relay A or B ◄──── return, 1 hop ─────────┘
 //! ```
 //!
-//! The **forward** path is direct and the **return** path one hop, which is not symmetric for two
-//! independent reasons. PIX requires a relay on the return path — a share is encrypted with the
-//! first return relayer's ticket-challenge solution and carried in a return-path SURB, so a direct
-//! Exit → Entry SURB has no relayer to supply it and share delivery is dead — but the forward
-//! direction has no such constraint, and leaving it direct is what keeps the per-node
-//! `hopr_packets_count{type="forwarded"}` deltas readable as a *return*-relayer histogram. A
-//! forwarded packet does not say which direction it travelled, so a relay on the way out lands in
-//! the same counters. See [`FORWARD_HOPS`].
+//! Three cluster nodes: the Exit and the two relays a return path is drawn over, per packet.
 //!
-//! A three-node cluster is the minimum at which the Exit has **exactly two** return-relayer
-//! candidates: the full mesh gives every node a channel to the other two, and the Exit is itself
-//! one of the three, so its return path can only start at one of the remaining two. That number is
-//! what makes the second scenario a 50 % loss experiment rather than an approximate one — killing
-//! one of two relayers removes half the return traffic by construction.
+//! The shape of `pix_relay_loss`'s `RETURN_ONLY` scenarios, so this is their lossless control at the
+//! deployed configuration: a failure here makes their results unreadable.
 //!
 //! # Running
 //!
@@ -49,8 +40,7 @@
 //! ```
 //!
 //! Manual, like every PIX scenario here — never in CI, and needing a hoprd built with a deposit
-//! pool. The relayers are killed by the second scenario, so each runs as its own invocation with
-//! its own cluster.
+//! pool.
 //!
 //! # Which build each participant runs
 //!
@@ -77,34 +67,23 @@ use hoprd_integration_test::{
     pix_exit::{self, ExitTelemetry, Trace},
     prod_pix,
     pump::{self, PumpOpts, Transfer},
-    relayers,
 };
 use rand::RngExt as _;
 
-/// Nodes in the cluster: an Exit and its **exactly two** return-relayer candidates.
+/// Nodes in the cluster: the Exit and the two relays its 1-hop return paths are drawn over.
 ///
-/// Not a preference. The return path is planned from the Exit, and the full mesh gives it a
-/// channel only to the other cluster nodes, so `N - 1` is the candidate count. Two is what makes
-/// the relayer-kill scenario a 50 % loss experiment by construction rather than by measurement.
+/// The cluster `tests/pix_relay_loss.rs` kills one of two return relays in, so the two suites differ
+/// in the fault and the configuration rather than in the topology.
 const NODES: usize = 3;
 
-/// Hops on the forward path — **zero**, deliberately.
+/// Hops on the forward path: zero, as in `pix_relay_loss`'s `RETURN_ONLY`.
 ///
 /// PIX refuses a zero-hop *return* path (a share is encrypted with the first return relayer's
 /// ticket-challenge solution, and a direct Exit -> Entry SURB has no relayer to supply it), but the
-/// forward path is free to be direct. Leaving it direct is what makes the return-relayer histogram
-/// readable: `hopr_packets_count{type="forwarded"}` does not say which direction a packet was
-/// travelling, so with a relay on the way out that node's forwarded count lands in the same
-/// per-node deltas and the histogram measures the forward hop as much as the return one. Measured:
-/// with a 1-hop forward the "return relayer split" read 76/24, which is a forward-hop artefact
-/// rather than a return-path concentration.
-///
-/// This is the shape `tests/return_path.rs` uses for the same reason, and the shape issue #74 asks
-/// for.
+/// forward path is free to be direct.
 const FORWARD_HOPS: usize = 0;
 
-/// Hops on the return path. Exactly one, so the killed relayer is the first and only return hop and
-/// the traffic it carried is lost shares.
+/// Hops on the return path: the one relay a share needs.
 const RETURN_HOPS: usize = 1;
 
 /// Bytes per write, under `SESSION_MTU` so one write is one packet.
@@ -183,6 +162,20 @@ fn datagrams_for(budget: Duration) -> u64 {
 /// so the slack is real rather than nominal.
 const TRAFFIC_BUDGET: Duration = Duration::from_secs(4 * 116);
 
+/// The traffic budget may not buy more deposits than the Entry is budgeted for.
+///
+/// The Entry deposits once per cycle the traffic completes plus up to [`MAX_SSAS_IN_FLIGHT`]
+/// successors funded ahead of recovery. Past [`prod_pix::BUDGETED_CYCLES`] it refuses to pay,
+/// `deposits_over_budget` moves and the scenario fails although the protocol behaved. Judged at the
+/// default rate, rounded up to whole cycles; a raised `HOPRD_PROD_PIX_RATE` scales the deposits
+/// with it.
+const _: () = assert!(
+    (prod_pix::DEFAULT_PACKET_RATE * TRAFFIC_BUDGET.as_secs()).div_ceil(prod_pix::CYCLE_PACKETS)
+        + MAX_SSAS_IN_FLIGHT
+        <= prod_pix::BUDGETED_CYCLES,
+    "the traffic budget buys more deposits than the Entry is budgeted for"
+);
+
 /// Budget for offering a payload of `traffic` seconds at the paced rate.
 ///
 /// The pace is per write, so the payload is offered over roughly its own span; the multiplier
@@ -221,13 +214,11 @@ fn node_for(env: &IntegrationEnv, address: Address) -> anyhow::Result<NodeInfo> 
 /// collide, the same reason `tests/integration.rs` randomises its payload.
 ///
 /// **The whole payload is allocated up front.** The buffer is `datagrams_for(budget) × CHUNK`,
-/// which at the default 4 000 packets/s is ~2.6 GB for the happy path ([`TRAFFIC_BUDGET`] =
-/// 464 s → 1 856 000 datagrams × 1 400 B) and ~2.8 GB for the resilience scenario
-/// ([`KILL_TRAFFIC_BUDGET`] + [`KILL_SETTLE`] = 500 s → 2 000 000 datagrams). `pump::pump_halves`
-/// adds a second buffer of the same order — it reserves `Vec::with_capacity(total_bytes)` and
-/// accumulates the return stream into it with `received.extend_from_slice` in its reader loop
-/// (`integration/src/pump.rs`) — so the peak is roughly twice the payload: ~5 GB on the happy
-/// path, ~6 GB for the kill scenario.
+/// which at the default 4 000 packets/s is ~2.6 GB ([`TRAFFIC_BUDGET`] = 464 s → 1 856 000
+/// datagrams × 1 400 B). `pump::pump_halves` adds a second buffer of the same order — it reserves
+/// `Vec::with_capacity(total_bytes)` and accumulates the return stream into it with
+/// `received.extend_from_slice` in its reader loop (`integration/src/pump.rs`) — so the peak is
+/// roughly twice the payload, ~5 GB.
 ///
 /// It is left unbounded deliberately, because the retention is not local to this scenario.
 /// `pump_halves` is shared by ~9 suites, and both `sha_ok` (a full-payload digest of the returned
@@ -315,106 +306,6 @@ async fn assert_exit_was_paid(
     Ok(())
 }
 
-/// Why the Exit's PIX supervisor closed the Session, read out of its own log.
-///
-/// The causes this scenario can produce are opposite verdicts and look identical from the Entry's
-/// counters alone, so the Exit's own log is what tells them apart:
-///
-/// * `CommitmentTimeout` in `AwaitingCommitment` — the Exit asked for the successor cycle's
-///   commitment and never got it. Since hoprnet#8525 the Exit re-sends an unanswered request every
-///   `ssa_request_resend_interval`, so reaching this deadline means the request was refused for the
-///   whole window rather than merely lost once.
-/// * `DepositTimeout` / `DepositObserverClosed` — the Entry's `SsaCommit` arrived but no deposit
-///   confirmation followed: the deadline expired, or the Exit's deposit observer went away. The
-///   deposit path failing, not the surplus.
-/// * `RecoveryIdle` — the cycle in flight stopped making progress. At this geometry that means the
-///   lost share of the emission took polynomials below their threshold, which is the split's own
-///   break-even rather than a control-plane fault.
-/// * `RecoveryDeadline` — the cycle outlived `max_recovery_time`. Four hours here, so in a run of
-///   minutes it means the deadline was misconfigured rather than that the cycle was slow.
-/// * `UnverifiableShares` — a polynomial's share set failed to open its commitment. Corrupted or
-///   mis-keyed shares, which no surplus can make up for.
-/// * `BatchServedOutOfOrder` — too much of the batch's recovery progress landed on cycles behind
-///   the front one, i.e. the Exit kept serving shares minted for an older cycle.
-///
-/// Naming these apart is the whole point: a control-plane failure and a split that cannot carry
-/// the loss are different findings, and a test that reports them the same way is worse than none.
-fn why_the_session_closed(env: &IntegrationEnv, exit: &NodeInfo) -> String {
-    const NEEDLES: &[(&str, &str)] = &[
-        (
-            "reason=CommitmentTimeout",
-            "the Exit's PIX supervisor closed the Session with CommitmentTimeout in \
-             AwaitingCommitment: it asked for the successor cycle's commitment and never received \
-             it. Since hoprnet#8525 the Exit re-sends an unanswered request every \
-             `ssa_request_resend_interval` (3 s by default), so reaching this deadline means the \
-             Entry refused it for the whole window — check the Entry's log for \
-             `refused an under-served SSA request` and the `observed`/`required` figures it names",
-        ),
-        (
-            "reason=DepositTimeout",
-            "the Exit's PIX supervisor closed the Session on a deposit timeout: the Entry's \
-             commitment arrived but its deposit did not land inside max_deposit_wait, which is the \
-             surplus genuinely failing to carry the loss",
-        ),
-        (
-            "gave up waiting for the deposit",
-            "the Exit's deposit observer gave up on an SSA whose deposit never arrived inside \
-             max_deposit_wait",
-        ),
-        (
-            "reason=DepositObserverClosed",
-            "the Exit's PIX supervisor closed the Session with DepositObserverClosed: its deposit \
-             observer went away before confirming the deposit, a fault in the Exit's chain \
-             connection rather than in the surplus",
-        ),
-        (
-            "reason=RecoveryIdle",
-            "the Exit's PIX supervisor closed the Session with RecoveryIdle: the cycle in flight \
-             stopped making progress and its recovery idle deadline expired. At this geometry that \
-             means the lost share of the emission took polynomials below their threshold — the \
-             surplus's own break-even — rather than any control-plane fault",
-        ),
-        (
-            "reason=RecoveryDeadline",
-            "the Exit's PIX supervisor closed the Session with RecoveryDeadline: a cycle outlived \
-             max_recovery_time, which at four hours cannot happen inside this scenario's run and \
-             points at the cluster's PIX config rather than at the cycle",
-        ),
-        (
-            "reason=UnverifiableShares",
-            "the Exit's PIX supervisor closed the Session with UnverifiableShares: a polynomial's \
-             share set failed to open its commitment, so shares arrived corrupted or keyed to the \
-             wrong relayer — no surplus covers that",
-        ),
-        (
-            "reason=BatchServedOutOfOrder",
-            "the Exit's PIX supervisor closed the Session with BatchServedOutOfOrder: too much of the \
-             batch's recovery progress landed on cycles behind the front one, i.e. the Exit kept \
-             serving SURBs carrying an older cycle's shares after the kill",
-        ),
-    ];
-    // `node_log_contains` reads the node's own log, which is the only place this is recorded: the
-    // closure reason is not exposed over the REST API and the `hopr_pix_*` family carries no
-    // Session label, so a reason that arrived as a counter would be indistinguishable between
-    // Sessions.
-    for (needle, message) in NEEDLES {
-        match env
-            .cluster()
-            .and_then(|cluster| cluster.node_log_contains(exit.address, needle))
-        {
-            Ok(true) => return format!("{message}."),
-            Ok(false) => {}
-            Err(error) => {
-                return format!(
-                    "(could not read the Exit's log to attribute the close: {error:#})"
-                );
-            }
-        }
-    }
-    "The Exit's log names no PIX closure reason, so the Session was closed by something else."
-        .to_string()
-}
-
 /// A one-line reading of how fast the Session actually carried data, for a shortfall's message.
 ///
 /// A cycle count below target has two very different causes — the geometry not recovering, and the
@@ -436,9 +327,6 @@ fn geometry_rate_hint(transfer: &Transfer, offered: Duration) -> String {
 }
 
 /// The Exit served traffic and was paid for it, with no cycle lost and the Session never closing.
-///
-/// Shared by both scenarios: the relayer-kill one differs only in *when* a relayer dies, so
-/// anything that separates them is the protocol behaving differently rather than the measurement.
 fn assert_the_deployed_geometry_recovered(
     transfer: &Transfer,
     exit_counters: &PixCounters,
@@ -569,16 +457,16 @@ fn assert_the_gate_served_the_surplus(gate: &ExitTelemetry, trace: &Trace, label
         gate.summary()
     );
 
-    // A recovered cycle's accepted-share fraction sits above 1.0 when the Exit took the negotiated
-    // surplus: a complete cycle lands at `(threshold + surplus) / threshold` = 3.47 at this split.
-    // Independent of the trace's sampling entirely.
+    // A recovered cycle's accepted-share fraction sits above 1.0 when the Exit took surplus before
+    // the cycle recovered, which is when the Exit records it; `(threshold + surplus) / threshold` =
+    // 3.47 at this split is the ceiling. Independent of the trace's sampling entirely.
     match gate.accepted_fraction("recovered") {
         Some(hist) => {
             let above_one = hist.above(1.0).unwrap_or(0);
             assert!(
                 above_one > 0,
                 "{label}: no finalized cycle recorded an accepted-share fraction above 1.0, so the \
-                 Exit never took a conforming surplus — a cycle at this split lands at {:.2}. {}",
+                 Exit never took a conforming surplus — a cycle at this split can reach {:.2}. {}",
                 (prod_pix::PIX_SHARES + prod_pix::PIX_ADDITIONAL_SHARES) as f64
                     / prod_pix::PIX_SHARES as f64,
                 gate.summary()
@@ -595,8 +483,8 @@ fn assert_the_gate_served_the_surplus(gate: &ExitTelemetry, trace: &Trace, label
 /// The happy path at the deployed geometry: three cycles complete, are swept, and are paid for.
 ///
 /// This is the scenario that answers "can the shipped configuration run at all on a machine that
-/// is not the deployed network". The relayer-kill scenario below is the one that answers the
-/// resilience question; this is its control, and a failure here makes that one unreadable.
+/// is not the deployed network". `tests/pix_relay_loss.rs` answers the resilience question; this is
+/// its control at the deployed configuration, and a failure here makes that suite unreadable.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires PIX-enabled hoprd/hoprd-localcluster binaries and a chain"]
 async fn the_deployed_geometry_should_complete_and_sweep_its_cycles() -> anyhow::Result<()> {
@@ -726,410 +614,6 @@ async fn the_deployed_geometry_should_complete_and_sweep_its_cycles() -> anyhow:
     tracing::info!(
         cycles, deposited, %recovered,
         "deployed-geometry PIX test PASSED in {:?}", t0.elapsed()
-    );
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// The resilience scenario
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// How far into the first cycle the relayer is killed.
-///
-/// A quarter of a nominal cycle, which is inside the 25-50 % window the issue names and — more
-/// importantly — early enough that the shares aimed at the victim are still unspent. A share is
-/// bound to its SURB when the SURB is *minted*, so a relayer killed after the buffer has drained of
-/// its SURBs costs the cycle nothing; killing at a quarter leaves most of the victim's share of the
-/// emission still ahead of the kill.
-///
-/// Expressed in *time* rather than in packets, for the reason [`TRAFFIC_BUDGET`] gives: the share
-/// rate is not the forward packet rate, so a packet count would put the kill at an unpredictable
-/// point in the cycle.
-fn kill_after() -> Duration {
-    Duration::from_secs(prod_pix::nominal_cycle_secs() / 4)
-}
-
-/// How long traffic keeps flowing after the kill before the asserted cycles are counted.
-///
-/// The kill has to land while the cycle in flight is still emitting, and the survivors have to be
-/// re-planned onto before the count begins — otherwise the outage is charged to a cycle that
-/// recovered through it. Comfortably longer than the ~9 s detection `tests/return_path.rs`
-/// measured.
-const KILL_SETTLE: Duration = Duration::from_secs(20);
-
-/// Quiet period the post-kill pump tolerates before calling the return stream idle.
-///
-/// Must exceed the Exit's worst egress-gate park after a kill — measured at ~40 s while it served
-/// its way through the SURBs minted before the relayer died — or the reader stops during the
-/// outage and the phase's arrival figure describes the stall rather than the recovery. The pump's
-/// own default is 10 s, which is *inside* that window. Stated for the same reason
-/// `tests/return_path.rs` states its `SURVIVAL_IDLE_BUDGET`.
-const KILL_IDLE_BUDGET: Duration = Duration::from_secs(90);
-
-/// Seconds of traffic the *resilience* scenario offers after the kill.
-///
-/// The kill costs the cycle in flight a burst, not a sustained halving of the share rate: the Entry
-/// re-plans around the dead relayer within seconds, and once the Exit's gate releases it serves at
-/// the full rate again. Measured over the four kill runs at 29–43 % loss: 9 cycles swept from 980 s
-/// of traffic, ~109 s per cycle — no longer than the lossless ~116 s, and not the ~240 s an earlier
-/// sizing assumed.
-///
-/// Sized at 120 s per cycle for [`TARGET_CYCLES`] plus a whole cycle of margin, so a run that lands
-/// on the target is not one that only just scraped it. Not larger, for the reason the guard below
-/// states: every extra cycle the traffic buys is another deposit against the Entry's
-/// [`prod_pix::BUDGETED_CYCLES`].
-const KILL_TRAFFIC_BUDGET: Duration = Duration::from_secs(4 * 120);
-
-/// Neither scenario may offer enough traffic for its deposits to exceed the Entry's budget.
-///
-/// The Entry deposits once per cycle the traffic completes plus up to [`MAX_SSAS_IN_FLIGHT`]
-/// successors funded ahead of recovery. Past [`prod_pix::BUDGETED_CYCLES`] it refuses to pay,
-/// `deposits_over_budget` moves and the scenario fails although the protocol behaved — which is
-/// what a 980 s kill budget risked: ~8.6 cycles of traffic and 9 swept left room for only one
-/// successor in flight against the two the pipelining allows. Judged at the default rate, rounded
-/// up to whole cycles; a raised `HOPRD_PROD_PIX_RATE` scales the deposits with it.
-const _: () = {
-    const fn deposits_for(traffic: Duration) -> u64 {
-        (prod_pix::DEFAULT_PACKET_RATE * traffic.as_secs()).div_ceil(prod_pix::CYCLE_PACKETS)
-            + MAX_SSAS_IN_FLIGHT
-    }
-    assert!(
-        deposits_for(TRAFFIC_BUDGET) <= prod_pix::BUDGETED_CYCLES,
-        "the happy path's traffic budget buys more deposits than the Entry is budgeted for"
-    );
-    assert!(
-        deposits_for(KILL_TRAFFIC_BUDGET.saturating_add(KILL_SETTLE)) <= prod_pix::BUDGETED_CYCLES,
-        "the kill scenario's traffic budget buys more deposits than the Entry is budgeted for"
-    );
-};
-
-/// How much of the return traffic the killed relayer may have been carrying, as a fraction.
-///
-/// Outside the band the run reports itself **inconclusive** rather than passing or failing.
-///
-/// **The upper bound is not a preference — it is the surplus's design point.** The deployed
-/// `4096 x (32 + 79)` split tolerates a *sustained* 50 % share loss at 99 % of cycles, and its
-/// break-even ratio is `surplus/(threshold + surplus)` = 79/111 = **71.2 %**, which is by
-/// definition the loss at which a polynomial receives *exactly* its threshold on average —
-/// `111 × (1 − 79/111) = 32.0` against a threshold of 32. Half of all polynomials land below that
-/// average and — because the SSA is the sum of *every* polynomial's constant term — the cycle
-/// cannot be recovered at all. The loss tolerance is a cliff, not a slope.
-///
-/// Measured: a run that killed the 72 % relayer recovered 3 584 of 4 096 polynomials and then
-/// stopped, exactly as that arithmetic predicts, and failed with `reason=RecoveryIdle` at
-/// `largest_useful_shares=116231` against a target of 131 072. That is the configuration working
-/// as designed, not a defect — and asserting against it would make this scenario fail whenever the
-/// weight draw happened to be skewed.
-///
-/// So the victim is the *quietest* relayer (`relayers::RelayerSpread::quietest`) and the band is where the
-/// surplus actually has work to do: at least [`MIN_MEASURED_LOSS`] so the kill removes a real
-/// share of the emission, and at most [`MAX_MEASURED_LOSS`] so it stays clear of break-even. With
-/// two candidates the quiet one carries `1 - share` of the busier, so this is exactly the
-/// "one of two relayers" scenario the issue asks for on any draw.
-const MIN_MEASURED_LOSS: f64 = 0.25;
-
-/// Upper bound — below the 71.2 % break-even ratio with margin for the draw's own variance, since
-/// the loss is measured over a window rather than over the whole cycle.
-const MAX_MEASURED_LOSS: f64 = 0.60;
-
-/// The Exit still recovers every cycle when one of its two return relayers is killed mid-cycle.
-///
-/// # What this proves
-///
-/// `4096 × (32 + 79)` is sized so that a cycle still recovers at 99 % when half of all shares are
-/// lost, which is what losing one of two return relayers costs. That tolerance was verified
-/// manually, once, on a 4-node localcluster before hoprnet#8519's successor-gate change; nothing
-/// automated checked it, and the new gate had never faced a real relayer failure. This scenario is
-/// that check.
-///
-/// # Why the successor gate is the thing at risk
-///
-/// The Entry funds the Exit's next batch only once the returned packets it has seen reach a lower
-/// confidence bound on an honest Exit's arrivals at the tolerated loss — 4σ below the mean, which
-/// at this split is 41.0 % of a cycle. An Exit whose first relayer acknowledged a packet and then
-/// dropped it is indistinguishable from an honestly lossy path, so at exactly 50 % observed loss
-/// the gate clears by 1.24 % and is refused from about 50.6 %.
-///
-/// A refusal used to be fatal: the Exit sent its successor request once, so a refusal left it in
-/// `AwaitingCommitment` until `max_ssa_delivery_time` and closed the Session (hoprnet#8523). Since
-/// hoprnet#8525 the Exit re-sends the request every `ssa_request_resend_interval` while its
-/// predecessor is served, so a refusal costs an interval rather than the Session — and the
-/// re-send count is what shows the gate was exercised at all (`ssa_requests_resent`, logged below).
-///
-/// # What a failure looks like
-///
-/// The diagnostics the issue asks for are all logged: the measured loss (the victim's share of
-/// return packets before the kill), the affected cycles' useful- and accepted-share fractions, and
-/// every `hopr_pix_gate_blocks_total{reason}`.
-#[test_log::test(tokio::test(flavor = "multi_thread"))]
-#[ignore = "requires PIX-enabled hoprd/hoprd-localcluster binaries and a chain"]
-async fn the_exit_should_recover_every_cycle_when_half_the_relayers_die() -> anyhow::Result<()> {
-    prod_pix::install_profile();
-    cluster::request_cluster_size(NODES);
-    let t0 = std::time::Instant::now();
-
-    let per_cycle = prod_pix::per_cycle()?;
-    let env = IntegrationEnv::setup_pix_with(prod_pix::entry_config()?).await?;
-    let (session, exit_addr) = env
-        .open_pix_session_with(
-            FORWARD_HOPS,
-            RETURN_HOPS,
-            prod_pix::surb_balancer(),
-            hoprd_integration_test::SessionTarget::ExitNode(0),
-        )
-        .await?;
-    let exit = node_for(&env, exit_addr)?;
-    let candidates = env.relayer_candidates(exit_addr)?;
-    // The count is the experiment. Two candidates means killing one removes exactly half the
-    // return traffic, which is what the surplus is sized against; a third would make this an
-    // approximate loss and the assertion below could not tell a real failure from an arithmetic
-    // one.
-    anyhow::ensure!(
-        candidates.len() == 2,
-        "this scenario needs exactly 2 return-relayer candidates so the kill is a 50 % loss by \
-         construction, got {}. Raise NODES by one to add a candidate.",
-        candidates.len()
-    );
-    tracing::info!(
-        exit = %exit_addr,
-        candidates = candidates.len(),
-        elapsed = ?t0.elapsed(),
-        "PIX session open; the Exit has exactly two return-relayer candidates"
-    );
-
-    let exit_before = pix::node_balances(&exit).await?;
-    let exit_counters_before = pix::sample_exit(&exit).await?;
-    let entry_counters_before = pix::sample_entry();
-    let gate_before = pix_exit::sample(&exit).await?;
-    let sampler = pix_exit::Sampler::start(&exit);
-
-    let (mut rx, mut tx) = tokio::io::split(session);
-
-    // ── Phase 1: drive into the first cycle, then kill a relayer mid-emission ──
-    //
-    // One payload for the whole scenario, offered in two pumps over the *same* session: splitting
-    // the payload is what puts the kill at a chosen point in the cycle, while splitting the
-    // session would measure cold-start path selection instead — a replacement session never minted
-    // a SURB through the dead node, which is a much easier question.
-    let payload = payload_for(KILL_TRAFFIC_BUDGET + KILL_SETTLE);
-    let warmup_len = (datagrams_for(kill_after()) as usize * CHUNK).min(payload.len());
-    let warmup = &payload[..warmup_len];
-
-    // Who is carrying the return traffic right now, so the victim is chosen by measurement rather
-    // than by position.
-    let spread_before = {
-        let before = relayers::sample(&candidates).await;
-        let transfer = pump::pump_halves(
-            &mut rx,
-            &mut tx,
-            warmup,
-            "pix-prod-warmup",
-            pump_budget(kill_after()),
-            pix_pump_opts(),
-        )
-        .await?;
-        anyhow::ensure!(
-            transfer.arrival_pct() > 0.0,
-            "the baseline pump returned nothing, so the path was already broken before the kill \
-             and the result would say nothing about resilience (outcome {:?})",
-            transfer.outcome
-        );
-        let after = relayers::sample(&candidates).await;
-        relayers::spread(&before, &after)
-    };
-    tracing::info!(
-        spread = %spread_before.summary(),
-        total = spread_before.total,
-        "return-relayer split before the kill"
-    );
-
-    // The *quietest* relayer, not the busiest — see [`MAX_MEASURED_LOSS`]. Killing the busiest
-    // removes the largest share available, which on a skewed draw lands past the split's
-    // break-even ratio and produces a failure that is the configuration working correctly.
-    let victim_addr = spread_before
-        .quietest()
-        .ok_or_else(|| anyhow::anyhow!("no relayer forwarded anything; nothing to kill"))?;
-    let victim = candidates
-        .iter()
-        .find(|n| n.address == victim_addr)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("quietest relayer {victim_addr} is not a cluster node"))?;
-
-    // The measured loss, read *before* the kill from the baseline histogram. This is the figure
-    // the issue asks be reported, and the one that decides whether the run is conclusive at all.
-    let measured_loss = spread_before
-        .share_of_relayer(victim_addr)
-        .ok_or_else(|| anyhow::anyhow!("the chosen victim carried nothing"))?;
-    tracing::info!(
-        victim = %victim_addr,
-        measured_loss_pct = measured_loss * 100.0,
-        break_even_ratio_pct = 100.0 * prod_pix::PIX_ADDITIONAL_SHARES as f64
-            / (prod_pix::PIX_SHARES + prod_pix::PIX_ADDITIONAL_SHARES) as f64,
-        kill_after = ?kill_after(),
-        "killing the quietest return relayer a quarter of the way into the first cycle"
-    );
-
-    // Conclusiveness is decided *here*, before the kill, and not after the budget has been spent.
-    // An out-of-band kill is reported as unmeasured rather than as a pass or a failure — the issue
-    // is explicit that the test only means something if the kill removes about half the traffic —
-    // and there is a concrete case in which the run is knowably inconclusive from this figure
-    // alone: `relayers::spread` drops zero-delta relayers, so if only one candidate forwarded
-    // during warm-up `quietest()` returns it with a share of 1.0, above the upper bound. Checking
-    // after the kill would burn the full budget and a `SETTLE_TIMEOUT` before saying so.
-    anyhow::ensure!(
-        (MIN_MEASURED_LOSS..=MAX_MEASURED_LOSS).contains(&measured_loss),
-        "INCONCLUSIVE: the killed relayer was carrying {:.1}% of the return traffic, outside the \
-         {:.0}-{:.0}% band this scenario needs. The upper bound is kept below the split's break-even \
-         ratio — above that ratio the cycle is unrecoverable by design and a failure would say \
-         nothing about the surplus. Spread: {}.",
-        measured_loss * 100.0,
-        MIN_MEASURED_LOSS * 100.0,
-        MAX_MEASURED_LOSS * 100.0,
-        spread_before.summary(),
-    );
-    victim.kill()?;
-
-    // ── Phase 2: keep traffic flowing across the kill and for the asserted cycles ──
-    //
-    // What the Exit has to recover from. The kill has already landed, so the cycle in flight is
-    // short of the shares the victim was carrying — which is exactly the loss the surplus exists to
-    // absorb.
-    let rest = &payload[warmup_len..];
-    let transfer = pump::pump_halves(
-        &mut rx,
-        &mut tx,
-        rest,
-        "pix-prod-after-kill",
-        pump_budget(KILL_TRAFFIC_BUDGET + KILL_SETTLE),
-        PumpOpts {
-            idle_budget: Some(KILL_IDLE_BUDGET),
-            ..pix_pump_opts()
-        },
-    )
-    .await?;
-
-    // ── Phase 3: did the cycles that straddle the kill recover? ──
-    let exit_counters =
-        await_sweeps(&exit, &exit_counters_before, TARGET_CYCLES, SETTLE_TIMEOUT).await?;
-    let entry_counters = entry_counters_before.delta(&pix::sample_entry());
-    let trace = sampler.finish().await;
-    let gate = gate_before.delta(&pix_exit::sample(&exit).await?);
-    let recovered = pix::node_balances(&exit).await?.safe - exit_before.safe;
-
-    tracing::info!(
-        %recovered, measured_loss_pct = measured_loss * 100.0, elapsed = ?t0.elapsed(),
-        "entry counters: {} | exit counters: {}",
-        entry_counters.summary(),
-        exit_counters.summary()
-    );
-
-    // The Session must not have closed. A gate that misjudged the loss shows up here rather than
-    // as a wrong counter — and the Exit's own log names which failure it was.
-    assert!(
-        !transfer.outcome.exit_stopped_serving(),
-        "the Session stopped being served after the kill (outcome {:?}). {} Entry {}; exit {}",
-        transfer.outcome,
-        why_the_session_closed(&env, &exit),
-        entry_counters.summary(),
-        exit_counters.summary(),
-    );
-
-    assert_the_deployed_geometry_recovered(
-        &transfer,
-        &exit_counters,
-        &entry_counters,
-        TARGET_CYCLES,
-        "relayer kill",
-    );
-
-    let cycles = pix::completed_cycles(recovered, per_cycle).unwrap_or_else(|| {
-        panic!(
-            "the Exit's Safe gained {recovered}, which is not a whole multiple of the {per_cycle} \
-             per-SSA deposit — something other than PIX sweeps moved the balance (exit: {})",
-            exit_counters.summary()
-        )
-    });
-
-    // Diagnostics the issue asks for, logged for any run that gets past the pre-kill
-    // conclusiveness check — any conclusive run, pass or fail.
-    tracing::info!(
-        measured_loss_pct = measured_loss * 100.0,
-        useful_fraction_recovered = ?gate.useful_fraction("recovered").map(|h| h.mean()),
-        accepted_fraction_recovered = ?gate.accepted_fraction("recovered").map(|h| h.mean()),
-        gate_blocks_share_lag = ?gate.gate_blocks("share_lag"),
-        gate_blocks_predeposit = ?gate.gate_blocks("predeposit_exhausted"),
-        // The direct evidence that the successor path was exercised rather than merely survived: a
-        // re-send means the Entry refused or lost the first request, which before hoprnet#8525
-        // ended the Session. `None` means the Exit predates the counter.
-        ssa_requests_resent = ?gate.ssa_requests_resent(),
-        cycles_committed = ?gate.cycles("committed"),
-        cycles_failed = ?gate.cycles("failed"),
-        "PIX diagnostics after the kill"
-    );
-
-    // The conclusiveness band was checked before the kill (see the `ensure!` above the `kill()`),
-    // so the counters are logged here purely as diagnostics before the verdict — deliberately
-    // before the assertion, so the run's own figures are readable whether it passes or fails.
-
-    assert!(
-        cycles >= TARGET_CYCLES,
-        "the Exit swept {cycles} cycles across the kill, expected at least {TARGET_CYCLES} \
-         ({recovered} recovered against a {per_cycle} per-cycle deposit). Before the kill the \
-         victim carried {:.1}% of the return traffic, so the cycle in flight lost the shares on \
-         the SURBs minted through it until the Entry re-planned — the burst the deployed 79-share \
-         surplus exists to cover. A shortfall here means the surplus did not absorb it, or the \
-         successor gate refused the next batch. Entry {}; exit {}; gate {}",
-        measured_loss * 100.0,
-        entry_counters.summary(),
-        exit_counters.summary(),
-        gate.summary(),
-    );
-
-    // The swept count says the Session survived, not that the cycle in flight at the kill did: if
-    // that cycle died and its successor took over, the Session keeps sweeping and the count above
-    // still passes. The supervisor books a cycle that did not recover as `failed`, whatever the
-    // reason — the discriminator `tests/pix_relay_loss.rs` relies on for the same question.
-    assert_eq!(
-        0,
-        gate.cycles("failed").unwrap_or(0),
-        "a PIX cycle failed across the kill and a successor took over, so the Session survived \
-         but the cycle in flight at the kill was lost. {} Gate {}",
-        why_the_session_closed(&env, &exit),
-        gate.summary(),
-    );
-
-    // The entry paid for every swept cycle and for hardly any more, as on the happy path. A cycle
-    // that died after its deposit landed shows up here as a deposit with no sweep behind it.
-    let deposited = entry_counters.deposits().unwrap_or_else(|| {
-        panic!(
-            "the entry exposed no hopr_strategy_pix_deposits_total series — it was built without \
-             `hopr-strategy/telemetry` ({})",
-            entry_counters.summary()
-        )
-    });
-    assert!(
-        (cycles..=cycles + MAX_SSAS_IN_FLIGHT).contains(&deposited),
-        "the entry deposited for {deposited} SSAs but only {cycles} were recovered and swept \
-         across the kill. Up to {MAX_SSAS_IN_FLIGHT} may legitimately be in flight thanks to \
-         early-recovery pipelining; more than that means deposits were made for SSAs that never \
-         completed."
-    );
-
-    assert_the_gate_served_the_surplus(&gate, &trace, "relayer kill");
-    assert_exit_was_paid(
-        &exit,
-        &exit_before,
-        exit_counters.sweeps().unwrap_or(0),
-        TARGET_CYCLES,
-    )
-    .await?;
-
-    close_session(&mut tx).await;
-    tracing::info!(
-        cycles,
-        measured_loss_pct = measured_loss * 100.0,
-        "50 %-relayer-loss PIX test PASSED in {:?}",
-        t0.elapsed()
     );
     Ok(())
 }

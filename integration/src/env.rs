@@ -518,8 +518,8 @@ impl IntegrationEnv {
     /// Only the **return** path needs a relay. The share encryption key is derived from the first
     /// *return* relayer's acknowledgement, so a zero-hop return path has nothing to derive it from
     /// and the Session is refused outright — but the forward path may be direct, and a scenario that
-    /// wants to read the return-relayer histogram needs it to be (see `FORWARD_HOPS` in
-    /// `tests/pix_prod.rs`).
+    /// wants to read the return-relayer histogram needs it to be (see `RETURN_ONLY` in
+    /// `tests/pix_relay_loss.rs`).
     #[cfg(feature = "v5")]
     async fn open_pix_session(
         &self,

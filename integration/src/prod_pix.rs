@@ -33,15 +33,19 @@
 //!
 //! # What is deliberately unlike production
 //!
-//! Nothing about the geometry. Two things about the *sizing around* it, both forced by a test
-//! having finite wall-clock and a local chain:
+//! Nothing about the geometry, and nothing about the Exit's deadlines: [`MAX_SSA_DELIVERY_TIME`],
+//! [`MAX_DEPOSIT_WAIT`] and [`MAX_RECOVERY_TIME`] are upstream's defaults (20 s, 60 s, four hours),
+//! stated rather than defaulted so the validator's floor check against `quota_range_max` is judged
+//! on the values this profile means. A scenario never waits out the four hours — it waits on the
+//! cycles it can count.
 //!
-//! * [`MAX_RECOVERY_TIME`] is the upstream default (four hours) *in the cluster config*, but a
-//!   scenario never waits for it — it waits on the cycles it can count. Stating it rather than
-//!   defaulting keeps the validator's floor check against `quota_range_max` honest.
-//! * [`MAX_DEPOSIT_WAIT`] is 60 s rather than upstream's own, matching the localcluster demo: an
-//!   Anvil block is ~1 s and a public chain's ~6 s, so the deployed value leaves a cycle far more
-//!   room than a local one needs, and the kill-switch fuse is the *sum* of the two deadlines.
+//! What differs is the Session's own sizing, which upstream leaves to the Entry:
+//!
+//! * the SURB buffer the Entry asks the Exit to hold ([`surb_buffer_target`]), sized for the
+//!   cluster's rate rather than the deployed network's;
+//! * the Exit's egress gate, [`max_served_without_progress`], which follows that buffer (upstream's
+//!   default is 2 048 packets, far below a buffer of this depth, so the gate would block on the
+//!   drain after every recovery).
 //!
 //! # Overrides
 //!
@@ -124,11 +128,10 @@ pub const MAX_SSA_DELIVERY_TIME: Duration = Duration::from_secs(20);
 
 /// Exit's deadline for the deposit to land.
 ///
-/// The localcluster demo's 60 s rather than upstream's own: an Anvil block is ~1 s where a public
-/// one is ~6 s, and the kill-switch fuse is the sum of this and [`MAX_SSA_DELIVERY_TIME`]. A
-/// *cycle* must still outlast a deposit round trip by a wide margin — the compile-time guard below
-/// states it — or the Exit reconstructs a key before its deposit is mined, logs "already swept",
-/// and strands the funds at the stealth address.
+/// Upstream's default, 60 s; the kill-switch fuse is the sum of this and
+/// [`MAX_SSA_DELIVERY_TIME`]. A *cycle* must still outlast a deposit round trip by a wide margin —
+/// the compile-time guard below states it — or the Exit reconstructs a key before its deposit is
+/// mined, logs "already swept", and strands the funds at the stealth address.
 pub const MAX_DEPOSIT_WAIT: Duration = Duration::from_secs(60);
 
 /// Absolute per-cycle recovery deadline, and the idle tariff.
