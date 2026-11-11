@@ -56,10 +56,18 @@
 //! 2400-SURB wipe, and the negative control is surplus 4 (2048): `HOPRD_PIX_ADDITIONAL_SHARES=4`,
 //! expected to end in `recovery_idle`, and it did at 512 (RLH in `docs/pix-relay-loss.md`).
 //!
+//! # Past the first sweep
+//!
+//! The three single-cycle scenarios stop once the cycle in flight at the kill is swept, so they show
+//! that its successor was *requested* and nothing more. A fourth carries [`RETURN_ONLY`] on for
+//! [`SUSTAINED_CYCLES`] swept cycles: the successor is where the loss can still bite, since the
+//! Entry funds it only once the replies it has counted clear its successor gate, and the burst left
+//! that count short. See [`a_pix_session_keeps_completing_cycles_after_a_return_relay_death`].
+//!
 //! # Running
 //!
 //! ```text
-//! LINE=v5 HOPRD_SRC=../hoprd just pix-relay-loss                      # the three scenarios
+//! LINE=v5 HOPRD_SRC=../hoprd just pix-relay-loss                      # every scenario
 //! HOPRD_PIX_ADDITIONAL_SHARES=16 LINE=v5 … just pix-relay-loss        # the shipped surplus
 //! HOPRD_PIX_ADDITIONAL_SHARES=4  LINE=v5 … just pix-relay-loss        # the negative control
 //! LINE=v5 … just pix-relay-loss a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe
@@ -149,6 +157,13 @@ const RETURN_TWO_HOP: Topology = Topology {
     relays: 3,
 };
 
+/// Swept cycles the sustained scenario requires: the one in flight at the kill and the two after it.
+///
+/// Three, issue #74's "the Session stays up across three cycles". The first successor is the one the
+/// Entry's gate judges against the burst's shortfall; the second shows the Session settled back into
+/// its lossless rhythm on the surviving relay rather than scraping through one handover.
+const SUSTAINED_CYCLES: u64 = 3;
+
 // Cluster size is `1 + topology.relays`: the Exit plus its relay candidates. Two candidates make
 // killing one killing half of them -- with four a death would cost a quarter of the return stream
 // and the planner would have three places to go, and the question asked here is the one where the
@@ -196,13 +211,14 @@ fn warmup_budget() -> Duration {
     Duration::from_secs(2 * relay_loss::nominal_cycle_secs() + 120)
 }
 
-/// How long the cycle gets to recover and be swept, measured from the start of the traffic.
+/// How long `cycles` cycles get to recover and be swept, measured from the start of the traffic.
 ///
-/// Three nominal cycles plus three minutes. The achieved cycle runs ~1.3x nominal here, and the
-/// outage adds the detection window plus however long the open-loop refill takes to put the Exit's
-/// buffer back — so the slack is for the failure under test, not for the cluster.
-fn sweep_budget() -> Duration {
-    Duration::from_secs(3 * relay_loss::nominal_cycle_secs() + 180)
+/// Two nominal cycles more than asked for, plus three minutes: three nominal cycles for one. The
+/// achieved cycle runs ~1.3x nominal here, and the outage adds the detection window plus however
+/// long the open-loop refill takes to put the Exit's buffer back — so the slack is for the failure
+/// under test, not for the cluster.
+fn sweep_budget(cycles: u64) -> Duration {
+    Duration::from_secs((cycles + 2) * relay_loss::nominal_cycle_secs() + 180)
 }
 
 /// Poll cadence while waiting on the Exit.
@@ -314,7 +330,7 @@ struct Outage {
     killed_after: f64,
 }
 
-/// Wait for the cycle to get going, kill half the return relayers, then wait for the sweep.
+/// Wait for the cycle to get going, kill half the return relayers, then wait for `cycles` sweeps.
 ///
 /// Everything time-ordered about the scenario lives here so the traffic tasks stay dumb loops. It
 /// sets `stop` on the way out, whatever happened, or the two of them would run out their full
@@ -324,6 +340,7 @@ async fn drive_outage(
     candidates: &[NodeInfo],
     gate_before: &ExitTelemetry,
     strategy_before: &PixCounters,
+    cycles: u64,
 ) -> anyhow::Result<(Outage, PixCounters)> {
     let started = std::time::Instant::now();
     let relayers_before = relayers::sample(candidates).await;
@@ -406,9 +423,9 @@ async fn drive_outage(
     victim.kill()?;
     let killed_after = started.elapsed().as_secs_f64();
 
-    // ── does the cycle still complete and pay ──
-    let remaining = sweep_budget().saturating_sub(started.elapsed());
-    let swept = await_sweeps(exit, strategy_before, remaining).await?;
+    // ── does the cycle still complete and pay, and the ones after it ──
+    let remaining = sweep_budget(cycles).saturating_sub(started.elapsed());
+    let swept = await_sweeps(exit, strategy_before, remaining, cycles).await?;
 
     Ok((
         Outage {
@@ -421,7 +438,7 @@ async fn drive_outage(
     ))
 }
 
-/// Poll the Exit until it has swept a cycle, or the budget expires.
+/// Poll the Exit until it has swept `target` cycles, or the budget expires.
 ///
 /// Returns the delta either way rather than erroring on timeout: "timed out" says nothing about
 /// whether the cycle was never recovered, recovered and never swept, or swept against a deposit
@@ -430,13 +447,18 @@ async fn await_sweeps(
     exit: &NodeInfo,
     before: &PixCounters,
     budget: Duration,
+    target: u64,
 ) -> anyhow::Result<PixCounters> {
     let deadline = std::time::Instant::now() + budget;
     let mut delta = before.delta(&pix::sample_exit(exit).await?);
     while std::time::Instant::now() < deadline {
         delta = before.delta(&pix::sample_exit(exit).await?);
-        if delta.sweeps().unwrap_or(0) >= 1 {
-            tracing::info!(summary = %delta.summary(), "the Exit swept a cycle after the outage");
+        if delta.sweeps().unwrap_or(0) >= target {
+            tracing::info!(
+                target,
+                summary = %delta.summary(),
+                "the Exit swept the cycles the scenario asks for after the outage"
+            );
             return Ok(delta);
         }
         tracing::info!(
@@ -459,9 +481,10 @@ async fn assert_exit_was_paid(
     exit: &NodeInfo,
     before: &pix::NodeBalances,
     swept: u64,
+    required: u64,
 ) -> anyhow::Result<()> {
     let per_cycle = relay_loss::per_cycle()?;
-    let target = per_cycle * swept.max(1);
+    let target = per_cycle * swept.max(required);
     let deadline = std::time::Instant::now() + PAYMENT_SETTLE;
     let mut delta = pix::node_balances(exit).await?.safe - before.safe;
     while std::time::Instant::now() < deadline && delta < target {
@@ -470,7 +493,7 @@ async fn assert_exit_was_paid(
         tracing::info!(%delta, %target, "waiting for the Exit's Safe to receive the swept cycle");
     }
 
-    let floor = per_cycle;
+    let floor = per_cycle * required;
     tracing::info!(
         %delta, %floor, %per_cycle, swept,
         whole_cycles = ?pix::completed_cycles(delta, per_cycle),
@@ -479,8 +502,9 @@ async fn assert_exit_was_paid(
     assert!(
         delta >= floor,
         "the Exit's counters claim {swept} swept cycle(s) but its Safe rose by only {delta}, \
-         against {floor} for one cycle. A sweep counted without funds arriving is the 'already \
-         swept' path — the key was recovered against a stealth address the deposit had not reached."
+         against {floor} for the {required} the scenario requires. A sweep counted without funds \
+         arriving is the 'already swept' path — the key was recovered against a stealth address \
+         the deposit had not reached."
     );
     Ok(())
 }
@@ -511,8 +535,12 @@ async fn assert_exit_was_paid(
 ///   cycle actually produces, and both must be absent.
 /// * **No deposit timed out.** Distinguishes a cycle lost to the outage from one lost because the
 ///   chain was slow, which at this geometry would otherwise look the same.
+///
+/// `cycles` is how many swept cycles the scenario requires: 1 is the cycle in flight at the kill,
+/// and more carries the Session on through that many cycles in all.
 async fn a_pix_session_survives_losing_half_its_return_relayers(
     topology: Topology,
+    cycles: u64,
 ) -> anyhow::Result<()> {
     relay_loss::install_profile();
     cluster::request_cluster_size(1 + topology.relays);
@@ -520,6 +548,7 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
         topology = topology.name,
         forward_hops = topology.forward_hops,
         return_hops = topology.return_hops,
+        cycles,
         "relay-loss scenario"
     );
 
@@ -568,13 +597,14 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
 
     let (mut rx, mut tx) = tokio::io::split(session);
     let stop = AtomicBool::new(false);
-    let budget = sweep_budget();
+    let budget = sweep_budget(cycles);
 
     let (offered, received, driven) = tokio::join!(
         offer_for(&mut tx, budget, &stop),
         drain_for(&mut rx, budget, &stop),
         async {
-            let result = drive_outage(&exit, &candidates, &gate_before, &strategy_before).await;
+            let result =
+                drive_outage(&exit, &candidates, &gate_before, &strategy_before, cycles).await;
             // Whatever happened, release the traffic loops rather than leaving them to run out a
             // twenty-minute budget behind a setup failure.
             stop.store(true, Ordering::Relaxed);
@@ -606,6 +636,9 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
         cycles_requested = ?gate.cycles("requested"),
         cycles_recovered = ?gate.cycles("recovered"),
         cycles_failed = ?gate.cycles("failed"),
+        // Whether the Entry's successor gate refused at all: a re-send is the Exit asking again for a
+        // successor the Entry had not yet admitted (hoprnet#8525). `None` is an Exit without it.
+        ssa_requests_resent = ?gate.ssa_requests_resent(),
         "relay-loss scenario finished"
     );
 
@@ -648,11 +681,14 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
     );
 
     assert!(
-        swept.sweeps().unwrap_or(0) >= 1,
-        "no cycle was swept after half the return relayers died. The cycle that was {:.0}% \
-         complete at the kill never reconstructed: at surplus {} a polynomial absorbs {} lost \
-         shares and the emission window spreads a burst over {} of them, so the cycle tolerates \
-         {} contiguous lost shares against the ~{} a death costs at a {}-SURB buffer. {}",
+        swept.sweeps().unwrap_or(0) >= cycles,
+        "{} of the {cycles} cycle(s) this scenario requires were swept after half the return \
+         relayers died. If none was, the cycle that was {:.0}% complete at the kill never \
+         reconstructed: at surplus {} a polynomial absorbs {} lost shares and the emission window \
+         spreads a burst over {} of them, so the cycle tolerates {} contiguous lost shares against \
+         the ~{} a death costs at a {}-SURB buffer. If some were, a successor was not funded or \
+         not completed in time. {}",
+        swept.sweeps().unwrap_or(0),
         100.0 * outage.shares_at_kill as f64 / relay_loss::cycle_packets() as f64,
         relay_loss::additional_shares(),
         relay_loss::additional_shares(),
@@ -675,17 +711,23 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
     // the early-recovery threshold, and the one `recovered` is the cycle in flight. `failed` is the
     // discriminator: the supervisor books a cycle that did not recover there, whatever the reason,
     // and a replacement for a dead cycle reads as one request and one recovery just the same.
+    //
+    // Carried on for `cycles`, each recovered cycle asked for its successor at its own
+    // early-recovery threshold, so the window holds `cycles` of each. A successor the Entry's gate
+    // refused at first is still one request: the Exit's re-sends are counted apart
+    // (`ssa_requests_resent`) and move no cycle through `hopr_pix_cycles_total`.
     let (requested, recovered, failed) = (
         gate.cycles("requested").unwrap_or(0),
         gate.cycles("recovered").unwrap_or(0),
         gate.cycles("failed").unwrap_or(0),
     );
     assert_eq!(
-        (1, 1, 0),
+        (cycles, cycles, 0),
         (requested, recovered, failed),
         "(requested, recovered, failed) cycles over the scenario: the cycle that was {:.0}% complete \
-         at the kill must be the one that recovered, with one successor requested behind it. A failed \
-         cycle means it died and a successor took over, which the Session-level counters do not show: \
+         at the kill must be the first that recovered, each recovery with its successor requested \
+         behind it. A failed cycle means one died and a successor took over, which the Session-level \
+         counters do not show: \
          at surplus {} the cycle tolerates {} contiguous lost shares against the ~{} a death costs at \
          a {}-SURB buffer, and a late verdict lets the wipe come after more of the stock has gone. {}",
         100.0 * outage.shares_at_kill as f64 / relay_loss::cycle_packets() as f64,
@@ -696,10 +738,11 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
         gate.summary()
     );
 
-    assert_exit_was_paid(&exit, &paid_before, swept.sweeps().unwrap_or(0)).await?;
+    assert_exit_was_paid(&exit, &paid_before, swept.sweeps().unwrap_or(0), cycles).await?;
 
     tracing::info!(
         topology = topology.name,
+        cycles,
         summary = %swept.summary(),
         "PIX survived losing half its return relayers, and was paid"
     );
@@ -710,7 +753,7 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires PIX-enabled hoprd/hoprd-localcluster binaries and a chain"]
 async fn a_pix_cycle_survives_a_relay_death_on_both_paths() -> anyhow::Result<()> {
-    a_pix_session_survives_losing_half_its_return_relayers(SYMMETRIC).await
+    a_pix_session_survives_losing_half_its_return_relayers(SYMMETRIC, 1).await
 }
 
 /// Requests travel direct and only the replies are relayed, which is the harder case.
@@ -724,7 +767,7 @@ async fn a_pix_cycle_survives_a_relay_death_on_both_paths() -> anyhow::Result<()
 #[ignore = "requires PIX-enabled hoprd/hoprd-localcluster binaries and a chain"]
 async fn a_pix_cycle_survives_a_return_relay_death_with_the_forward_path_intact()
 -> anyhow::Result<()> {
-    a_pix_session_survives_losing_half_its_return_relayers(RETURN_ONLY).await
+    a_pix_session_survives_losing_half_its_return_relayers(RETURN_ONLY, 1).await
 }
 
 /// A relay dies in the middle of two-hop return paths. The Exit drops the SURBs that start with it
@@ -735,5 +778,23 @@ async fn a_pix_cycle_survives_a_return_relay_death_with_the_forward_path_intact(
 #[ignore = "requires PIX-enabled hoprd/hoprd-localcluster binaries and a chain"]
 async fn a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe()
 -> anyhow::Result<()> {
-    a_pix_session_survives_losing_half_its_return_relayers(RETURN_TWO_HOP).await
+    a_pix_session_survives_losing_half_its_return_relayers(RETURN_TWO_HOP, 1).await
+}
+
+/// The cycle in flight at a return relay's death recovers, and so do the cycles after it.
+///
+/// [`RETURN_ONLY`] again, carried past the first sweep to [`SUSTAINED_CYCLES`]. The scenarios above
+/// stop at the cycle in flight, which shows its successor was *requested* and nothing more. The
+/// successor is where the loss can still bite: the Entry funds it only once the replies it has
+/// counted clear its successor gate, and the burst left that count short. Before hoprnet#8525 the
+/// Exit asked once and a refusal closed the Session on `commitment_timeout` (hoprnet#8523); since,
+/// it re-sends the request every `ssa_request_resend_interval` until the Entry admits it.
+///
+/// Passing means that path works end to end: every cycle requested was recovered, none failed, the
+/// supervisor closed nothing, and the Exit was paid for all of them. `ssa_requests_resent` in the
+/// final log line says whether the gate refused at all.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires PIX-enabled hoprd/hoprd-localcluster binaries and a chain"]
+async fn a_pix_session_keeps_completing_cycles_after_a_return_relay_death() -> anyhow::Result<()> {
+    a_pix_session_survives_losing_half_its_return_relayers(RETURN_ONLY, SUSTAINED_CYCLES).await
 }

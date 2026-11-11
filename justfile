@@ -206,8 +206,8 @@ tier name="pr": build build-chain
     {{v5_deps}} bash -c 'source scripts/integration/lib.sh; if [ "${LINE}" = v5 ]; then pin_line_deps; fi; run_tier'
 
 # PIX when half the return relays die mid-cycle (binary chain; manual, NOT run in CI, about ten
-# minutes per scenario at the default geometry). See integration/tests/pix_relay_loss.rs and
-# docs/pix-relay-loss.md. Same build path as `just pix`.
+# minutes per scenario at the default geometry, ~25 for the one that sustains three cycles). See
+# integration/tests/pix_relay_loss.rs and docs/pix-relay-loss.md. Same build path as `just pix`.
 #
 # One cluster PER SCENARIO, like `return-path` and for the same reason: each kills a cluster node.
 # They share one chain, started once. `HOPRD_PIX_*` (surplus, geometry, SURB buffer, rate) are
