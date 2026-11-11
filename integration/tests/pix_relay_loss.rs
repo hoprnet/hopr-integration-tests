@@ -637,7 +637,8 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
         cycles_recovered = ?gate.cycles("recovered"),
         cycles_failed = ?gate.cycles("failed"),
         // Whether the Entry's successor gate refused at all: a re-send is the Exit asking again for a
-        // successor the Entry had not yet admitted (hoprnet#8525). `None` is an Exit without it.
+        // successor the Entry had not yet admitted (hoprnet#8525). `None` is no re-send at all: the
+        // series appears on the first one.
         ssa_requests_resent = ?gate.ssa_requests_resent(),
         "relay-loss scenario finished"
     );

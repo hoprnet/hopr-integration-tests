@@ -308,8 +308,11 @@ impl ExitTelemetry {
     ///
     /// The direct evidence that the successor-request path is being exercised rather than merely
     /// survived: an Entry whose gate is shut for longer than the Exit asks early refuses the first
-    /// request, and before #8525 that refusal ended the Session. `None` means the Exit predates the
-    /// counter, not that nothing was re-sent.
+    /// request, and before #8525 that refusal ended the Session.
+    ///
+    /// `None` until the Exit's first re-send: hoprnet registers the counter lazily and increments it
+    /// only when a re-send happens, so an Exit that never had to re-send exports no series — and
+    /// neither does one that predates #8525. On an Exit known to carry #8525, read `None` as zero.
     pub fn ssa_requests_resent(&self) -> Option<u64> {
         self.counter_series(SSA_REQUESTS_RESENT, &[])
     }
