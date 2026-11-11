@@ -14,7 +14,7 @@ use edgli::{
             node::{HasChainApi as _, HasTransportApi as _, HoprSessionClientOperations},
             types::internal::channels::{ChannelEntry, ChannelStatus},
         },
-        config::{HoprLibConfig, HostConfig, HostType, SafeModule},
+        config::{HoprLibConfig, HostConfig, HostType, ProbeConfig, SafeModule},
         exports::transport::{
             HoprSession, SESSION_MTU, SURB_SIZE, SessionCapability, SessionTarget,
             SurbBalancerConfig,
@@ -121,6 +121,7 @@ struct NetTuning {
     prefer_local: bool,
     probe_local: bool,
     path_planner: PathPlannerConfig,
+    probe: ProbeConfig,
     strategy_tick: Duration,
     channel_open_timeout: Duration,
 }
@@ -137,6 +138,15 @@ impl NetTuning {
                 min_ack_rate: 0.1, // local cluster probes succeed
                 ..Default::default()
             },
+            probe: cluster::requested_probe_interval().map_or_else(
+                ProbeConfig::default,
+                |interval| ProbeConfig {
+                    timeout: interval,
+                    interval,
+                    recheck_threshold: interval * 10,
+                    ..Default::default()
+                },
+            ),
             strategy_tick: Duration::from_secs(10),
             channel_open_timeout: LOCAL_CHANNEL_OPEN_TIMEOUT,
         }
@@ -165,8 +175,21 @@ impl IntegrationEnv {
     /// Bring up the local cluster, boot Edgli on the pre-funded extra identity, start
     /// the channel strategy, and wait until at least one outgoing channel is open.
     pub async fn setup() -> anyhow::Result<Self> {
+        Self::setup_with(|_| Ok(None)).await
+    }
+
+    /// As [`Self::setup`], but `prepare` runs on the running cluster before the entry boots, so a
+    /// fault it injects is there from the entry's first packet rather than discovered later.
+    ///
+    /// Returns the exit the 1-hop sessions should use, or `None` to leave the choice to the entry.
+    /// A scenario that cuts links to one node has to name that node, since it is chosen before the
+    /// entry can look at its peers.
+    pub async fn setup_with(
+        prepare: impl FnOnce(&ClusterSummary) -> anyhow::Result<Option<Address>>,
+    ) -> anyhow::Result<Self> {
         let cluster = cluster::bring_up_shared().await?;
         let summary = cluster.summary.clone();
+        let exit = prepare(&summary)?;
         let extra = summary.extras[0].clone();
 
         let (edgli, reactor) = boot_edgli(
@@ -179,6 +202,7 @@ impl IntegrationEnv {
         .await?;
 
         let (dest_zero_hop, dest_one_hop) = select_session_targets(&edgli).await?;
+        let dest_one_hop = exit.unwrap_or(dest_one_hop);
 
         Ok(Self {
             edgli,
@@ -279,13 +303,72 @@ impl IntegrationEnv {
     }
 
     /// Session destination for a given hop count, resolved against the network.
-    fn dest_for(&self, hops: usize) -> anyhow::Result<Address> {
+    pub fn dest_for(&self, hops: usize) -> anyhow::Result<Address> {
         Ok(match (&self.targets, hops) {
             (Targets::Local { dest_zero_hop, .. }, 0) => *dest_zero_hop,
             (Targets::Local { dest_one_hop, .. }, 1..=3) => *dest_one_hop,
             (Targets::Rotsee { exit }, 0..=3) => *exit,
             (_, n) => anyhow::bail!("unsupported hop count {n} (at most 3)"),
         })
+    }
+
+    /// Every edge the entry's graph holds, with what it has measured, one line per edge. Nodes are named
+    /// by the first characters of their offchain key, as the planner's debug log prints them. For
+    /// diagnosing why routing picked or dropped a relay; the verdict itself is not exposed, but a
+    /// starved edge reads a score of 0 and no latency.
+    pub async fn graph_report(&self) -> String {
+        use edgli::hopr_lib::api::graph::{
+            NetworkGraphView,
+            traits::{
+                EdgeImmediateProtocolObservable, EdgeLinkObservable, EdgeNetworkObservableRead,
+                EdgeObservableRead, EdgeProtocolObservable,
+            },
+        };
+        use futures::StreamExt as _;
+
+        let graph = self.edgli.graph();
+        let nodes: Vec<_> = graph.nodes().collect().await;
+        let short =
+            |key: &dyn std::fmt::Display| key.to_string().chars().take(8).collect::<String>();
+        let mut lines = Vec::new();
+        for from in &nodes {
+            for to in &nodes {
+                if from == to {
+                    continue;
+                }
+                let Some(obs) = graph.edge(from, to) else {
+                    continue;
+                };
+                let immediate = obs.immediate_qos().map(|i| {
+                    format!(
+                        "connected={:?} ack={:?} latency={:?} score={:?}",
+                        i.is_connected(),
+                        i.ack_rate(),
+                        i.average_latency(),
+                        i.score()
+                    )
+                });
+                let intermediate = obs.intermediate_qos().map(|i| {
+                    format!(
+                        "rate={:?} latency={:?} balance={:?} score={:?}",
+                        i.average_probe_rate(),
+                        i.average_latency(),
+                        i.balance().is_some(),
+                        i.score()
+                    )
+                });
+                lines.push(format!(
+                    "{} -> {}  total={:?}  imm[{}]  int[{}]",
+                    short(from),
+                    short(to),
+                    obs.score(),
+                    immediate.unwrap_or_default(),
+                    intermediate.unwrap_or_default()
+                ));
+            }
+        }
+        lines.sort();
+        lines.join("\n")
     }
 
     /// The cluster this env owns; an error for a Rotsee env, which has none.
@@ -740,6 +823,7 @@ fn edgli_config(
                 prefer_local_addresses: tuning.prefer_local,
             },
             path_planner: tuning.path_planner,
+            probe: tuning.probe,
             // Experiment: hopr-lib 61120e77 reuses this 2 s default as a write-stall timeout that evicts
             // a peer's stream with every queued packet and ack. Raised to test it as the 1-hop regression.
             stream: StreamProtocolConfig {
