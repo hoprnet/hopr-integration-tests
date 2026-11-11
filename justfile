@@ -116,6 +116,30 @@ exit-origination: build build-chain
     export TEST_TARGET=exit_origination
     HOPRNET_SHELL='{{hoprnet}}' {{v5_deps}} bash scripts/integration/run-binchain.sh
 
+# A relay that acknowledges everything and delivers nothing toward the exit (GNO-1183): does a
+# 1-hop session avoid it? See integration/tests/dead_last_hop.rs. Also runs in the v5 `pr` tier of CI. v5 only.
+# `EDGLI_REF=<branch|sha>` runs an unmerged edge-client; `NETWORK_GRAPH_REF=<branch>` also patches
+# an unreleased hopr-network-graph from hoprnet/hopr-impls (Cargo ignores edge-client's own patch).
+# Both need `gh` logged in, to resolve the ref and read edge-client's manifest.
+dead-last-hop: build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ '{{line}}' = v5 ] || { echo "run: LINE=v5 just dead-last-hop" >&2; exit 2; }
+    # Inherited, it would replace TEST_TARGET in run-binchain.sh and run another suite.
+    unset TEST_TARGETS
+    export TEST_TARGET=dead_last_hop
+    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      if [ -n "${NETWORK_GRAPH_REF:-}" ]; then
+        printf "\n[patch.crates-io]\nhopr-network-graph = { git = \"https://github.com/hoprnet/hopr-impls\", branch = \"%s\" }\n" \
+          "${NETWORK_GRAPH_REF}" >>integration/Cargo.toml
+      fi
+      if [ -n "${EDGLI_REF:-}" ]; then
+        pin_edgli "$(resolve_sha hoprnet/edge-client "${EDGLI_REF}")"
+      fi
+      exec bash scripts/integration/run-binchain.sh'
+
 # End-to-end PIX with edgli as the paying entry (binary chain; manual, NOT run in CI).
 # Builds hoprd from HOPRD_SRC (default ../hoprd) because the nix flake has no PIX binary.
 # See integration/tests/pix.rs. Optional args = test-name filters.

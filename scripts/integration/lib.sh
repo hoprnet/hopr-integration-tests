@@ -299,7 +299,6 @@ enable_logs_snapshot = false
 [indexer.subscription]
 event_bus_capacity = 100
 shutdown_signal_capacity = 10
-batch_size = 50
 
 [api]
 bind_address = "0.0.0.0:${api_port}"
@@ -470,6 +469,8 @@ run_tier() {
 
   echo "running integration tests (binary chain, ${LINE}, tier ${TIER}) ..."
   in_tier pr && run_suite integration
+  # v5 only: the scenario drives the embedded edgli, which the v4 dependency set does not carry.
+  [ "${LINE}" = v5 ] && in_tier pr && run_suite dead_last_hop
   in_tier nightly && run_suite exit_origination
   # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore
   # FAILS against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there.
@@ -729,7 +730,7 @@ warn_if_trace_capped() {
   find "${dir}" -name '*.log' ${newer[@]+"${newer[@]}"} -exec grep -qs 'the static max level is' {} \; -print |
     grep -q . || return 0
   echo "note: RUST_LOG asks for TRACE, but some binaries were built without TRACE logs." >&2
-  echo "      Run \`just integration-trace\` to build hoprd with TRACE logs." >&2
+  echo '      Run `just integration-trace` to build hoprd with TRACE logs.' >&2
 }
 
 # What "the state" is, in one place. Was four divergent lists. Under IT_TMP_ROOT, which CI sets

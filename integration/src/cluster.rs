@@ -77,6 +77,25 @@ pub fn request_latency_profile(yaml: impl Into<String>) -> &'static str {
     REQUESTED_LATENCY.get_or_init(|| yaml.into())
 }
 
+static REQUESTED_PROBE_INTERVAL: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+
+/// Ask for faster neighbour probing on the entry, before the entry boots.
+///
+/// `interval` becomes both the probe timeout and the delay between probing rounds (the library
+/// requires `interval >= timeout`), and the recheck threshold is ten rounds. On a loopback cluster a
+/// probe answers in milliseconds, so the library's 3 s timeout and 5 s round are dead time. A scenario
+/// about how fast the entry learns wants this; the default stands for everything else. The loopback
+/// prober's own 3 s interval is fixed inside edge-client and is not reachable from here. First call in
+/// a test binary wins.
+pub fn request_probe_interval(interval: Duration) -> Duration {
+    *REQUESTED_PROBE_INTERVAL.get_or_init(|| interval)
+}
+
+/// The interval asked for through [`request_probe_interval`], if any.
+pub fn requested_probe_interval() -> Option<Duration> {
+    REQUESTED_PROBE_INTERVAL.get().copied()
+}
+
 static REQUESTED_NODE_ENV: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
 
 /// Ask for environment variables to be set on every cluster `hoprd`, before the first
@@ -946,6 +965,43 @@ fn auth_header() -> String {
 /// built from [`auth_header`] can be rejected by a node that has its own -- or that has none.
 fn node_auth_header(node: &NodeInfo) -> Option<String> {
     node.api_token.as_ref().map(|t| format!("Bearer {t}"))
+}
+
+/// `node`'s open outgoing channels as `(destination, balance)`, as its REST API reports them from the
+/// chain it indexes. The entry reads the same chain through blokli, so a channel listed here is one
+/// the entry can see, whatever the network does to the traffic over it.
+pub async fn open_outgoing_channels(node: &NodeInfo) -> anyhow::Result<Vec<(String, String)>> {
+    let mut req = node_http_client().get(format!(
+        "{}/api/v4/channels?includingClosed=false",
+        node.api_url
+    ));
+    if let Some(header) = node_auth_header(node) {
+        req = req.header("Authorization", header);
+    }
+    let body: serde_json::Value = req
+        .send()
+        .await
+        .context("GET /api/v4/channels")?
+        .error_for_status()
+        .context("GET /api/v4/channels returned an error status")?
+        .json()
+        .await
+        .context("reading /api/v4/channels body")?;
+    Ok(body["outgoing"]
+        .as_array()
+        .map(|channels| {
+            channels
+                .iter()
+                .filter(|ch| ch["status"].as_str() == Some("Open"))
+                .map(|ch| {
+                    (
+                        ch["peerAddress"].as_str().unwrap_or("").to_string(),
+                        ch["balance"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// Fetch one node's Prometheus exposition, as text.
