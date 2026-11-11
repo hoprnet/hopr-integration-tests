@@ -30,8 +30,8 @@
 //!
 //! Three cluster nodes: the Exit and the two relays a return path is drawn over, per packet.
 //!
-//! The shape of `pix_relay_loss`'s `RETURN_ONLY` scenarios, so this is their lossless control at the
-//! deployed configuration: a failure here makes their results unreadable.
+//! The shape of `pix_relay_loss`'s `RETURN_ONLY` scenarios, so this is their lossless control at
+//! the deployed configuration: a failure here makes their results unreadable.
 //!
 //! # Running
 //!
@@ -39,8 +39,8 @@
 //! HOPRD_SRC=../hoprd LINE=v5 just pix-prod
 //! ```
 //!
-//! Manual, like every PIX scenario here — never in CI, and needing a hoprd built with a deposit
-//! pool.
+//! Manual and never in CI, unlike `pix`, `pix_shapes` and `pix_relay_loss`, which CI's v5 tier
+//! runs. Needs a hoprd built with a deposit pool.
 //!
 //! # Which build each participant runs
 //!

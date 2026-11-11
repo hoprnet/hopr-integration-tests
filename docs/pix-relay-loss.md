@@ -16,7 +16,8 @@ HOPRD_SRC=../hoprd LINE=v5 just pix-relay-loss a_pix_cycle_survives_a_deep_retur
 each scenario in an invocation of its own on it: each kills a cluster node, so a cluster is never
 shared. The Entry is linked into the test binary, so before the first scenario the recipe pins its
 edgli to edge-client's `main`, as CI and `just tier` do, rather than to the committed v5 lock, which
-trails it. `EDGLI_REF` picks another edge-client ref, and `gh` must be logged in. Manual, never in CI. Name scenarios to run only those. It forwards the environment:
+trails it. `EDGLI_REF` picks another edge-client ref, and `gh` must be logged in. CI's v5 nightly
+tier runs every scenario too. Name scenarios to run only those. It forwards the environment:
 
 | variable | meaning | default |
 | --- | --- | --- |

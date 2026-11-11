@@ -58,9 +58,9 @@
 //!
 //! # Past the first sweep
 //!
-//! The three single-cycle scenarios stop once the cycle in flight at the kill is swept, so they show
-//! that its successor was *requested* and nothing more. A fourth carries [`RETURN_ONLY`] on for
-//! [`SUSTAINED_CYCLES`] swept cycles: the successor is where the loss can still bite, since the
+//! The three single-cycle scenarios stop once the cycle in flight at the kill is swept, so they
+//! show that its successor was *requested* and nothing more. A fourth carries [`RETURN_ONLY`] on
+//! for [`SUSTAINED_CYCLES`] swept cycles: the successor is where the loss can still bite, since the
 //! Entry funds it only once the replies it has counted clear its successor gate, and the burst left
 //! that count short. See [`a_pix_session_keeps_completing_cycles_after_a_return_relay_death`].
 //!
@@ -73,9 +73,10 @@
 //! LINE=v5 … just pix-relay-loss a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe
 //! ```
 //!
-//! Manual, never in CI, and **one cluster per scenario**: each kills a cluster node, so the
-//! cluster cannot be shared with anything after it. The recipe gives each scenario an invocation
-//! of its own on one chain; name one with `SCENARIOS=` when driving `run-binchain.sh` directly.
+//! CI's v5 nightly tier runs every scenario. **One cluster per scenario**: each kills a cluster
+//! node, so the cluster cannot be shared with anything after it. The recipe gives each scenario an
+//! invocation of its own on one chain; name one with `SCENARIOS=` when driving `run-binchain.sh`
+//! directly.
 
 #![cfg(feature = "v5")]
 

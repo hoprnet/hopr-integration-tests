@@ -16,9 +16,9 @@
 //! HOPRD_SRC=../hoprd-shapes just pix <scenario>
 //! ```
 //!
-//! Manual, like every PIX scenario here — never in CI. Each gets a fresh chain, and a full pass is
-//! hours rather than minutes. See `docs/pix-traffic-shapes.md` for the measured results and the
-//! configuration they pin.
+//! CI's v5 tier runs the mixed shape on every PR and the rest nightly. Each gets a fresh chain, and
+//! a full pass is hours rather than minutes. See `docs/pix-traffic-shapes.md` for the measured
+//! results and the configuration they pin.
 
 #![cfg(feature = "v5")]
 
