@@ -212,6 +212,11 @@ tier name="pr": build build-chain
 # One cluster PER SCENARIO, like `return-path` and for the same reason: each kills a cluster node.
 # They share one chain, started once. `HOPRD_PIX_*` (surplus, geometry, SURB buffer, rate) are
 # forwarded to the test; docs/pix-relay-loss.md lists them. Optional args = test-name filters.
+#
+# The Entry is linked into the test binary, so it is whatever edgli the manifest names. Like
+# `just tier`, this pins edgli to the line's edge-client head (`EDGLI_REF` overrides it) rather than
+# the committed v5 lock, which trails it; `gh` must be logged in. Pinned once, so every scenario
+# runs the same Entry.
 pix-relay-loss *scenarios:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -222,23 +227,27 @@ pix-relay-loss *scenarios:
     pix_check_hoprd "${HOPRD_BIN}"
 
     it_env
-    export TEST_TARGET=pix_relay_loss HOPRNET_SHELL='{{hoprnet}}'
+    export LINE='{{line}}' TEST_TARGET=pix_relay_loss HOPRNET_SHELL='{{hoprnet}}'
+    export SCENARIO_FILTERS='{{scenarios}}'
     # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
-    scenarios='{{scenarios}}'
-    # Listed under the v5 dependency set: the target is `#![cfg(feature = "v5")]` and lists nothing
-    # without it.
-    [ -n "${scenarios}" ] || scenarios="$(bash scripts/integration/with-v5-deps.sh \
-      bash -c 'source scripts/integration/lib.sh; list_scenarios pix_relay_loss')"
     chain_start
     trap chain_stop EXIT
     export CHAIN_SHARED=1
-    rc=0
-    for scenario in ${scenarios}; do
-      SCENARIOS="${scenario}" bash scripts/integration/with-v5-deps.sh \
-        bash scripts/integration/run-binchain.sh || rc=1
-    done
-    exit "${rc}"
+    # One v5 dependency set for the pin, the listing and every scenario: each `with-v5-deps.sh`
+    # starts again from the committed manifest, which would undo the pin. The target is
+    # `#![cfg(feature = "v5")]`, so it also lists nothing outside that set.
+    bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      pin_line_deps
+      scenarios="${SCENARIO_FILTERS}"
+      [ -n "${scenarios}" ] || scenarios="$(list_scenarios pix_relay_loss)"
+      rc=0
+      for scenario in ${scenarios}; do
+        SCENARIOS="${scenario}" bash scripts/integration/run-binchain.sh || rc=1
+      done
+      exit "${rc}"'
 
 # PIX at the DEPLOYED configuration (binary chain; manual, NOT run in CI, about ten minutes).
 #
@@ -246,7 +255,8 @@ pix-relay-loss *scenarios:
 # `4096 x (32 + 79)`, a cycle of 454 656 packets and a 629.6 MiB quota — with the Exit's upstream
 # PIX defaults, rather than the demo geometry `just pix` uses. No fault is injected: this is the
 # deployed-configuration control for `just pix-relay-loss`. See integration/tests/pix_prod.rs.
-# Optional args = test-name filters.
+# Optional args = test-name filters. Pins the Entry's edgli to the line's edge-client head like
+# `just pix-relay-loss` does (`EDGLI_REF` overrides it; `gh` must be logged in).
 pix-prod *scenarios:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -256,7 +266,7 @@ pix-prod *scenarios:
     just build-chain
     pix_check_hoprd "${HOPRD_BIN}"
 
-    export SCENARIOS='{{scenarios}}' TEST_TARGET=pix_prod HOPRNET_SHELL='{{hoprnet}}'
+    export SCENARIOS='{{scenarios}}' LINE='{{line}}' TEST_TARGET=pix_prod HOPRNET_SHELL='{{hoprnet}}'
     # Release, not debug, whatever TEST_PROFILE says: the Entry is linked into this binary and
     # generating 4096 polynomials per cycle is CPU-bound enough that a debug build cannot keep up
     # with the Exit's commitment deadline — measured, it stretched the SSA commitment past
@@ -264,7 +274,12 @@ pix-prod *scenarios:
     export TEST_PROFILE=release
     # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
     export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
-    bash scripts/integration/with-v5-deps.sh bash scripts/integration/run-binchain.sh
+    # The pin and the run share one v5 dependency set; see `pix-relay-loss`.
+    bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      pin_line_deps
+      exec bash scripts/integration/run-binchain.sh'
 
 # Run a single test against a fresh env (e.g. `just scenario zero_one_two_hop`).
 scenario name:

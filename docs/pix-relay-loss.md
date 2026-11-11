@@ -14,7 +14,9 @@ HOPRD_SRC=../hoprd LINE=v5 just pix-relay-loss a_pix_cycle_survives_a_deep_retur
 
 `just pix-relay-loss` builds a PIX-enabled hoprd the way `just pix` does, starts **one chain**, and runs
 each scenario in an invocation of its own on it: each kills a cluster node, so a cluster is never
-shared. Manual, never in CI. Name scenarios to run only those. It forwards the environment:
+shared. The Entry is linked into the test binary, so before the first scenario the recipe pins its
+edgli to edge-client's `main`, as CI and `just tier` do, rather than to the committed v5 lock, which
+trails it. `EDGLI_REF` picks another edge-client ref, and `gh` must be logged in. Manual, never in CI. Name scenarios to run only those. It forwards the environment:
 
 | variable | meaning | default |
 | --- | --- | --- |

@@ -46,7 +46,7 @@
 //!
 //! | participant | role | comes from |
 //! | ----------- | ---- | ---------- |
-//! | entry (`edgli`, in-process) | opens the Session, mints SURBs, **pays the deposits** | the `edgli` git dependency, compiled into this binary |
+//! | entry (`edgli`, in-process) | opens the Session, mints SURBs, **pays the deposits** | the `edgli` git dependency, compiled into this binary; `just pix-prod` pins it to edge-client's `main` |
 //! | relay + Exit | forward packets, reply, recover keys, **sweep** | `$HOPRD_BIN` at runtime |
 //!
 //! Compile-time on one side and runtime on the other, so the two can silently disagree. Both must
