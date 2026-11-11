@@ -45,6 +45,22 @@
 //! its data back for a keep-alive reserve leaves the last few to the keep-alives, which spend one per
 //! notify period (see `SURB_NOTIFY_PERIOD`).
 //!
+//! # On v5 the fault no longer arms, and that is what the v5 run checks
+//!
+//! Since hoprnet#8629 an exit sends its SURB-level notification only to an entry that has shown it
+//! reads them (a keep-alive carrying SURBs), and only while its own SURB estimate is above zero, so
+//! a notification never goes into an empty store. The victim here is opened without a balancer, so
+//! it never sends a keep-alive: the exit never notifies it, holds its data back for the reserve, and
+//! the victim's last SURBs stay unspent. No return route goes unresolvable.
+//!
+//! The v5 run therefore checks that guarantee instead of the starvation: after the same
+//! abandonment the exit must never log a starved return route, and must keep originating for the
+//! canary. An exit without the gate brings the old behaviour back (a notification every
+//! `SURB_NOTIFY_PERIOD` spends the twelve reserve SURBs within a minute, and the next one starves),
+//! so the run then fails on the starvation evidence. The resolver's bounded wait, which a starved
+//! packet would still exercise, stays covered at unit level in `hopr_transport::path::resolve`.
+//! The v4 run is unchanged: its exit has no such gate, and the fault must arm there.
+//!
 //! The production `pseudonyms_lifetime` is 600 s, which is longer than the Session idle timeout, so
 //! the scenario shortens it to the minimum the config validator accepts. That is the only setting
 //! changed, it is the same value a config file could state, and it compresses a timer rather than
@@ -285,19 +301,36 @@ async fn exit_should_keep_originating_when_a_return_path_becomes_unresolvable() 
         verdict.summary(),
     );
 
-    // Everything above passes just as well on a run where the fault was never armed: if the
+    let starved = env
+        .cluster()?
+        .node_log_contains(exit_addr, STARVATION_EVIDENCE)?;
+
+    // v4: everything above passes just as well on a run where the fault was never armed: if the
     // pseudonym-lifetime override did not reach the nodes, the victim's SURBs never expire, no
     // return route ever goes unresolvable, and a node that was never under test reports healthy.
     // That is the same class of failure as a participant silently running a build that predates the
     // change under test, and it is indistinguishable from success — so require positive evidence
     // that the exit actually hit, and survived, a starved return route.
+    #[cfg(not(feature = "v5"))]
     anyhow::ensure!(
-        env.cluster()?
-            .node_log_contains(exit_addr, STARVATION_EVIDENCE)?,
+        starved,
         "the exit never reported a starved return route, so the fault was not armed and this run \
          says nothing about the stall. Check that {SURB_LIFETIME_ENV} reached the hoprd processes \
          (expected {:?}) — {}",
         SURB_PSEUDONYM_LIFETIME,
+        verdict.summary(),
+    );
+
+    // v5: the exit must not have starved the abandoned victim at all (hoprnet#8629, see the module
+    // docs). Starvation here means the exit sent a return-routed packet into an empty store, which
+    // the notification gate exists to prevent.
+    #[cfg(feature = "v5")]
+    anyhow::ensure!(
+        !starved,
+        "the exit reported a starved return route for the abandoned session: it sent a return-routed \
+         packet with no SURB left to carry it, which an exit that notifies only readers and only \
+         above a zero SURB estimate never does (hoprnet#8629). It survived the starvation \
+         (origination went on), but the gate that should have prevented it did not — {}",
         verdict.summary(),
     );
 

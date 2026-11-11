@@ -94,15 +94,20 @@ under skew); tempering at γ=0.5 halves the exponent on that ratio.
 
 _Threshold, re-derived for tempering_ (was 1.5, the rotation target, which tempering cannot
 reach by design). RFC-0014 scores this profile 1.0 / 0.7 / 0.3 / 0.15, giving raw shares of
-46/33/14/7 — a ratio of 6.67. Tempered: 36/30/20/14, a ratio of 2.58. Calibrating the
-two-per-packet flattening from the pre-fix run (ideal 6.67 measured 4.63, ×0.69) predicts
-**≈1.79**, so the test now allows **2.1**.
+46/33/14/7 — a ratio of 6.67. Tempered: 36/30/20/14, a ratio of 2.58. Two distinct draws per
+packet flatten both, to a predicted **2.12** tempered and **4.56** raw (pre-fix measured 4.63),
+so the bound sits between them at **3.0**. Until late October it was 2.1, from scaling the
+tempered 2.58 by the pre-fix run's flattening (6.67 measured 4.63, ×0.69), which predicted ≈1.79.
 
-⚠️ **Predicted, not measured.** No tempered run has been recorded yet, and 2.1 sits only ~8%
-below the lowest pre-fix measurement. Re-derive from a measured tempered baseline before
-treating a pass as evidence.
+⚠️ **Measured, the ratio does not separate the two.** It follows the run's live scores, not the
+profile's: tempered runs land on both sides of 3.0 and inside the pre-fix range (2.28–4.63), as
+the 40 runs under _Test_ show. The bound alone is no evidence either way.
 
-_Test:_ `return_paths_should_spread_across_distinct_relayers`.
+_Test:_ `return_paths_should_spread_across_distinct_relayers` gates concentration only: at least
+three of the four candidates carry 5 % or more, and the busiest at most two fair shares. That
+passed all 40 v5 runs recorded 2026-11-03 to 11-06 (busiest at most 48 %). The ratio above is
+`return_paths_should_track_the_tempered_score`, held out of every tier: over the same 40 runs it
+ranged 1.27 to 4.47 and exceeded its bound of 3.0 in 17, because it follows the run's live scores.
 
 ### S2 — Return relayer dies (SIGKILL) · **implemented, characterisation only**
 
