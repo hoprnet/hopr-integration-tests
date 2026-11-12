@@ -222,7 +222,11 @@ nix_build "hoprd-localcluster" -L "github:hoprnet/hoprd/${HOPRD_SHA}#binary-hopr
 # By sha, so the 1h `tarball-ttl` cache of a branch's revision cannot serve a stale build.
 echo "building blokli chain from ${BLOKLI_REF} ..."
 nix_build "bloklid + deployer" -L "github:hoprnet/blokli/${BLOKLI_SHA}#bloklid" --out-link "${REPO_ROOT}/result-bloklid"
-nix_build "anvil (foundry)" -L "nixpkgs#foundry" --out-link "${REPO_ROOT}/result-foundry"
+# anvil from the nixpkgs blokli locks, not the registry's: `nixpkgs#foundry` alone follows
+# nixpkgs-unstable, and when that moved to a foundry the binary cache does not hold, the
+# nightly had to build it from source and failed before any test ran (2026-11-12).
+nix_build "anvil (foundry)" -L --inputs-from "github:hoprnet/blokli/${BLOKLI_SHA}" "nixpkgs#foundry" \
+  --out-link "${REPO_ROOT}/result-foundry"
 
 # ── The PIX exit binary (v5 only) ──
 # The deposit pool is a build-time choice: a plain hoprd bootstraps fine and then never
