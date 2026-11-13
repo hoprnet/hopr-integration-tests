@@ -576,6 +576,7 @@ pub fn entry_config() -> anyhow::Result<edgli::PixEntryConfig> {
             ..Default::default()
         },
         state_dir: None,
+        state_password: "integration test".to_owned().into(),
     })
 }
 

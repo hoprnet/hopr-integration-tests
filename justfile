@@ -54,11 +54,12 @@ build:
     nix build -L 'github:hoprnet/hoprd/{{hoprd_ref}}#binary-hoprd-localcluster' --out-link result-localcluster
 
 # Build the image-free chain: bloklid + blokli-contract-deployer (blokli branch)
-# and anvil (nixpkgs foundry). Replaces the bloklid-anvil docker image. `--refresh`
-# so a moved branch head is picked up instead of nix's cached revision for it.
+# and anvil (foundry from the nixpkgs blokli locks). Replaces the bloklid-anvil
+# docker image. `--refresh` so a moved branch head is picked up instead of nix's
+# cached revision for it.
 build-chain:
     nix build -L --refresh 'github:hoprnet/blokli/{{blokli_ref}}#bloklid' --out-link result-bloklid
-    nix build -L 'nixpkgs#foundry' --out-link result-foundry
+    nix build -L --inputs-from 'github:hoprnet/blokli/{{blokli_ref}}' 'nixpkgs#foundry' --out-link result-foundry
 
 # Build hoprd + the binary chain, then run the scenarios on one locally-built anvil+bloklid
 # and one cluster (via --chain-url). Optional args = scenarios, e.g.
