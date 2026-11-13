@@ -159,6 +159,7 @@ pub fn entry_config(budget: HoprBalance) -> anyhow::Result<edgli::PixEntryConfig
         },
         // Only the Curvy pool keeps durable state; `pix-test` selects secp256k1, which ignores it.
         state_dir: None,
+        state_password: "integration test".to_owned().into(),
     })
 }
 
