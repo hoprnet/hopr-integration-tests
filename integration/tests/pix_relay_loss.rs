@@ -663,9 +663,9 @@ async fn a_pix_session_survives_losing_half_its_return_relayers(
     // A share-bearing SURB the Exit's store dropped for want of capacity is a share lost for good,
     // whatever the outage did: the store gives up share-less SURBs first, so a `ring_share`
     // eviction means it held nothing else. The cycle can sweep with a few of those, which is why a
-    // sweep alone does not rule them out. A generation wipe is *not* an eviction and is not counted
-    // here (the buffer is cleared, not overflowed); hoprnet#8576's `hopr_surb_generation_bumps_total`
-    // is the signal for that once the lock carries it.
+    // sweep alone does not rule them out. A generation wipe is *not* a capacity eviction and is not
+    // counted here (the buffer is cleared, not overflowed): hoprnet#8683 books the shares it clears as
+    // `cause="replaced"`, and only `cause="size"` is read.
     assert_eq!(
         0,
         gate.ring_share_evictions(),
