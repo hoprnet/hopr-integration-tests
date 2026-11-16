@@ -1,8 +1,8 @@
 # v5 integration tests: inventory, coverage and tiers
 
 What every v5 test checks, what it costs in CI, which ones overlap, and which tier runs it.
-Issues: #63 (combine overlapping scenarios), #65 (PR vs nightly tiers). Rows marked #82 / #83 come
-from those PRs.
+Issues: #63 (combine overlapping scenarios), #65 (PR vs nightly tiers). Rows marked #82 / #83 / #109
+come from those PRs.
 
 Wall times are per scenario, setup included:
 
@@ -39,17 +39,17 @@ and the fill aims at 540 s.
 | E10 | `return_path::a_three_hop_session_should_survive_a_stalling_relayer`  | #82    | nightly  | L 3.0–3.1m                                                | 8     | victim stalls every link (3,3)       |
 | E11 | `return_path::return_paths_should_spread_across_distinct_relayers`    | main   | nightly  | L 0.4–0.6m                                                | 5     | –                                    |
 | E12 | `return_path::return_paths_should_track_the_tempered_score`         | #82    | held out | L 0.4–0.6m (as E11)                                       | 5     | – (finding, hoprnet#8331)            |
-| E13 | `return_path::an_idle_session_should_survive_a_long_common_mode_…`    | main   | nightly  | L 3.2–3.7m                                                | 5     | E6 after 35 s idle, 40 s, no settle  |
+| E13 | `return_path::an_idle_session_should_survive_a_long_common_mode_…`    | #109   | nightly  | L 3.2–3.7m                                                | 5     | E6 after 35 s idle, 40 s, no settle  |
 | F1  | `pix_relay_loss::a_pix_cycle_survives_a_relay_death_on_both_paths`    | #83    | nightly  | #83 7.5m (≈24m at production size)                        | 3     | kill half the return relays (1,1)    |
 | F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`   | #83    | nightly  | #83 7.6m                                                  | 3     | (0,1)                                |
 | F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`   | #83    | nightly  | #83 8.6m                                                  | 4     | (0,2)                                |
 
 Not in v5 CI: upload_survival, rotsee, profiling.
 
-| Set (test time, build excluded) | Before                   | After                    |
-| ------------------------------- | ------------------------ | ------------------------ |
-| v5 PR label `run-integration`   | 75m (~110m with #82/#83) | **pr: 26m in CI**        |
-| v5 nightly tier                 | –                        | ~41m, ~100m with #82/#83 |
+| Set (test time, build excluded) | Before                   | After                         |
+| ------------------------------- | ------------------------ | ----------------------------- |
+| v5 PR label `run-integration`   | 75m (~110m with #82/#83) | **pr: 26m in CI**             |
+| v5 nightly tier                 | –                        | ~41m, ~104m with #82/#83/#109 |
 
 ## Features
 
