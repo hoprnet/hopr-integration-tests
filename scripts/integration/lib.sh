@@ -508,6 +508,8 @@ run_tier() {
   # v4 runs the 1-hop scenarios only: it mitigates a dead relayer one hop deep (hoprnet#8498) and the
   # 2- and 3-hop ones wait for the v5 fix. v5 runs them all in the nightly tier: the multi-hop
   # scenarios need the dead-relayer recovery (hoprnet#8506, #8576, #8581) in edge-client's lock.
+  # The idle-Session outage is v5 only too: release/4.0 has neither the Entry's silence sustain that
+  # keeps the Exit supplied through it nor the Exit's hopr_surb_store_surbs_held it reads.
   if [ "${LINE}" = v4 ] || in_tier nightly; then
     chain_stop
     chain_start
@@ -519,6 +521,7 @@ run_tier() {
       held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
       held_out="${held_out} a_three_hop_session_should_survive_relayer_loss"
       held_out="${held_out} a_three_hop_session_should_survive_a_stalling_relayer"
+      held_out="${held_out} an_idle_session_should_survive_a_long_common_mode_return_outage"
     fi
     for scenario in ${scenarios}; do
       case " ${held_out} " in *" ${scenario} "*) continue ;; esac

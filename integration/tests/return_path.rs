@@ -102,7 +102,7 @@ use hoprd_integration_test::{
         tagged_payload,
     },
     relayers::{self, RelayerSpread},
-    session_metrics,
+    session_metrics, surb_store,
 };
 
 /// `hoprd-localcluster` caps out here, and every extra node is one more possible return
@@ -955,6 +955,43 @@ const OUTAGE_PHASE: u8 = 3;
 /// that the degradation is unambiguous.
 const OUTAGE_DURATION: Duration = Duration::from_secs(20);
 
+/// How long the Session stays quiet before the outage in
+/// [`an_idle_session_should_survive_a_long_common_mode_return_outage`].
+///
+/// An idle Session still hears from its Exit: the Exit reports its SURB level once per
+/// `surb_balance_notify_period`, 15 s by default. Two periods and a margin put at least one report
+/// more than a period after the last reply, so when the relayers freeze the Entry has heard from the
+/// Exit lately, but its last reply is old.
+const QUIET_BEFORE_OUTAGE: Duration = Duration::from_secs(35);
+
+/// How long every return relayer stays frozen after the quiet stretch: twice [`OUTAGE_DURATION`].
+///
+/// Long enough to empty an Exit that nothing refills. It answers every request into the frozen path
+/// and spends a SURB on each reply, measured at about 275 a second against a stock of about 7 450 at
+/// this load, so it runs dry after some 27 s.
+const LONG_OUTAGE: Duration = Duration::from_secs(40);
+
+/// The share of its SURB stock going into the long outage that the Exit must still hold when the
+/// return path comes back.
+///
+/// Measured over that outage (2026-11-15, 80 runs per build): an Entry that keeps the Exit supplied
+/// through it left the Exit at 80-88 % of its stock; one that stopped (hoprnet#8682 before its
+/// refinement) left it at 66-67 SURBs, 1 %. Half sits far from both, and still catches an Exit
+/// nobody refills on a machine that replies at a third of that rate.
+const MIN_EXIT_STOCK_AFTER_OUTAGE: f64 = 0.5;
+
+/// What sets the common-mode outage scenarios apart.
+struct OutageShape {
+    /// Held quiet, no data either way, between the paced baseline and the freeze.
+    quiet_before: Duration,
+    /// How long every return relayer stays frozen.
+    outage: Duration,
+    /// How long recovery is left to settle after the thaw, before the drain.
+    settle: Duration,
+    /// The share of its SURB stock going in that the Exit must still hold at the thaw, if asserted.
+    min_exit_stock: Option<f64>,
+}
+
 /// Resumes every paused relayer when it drops, so an early return between the freeze and the
 /// explicit thaw — a pump error or a failed outage assertion — cannot leave `SIGSTOP`ped `hoprd`
 /// processes behind. A stopped process ignores `SIGTERM` until it is continued, so orphans would
@@ -1000,9 +1037,50 @@ impl Drop for Thawed<'_> {
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
 async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()> {
+    common_mode_return_outage(OutageShape {
+        quiet_before: Duration::ZERO,
+        outage: OUTAGE_DURATION,
+        settle: kill_settle(),
+        min_exit_stock: None,
+    })
+    .await
+}
+
+/// The common-mode outage after the Session went idle, long enough to empty an Exit nobody refills.
+///
+/// [`session_should_survive_common_mode_return_outage`] freezes the relayers right after traffic, so
+/// the last thing the Entry heard from the Exit was a reply. A Session that went idle first has heard
+/// only the Exit's SURB-level reports since, and its return path can fail all the same. Through the
+/// outage the Exit answers every request into the frozen path and spends a SURB on each reply, while
+/// the Entry sees nothing come back. Unless the Entry keeps supplying it anyway, the Exit runs dry,
+/// and once the path is back every reply waits for a refill. With hoprnet#8682 before its refinement
+/// the Exit fell from about 7 450 SURBs to 67, was refilled 14 s after the thaw, and the outage's
+/// backlog then arrived inside the survival phase.
+///
+/// Three settings differ from the sibling: [`QUIET_BEFORE_OUTAGE`] of quiet before the freeze,
+/// [`LONG_OUTAGE`], and no [`KILL_SETTLE`] after the thaw, which would give a late refill time to
+/// land unseen. On top of the sibling's gates, the Exit must still hold
+/// [`MIN_EXIT_STOCK_AFTER_OUTAGE`] of its SURB stock when the path comes back, read from its
+/// `hopr_surb_store_surbs_held`, which v4 nodes do not export.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn an_idle_session_should_survive_a_long_common_mode_return_outage() -> anyhow::Result<()> {
+    common_mode_return_outage(OutageShape {
+        quiet_before: QUIET_BEFORE_OUTAGE,
+        outage: LONG_OUTAGE,
+        settle: Duration::ZERO,
+        min_exit_stock: Some(MIN_EXIT_STOCK_AFTER_OUTAGE),
+    })
+    .await
+}
+
+/// One common-mode outage of the given shape: warm up, measure the paced baseline, stay quiet if the
+/// shape says so, freeze every return relayer under load, thaw, settle, and require recovery.
+async fn common_mode_return_outage(shape: OutageShape) -> anyhow::Result<()> {
     // 0-hop out / 1-hop back: every reply traverses a cluster relayer, so freezing the relayer set
     // takes the whole return path down while requests still reach the exit directly.
-    let (_env, session, candidates) = setup_env_with_hops(0, 1, NODES).await?;
+    let (env, session, candidates) = setup_env_with_hops(0, 1, NODES).await?;
+    let exit = exit_node(&env, &candidates)?;
     let (mut rx, mut tx) = tokio::io::split(session);
 
     // Phase 1 — warm up: baseline rate, and confirm replies actually traverse the relayers we are
@@ -1045,6 +1123,19 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
     // Same cap as the relayer-loss scenarios; overdriving the outage drains the exit's SURBs.
     let offered_mbps = offered_mbps.min(baseline.mbps);
 
+    // An idle stretch, when the shape has one: no data either way, so that what the Entry last heard
+    // before the freeze is the Exit's SURB-level reports, not a reply.
+    if !shape.quiet_before.is_zero() {
+        let late = drain_until_quiet(&mut rx, shape.quiet_before, "quiet").await;
+        tracing::info!(
+            quiet = ?shape.quiet_before,
+            late_bytes = late,
+            "the session was quiet before the outage"
+        );
+    }
+    // The Exit is never frozen, so its stock can be read on both sides of the outage.
+    let exit_stock_before = surb_store::surbs_held(&exit).await;
+
     // Phase 3 — freeze EVERY return relayer at once: the common-mode outage.
     tracing::info!(
         frozen = candidates.len(),
@@ -1063,16 +1154,16 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
     // Phase 4 — offer load into the outage. The return path is fully down, so an unreliable session
     // legitimately delivers little; the point is that it degrades *cleanly* — the pump completes
     // rather than the session panicking, thrashing, or wedging the writer permanently.
-    let outage_bytes = (offered_mbps * 1_000_000.0 * OUTAGE_DURATION.as_secs_f64()) as usize;
+    let outage_bytes = (offered_mbps * 1_000_000.0 * shape.outage.as_secs_f64()) as usize;
     let counters_before = session_metrics::sample();
     let outage_payload = tagged_payload(OUTAGE_PHASE, outage_bytes);
     // Pump directly, without `pump_and_measure`: the relayer histogram is sampled over each node's
     // REST API, and those nodes are SIGSTOPped right now, so sampling them would hang. The entry's
     // own in-process counters (`session_metrics`, below) are the readable signal during the outage.
     //
-    // `idle_budget = OUTAGE_DURATION` is what actually bounds the freeze: with the return path down
+    // `idle_budget = shape.outage` is what actually bounds the freeze: with the return path down
     // nothing comes back, so the pump is idle from the first byte and stops one budget later. That
-    // keeps the real outage ~`OUTAGE_DURATION` instead of running to the default idle budget or the
+    // keeps the real outage ~`shape.outage` instead of running to the default idle budget or the
     // pump timeout, so recovery figures stay comparable with the relayer-loss scenario.
     let during = pump_halves(
         &mut rx,
@@ -1083,8 +1174,8 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
         PumpOpts {
             pace: pace_for_rate(offered_mbps),
             phase: Some(OUTAGE_PHASE),
-            idle_budget: Some(OUTAGE_DURATION),
-            tail_grace: Some(OUTAGE_DURATION),
+            idle_budget: Some(shape.outage),
+            tail_grace: Some(shape.outage),
             ..PumpOpts::default()
         },
     )
@@ -1109,11 +1200,22 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
         "during-outage session families that moved: {}",
         during_counters.nonzero()
     );
+    // What the Exit has left to answer with once the path is back. Asserted before the thaw, since
+    // an Exit run dry fails the survival phase too, but there only as a backlog leaking into it.
+    let exit_stock_after = surb_store::surbs_held(&exit).await;
+    tracing::info!(
+        before = ?exit_stock_before,
+        after = ?exit_stock_after,
+        "the Exit's SURB stock across the outage"
+    );
+    if let Some(floor) = shape.min_exit_stock {
+        assert_exit_kept_its_stock(exit_stock_before?, exit_stock_after?, floor)?;
+    }
 
     // Phase 5 — thaw every relayer: the outage lifts and the return path is restored. Dropping the
     // guard resumes them exactly once here on the normal path (and is the safety net on early exit).
     drop(thawed);
-    let settle = kill_settle();
+    let settle = shape.settle;
     tracing::info!(
         ?settle,
         frozen = candidates.len(),
@@ -1150,6 +1252,55 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
     .await?;
 
     assert_recovered(&baseline, &after, &spread, &spread_after)
+}
+
+/// The cluster node outside `candidates`: the Exit, which [`IntegrationEnv::relayer_candidates`]
+/// leaves out.
+fn exit_node(env: &IntegrationEnv, candidates: &[NodeInfo]) -> anyhow::Result<NodeInfo> {
+    let mut others = env
+        .cluster()?
+        .nodes
+        .iter()
+        .filter(|n| candidates.iter().all(|c| c.address != n.address));
+    let exit = others
+        .next()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("every cluster node is a relayer candidate: no Exit"))?;
+    anyhow::ensure!(
+        others.next().is_none(),
+        "more than one cluster node is outside the relayer candidates, so the Exit is ambiguous"
+    );
+    Ok(exit)
+}
+
+/// The Exit must still hold `floor` of the SURBs it held going into the outage.
+fn assert_exit_kept_its_stock(
+    before: Option<u64>,
+    after: Option<u64>,
+    floor: f64,
+) -> anyhow::Result<()> {
+    let (Some(before), Some(after)) = (before, after) else {
+        anyhow::bail!(
+            "the Exit exports no hopr_surb_store_surbs_held{{class=\"admitted\"}}, so its SURB stock \
+             was not measured: it was built without `hopr-transport/telemetry`, or predates the \
+             gauge. That is not a zero."
+        );
+    };
+    anyhow::ensure!(
+        before > 0,
+        "the Exit held no SURBs going into the outage, so the outage had nothing to drain and this \
+         measured nothing"
+    );
+    let kept = after as f64 / before as f64;
+    anyhow::ensure!(
+        kept >= floor,
+        "the Exit held {after} SURBs when the return path came back, {:.0} % of the {before} it held \
+         going in (floor {:.0} %): nothing kept it supplied while no reply came back, so it spent \
+         its stock into the frozen path and its replies now wait for a refill",
+        kept * 100.0,
+        floor * 100.0,
+    );
+    Ok(())
 }
 
 /// Report every measurement, then assert on them in combination.
