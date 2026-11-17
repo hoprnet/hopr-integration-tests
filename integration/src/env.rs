@@ -94,6 +94,13 @@ const PIX_MAX_SURB_UPSTREAM_BITS: u64 = 20_000_000;
 /// Local checks are cheap in-process/loopback calls; a coarse interval only adds dead time.
 const LOCAL_POLL: Duration = Duration::from_millis(500);
 const PEER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long the entry gets to connect to the rest of a local cluster once it has two peers.
+///
+/// The last node connects up to 1.7 s after the second (638 local runs), so this is never the wait in
+/// practice; it bounds a scenario that took a node out before the entry booted.
+const WHOLE_CLUSTER_TIMEOUT: Duration = Duration::from_secs(15);
+const WHOLE_CLUSTER_POLL: Duration = Duration::from_millis(100);
 const LOCAL_CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(120);
 const EXIT_PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Outgoing channels the strategy aims to open for the Rotsee-style path — enough for
@@ -197,6 +204,7 @@ impl IntegrationEnv {
             &extra,
             &NetTuning::local(),
             cluster_size(),
+            Some(cluster_size()),
             ExtraStrategies::default(),
         )
         .await?;
@@ -247,6 +255,7 @@ impl IntegrationEnv {
             &extra,
             &NetTuning::local(),
             cluster_size(),
+            Some(cluster_size()),
             ExtraStrategies { pix: Some(pix) },
         )
         .await?;
@@ -279,6 +288,7 @@ impl IntegrationEnv {
             &rotsee.extra,
             &NetTuning::local(),
             ROTSEE_TARGET_CHANNELS,
+            None,
             ExtraStrategies::default(),
         )
         .await?;
@@ -664,12 +674,15 @@ fn blokli_endpoint(url: &str) -> anyhow::Result<BlokliEndpoint> {
 /// setups. `target_channels` is how many outgoing channels the strategy aims to open to
 /// discovered peers; any pre-existing "genesis" Open channels to non-peer accounts (a
 /// pre-funded identity may hold some) are added on top so the target still reaches live
-/// peers.
+/// peers. `cluster_nodes` is the size of the local cluster the entry should be connected to
+/// before a scenario opens a Session (see [`await_edgli_whole_cluster`]); `None` on Rotsee,
+/// where two peers are all there is to wait for.
 async fn boot_edgli(
     blokli_url: &str,
     extra: &ExtraInfo,
     tuning: &NetTuning,
     target_channels: usize,
+    cluster_nodes: Option<usize>,
     extra_strategies: ExtraStrategies,
 ) -> anyhow::Result<(Edgli, futures::future::AbortHandle)> {
     let hopr_keys: HoprKeys = IdentityRetrievalModes::FromFile {
@@ -693,6 +706,9 @@ async fn boot_edgli(
 
     tracing::info!("waiting for Edgli to connect to ≥2 peers");
     await_edgli_peers_connected(&edgli, 2).await?;
+    if let Some(nodes) = cluster_nodes {
+        await_edgli_whole_cluster(&edgli, nodes).await?;
+    }
 
     // A pre-funded identity (especially on Rotsee) may already hold Open channels to
     // accounts that are not currently connected peers. The strategy counts all Open
@@ -960,6 +976,45 @@ async fn await_edgli_peers_connected(edgli: &Edgli, min_peers: usize) -> anyhow:
         },
     )
     .await
+}
+
+/// Waits until the entry is connected to all `nodes` of the local cluster.
+///
+/// A Session draws its first SURBs, a whole stock of them, over the relayers connected when it opens,
+/// and the entry used to open it as soon as two peers were there. Measured over 638 local runs, the
+/// Session opened before every node was connected in 7 of 10, and the busiest relayer's share of the
+/// replies followed the nodes still missing: 27-33 % with none, 30-36 % with one, 40-45 % with two, and
+/// 66-76 % with three of four relayers missing, which is what failed
+/// `return_paths_should_spread_across_distinct_relayers`. With this wait (150 runs each way) it never
+/// opened early, and the busiest share stayed at or below 42 % against 69 %.
+///
+/// Connected is all it waits for, deliberately. Waiting for every node to be probed as well, or for a
+/// probe round after that, opens the Session while the first scores are coming in, one relayer at a
+/// time, and the planner then favours the relayers it has scores for: the busiest share went up, not
+/// down (median 37 against 34 % probed, 36 against 34 % and up to 50 % a round later).
+///
+/// Not an error when the cluster does not come together within [`WHOLE_CLUSTER_TIMEOUT`]: two peers
+/// are all a Session needs, and a scenario may have taken a node out before the entry booted. It
+/// says so, because the relayers still missing get none of the Session's first SURBs.
+async fn await_edgli_whole_cluster(edgli: &Edgli, nodes: usize) -> anyhow::Result<()> {
+    let started = tokio::time::Instant::now();
+    loop {
+        let connected = edgli.connected_peer_addresses().await?.len();
+        if connected >= nodes {
+            tracing::info!(connected, waited = ?started.elapsed(), "Edgli is connected to the whole cluster");
+            return Ok(());
+        }
+        if started.elapsed() >= WHOLE_CLUSTER_TIMEOUT {
+            tracing::warn!(
+                connected,
+                nodes,
+                "Edgli is not connected to the whole cluster yet; a Session opened now draws its first \
+                 SURBs over the relayers connected so far"
+            );
+            return Ok(());
+        }
+        tokio::time::sleep(WHOLE_CLUSTER_POLL).await;
+    }
 }
 
 async fn await_edgli_channels_open(
