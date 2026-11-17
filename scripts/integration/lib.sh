@@ -654,8 +654,9 @@ pix_build() {
   echo "building PIX-enabled hoprd + hoprd-localcluster from ${src}"
   (cd "${src}" && nix develop -c cargo build --release -p hoprd --features strategy-pix-test) || return 1
   (cd "${src}" && nix develop -c cargo build --release -p hoprd-localcluster) || return 1
-  export HOPRD_BIN="${src}/target/release/hoprd"
-  export HOPRD_LOCALCLUSTER_BIN="${src}/target/release/hoprd-localcluster"
+  local target="${CARGO_TARGET_DIR:-${src}/target}"
+  export HOPRD_BIN="${target}/release/hoprd"
+  export HOPRD_LOCALCLUSTER_BIN="${target}/release/hoprd-localcluster"
 }
 
 # Build hoprd + hoprd-localcluster from a hoprd checkout with TRACE logs compiled in.
@@ -733,6 +734,7 @@ warn_if_trace_capped() {
   find "${dir}" -name '*.log' ${newer[@]+"${newer[@]}"} -exec grep -qs 'the static max level is' {} \; -print |
     grep -q . || return 0
   echo "note: RUST_LOG asks for TRACE, but some binaries were built without TRACE logs." >&2
+  # shellcheck disable=SC2016 # backticks are literal
   echo '      Run `just integration-trace` to build hoprd with TRACE logs.' >&2
 }
 
