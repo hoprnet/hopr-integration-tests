@@ -293,6 +293,35 @@ pix-prod *scenarios:
       pin_line_deps
       exec bash scripts/integration/run-binchain.sh'
 
+# A PIX deposit failed during a 2 min outage of the Entry's Safe must be retried and pay the same
+# Session (gnosis/gnosis_vpn#843; ~10 min, NOT in CI until the hopr-strategy requeue reaches
+# edge-client). See integration/tests/pix_deposit_outage.rs. `HOPR_STRATEGY_SRC=../hopr-strategy`
+# runs the Entry on a local hopr-strategy checkout. Pins the Entry's edgli like `just pix` does.
+pix-deposit-outage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ '{{line}}' = v5 ] || { echo "PIX is v5-only — run: LINE=v5 just pix-deposit-outage" >&2; exit 2; }
+    source scripts/integration/lib.sh
+    pix_build '{{hoprd_src}}'
+    just build-chain
+    pix_check_hoprd "${HOPRD_BIN}"
+
+    unset TEST_TARGETS
+    export LINE='{{line}}' TEST_TARGET=pix_deposit_outage HOPRNET_SHELL='{{hoprnet}}'
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
+    # The pin and the run share one v5 dependency set; see `pix`.
+    bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      pin_line_deps
+      if [ -n "${HOPR_STRATEGY_SRC:-}" ]; then
+        printf "\n[patch.crates-io]\nhopr-strategy = { path = \"%s\" }\n" \
+          "$(cd "${HOPR_STRATEGY_SRC}" && pwd)" >>integration/Cargo.toml
+        # The lock already names a crates.io release, which cargo keeps over a newer patch.
+        cargo update --manifest-path integration/Cargo.toml -p hopr-strategy
+      fi
+      exec bash scripts/integration/run-binchain.sh'
+
 # Run a single test against a fresh env (e.g. `just scenario zero_one_two_hop`).
 scenario name:
     @just integration-binchain '{{name}}'
