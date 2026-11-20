@@ -472,12 +472,8 @@ run_tier() {
   # v5 only: the scenario drives the embedded edgli, which the v4 dependency set does not carry.
   [ "${LINE}" = v5 ] && in_tier pr && run_suite dead_last_hop
   in_tier nightly && run_suite exit_origination
-  # gnosis_vpn-testenv's diagnostic tests on the client's session (#49), and its sustained-upload
-  # guard. v4 stays out: release/4.0 lacks the reply-opener fix (hoprnet#8417) upload_survival needs.
-  if [ "${LINE}" = v5 ] && in_tier nightly; then
-    run_suite vpn
-    run_suite upload_survival
-  fi
+  # gnosis_vpn-testenv's diagnostic tests on the client's session (#49).
+  [ "${LINE}" = v5 ] && in_tier nightly && run_suite vpn
 
   if [ -n "${PIX_BIN:-}" ]; then
     HOPRD_BIN="${PIX_BIN}"

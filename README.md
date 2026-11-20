@@ -29,7 +29,7 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 | `return_path.rs`              | reply spread over relayers, and survival when a relayer dies       | v4 1-hop, v5 nightly | `just return-path`            |
 | `pix_relay_loss.rs`           | a PIX cycle survives half its return relays dying, and is paid     | v5 nightly           | `LINE=v5 just pix-relay-loss` |
 | `vpn.rs`                      | gnosis_vpn-testenv's diagnostic tests on the client's session      | v5 nightly           | `LINE=v5 just vpn`            |
-| `upload_survival.rs`          | sustained upload keeps its return path (reply-opener overflow)     | v5 nightly           | see `run.sh`                  |
+| `upload_survival.rs`          | sustained upload; fails on v5 master despite hoprnet#8417          | no                   | see `run.sh`                  |
 | `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`)  | no                   | `just rotsee`                 |
 | `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no                   | `just profile`                |
 

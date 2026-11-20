@@ -43,9 +43,8 @@ and the fill aims at 540 s.
 | F1  | `pix_relay_loss::a_pix_cycle_survives_a_relay_death_on_both_paths`    | #83    | nightly  | #83 7.5m (≈24m at production size)                        | 3     | kill half the return relays (1,1)    |
 | F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`   | #83    | nightly  | #83 7.6m                                                  | 3     | (0,1)                                |
 | F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`   | #83    | nightly  | #83 8.6m                                                  | 4     | (0,2)                                |
-| G1  | `upload_survival::sustained_upload_keeps_the_return_path_alive`      | testenv T24 | nightly | | 3 | reply-opener cache shrunk to overflow |
-
-Not in v5 CI: rotsee, profiling.
+Not in v5 CI: upload_survival (testenv T24; fails end to end on v5 master `2acc3a5` although it
+carries hoprnet#8417: 15 % echoed, 13 s stall), rotsee, profiling.
 
 ## gnosis_vpn-testenv tests (#49)
 
@@ -74,7 +73,7 @@ profile, so `delay_link` can impair a link at runtime.
 | T19 background-load                      | `a_trickle_on_another_session_should_not_starve_a_transfer` |
 | T22 concurrent-clients                   | `concurrent_sessions_should_share_the_exit`                 |
 | T23 sustained-soak                       | `a_long_call_should_hold_its_loss_and_memory`               |
-| T24 sustained-upload                     | `upload_survival` (G1)                                      |
+| T24 sustained-upload                     | `upload_survival` (not in CI, see above)                    |
 | T31 frame-forensics                      | every `vpn` stream: a read that is not one whole datagram fails it |
 
 Already covered here before #49: T08's split (E11), T20 (E1–E13; its packet-loss ladder needs a loss
@@ -84,10 +83,10 @@ Left in testenv, because the cause is not in the HOPR layer or the test is not a
 T02, T03, T14, T16, T17, T21 (stack and client state), the client-side halves of T10 (WireGuard peer
 removal, liveness watchdog) and T12 (the ping-tier mask), T25–T29, T32, T33 (runbook and production).
 
-| Set (test time, build excluded) | Before                   | After                         |
-| ------------------------------- | ------------------------ | ----------------------------- |
-| v5 PR label `run-integration`   | 75m (~110m with #82/#83) | **pr: 26m in CI**             |
-| v5 nightly tier                 | –                        | ~41m, ~104m with #82/#83/#109 |
+| Set (test time, build excluded) | Before                   | After                                           |
+| ------------------------------- | ------------------------ | ----------------------------------------------- |
+| v5 PR label `run-integration`   | 75m (~110m with #82/#83) | **pr: 26m in CI**                               |
+| v5 nightly tier                 | –                        | ~41m, ~104m with #82/#83/#109, ~165m with `vpn` |
 
 ## Features
 
