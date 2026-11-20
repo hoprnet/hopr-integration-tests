@@ -262,6 +262,46 @@ pix-relay-loss *scenarios:
       done
       exit "${rc}"'
 
+# PIX Session resume: a client forced to reconnect re-opens its Session under the same pseudonym and
+# keeps its paid cycle (binary chain, v5-only; nightly tier). See integration/tests/pix_resume.rs.
+# A few minutes per scenario at the test's own small geometry. Same build path as `just pix`.
+#
+# Needs a hoprd/localcluster that knows `resume_window` (hoprd#293) and a hoprnet carrying the
+# resume window (hoprnet#8711): the test states a 10 s window through `--pix-config`, and
+# localcluster rejects keys it does not know. One cluster PER SCENARIO on one shared chain, like
+# `pix-relay-loss`. Optional args = test-name filters. Pins the Entry's edgli like `just pix` does.
+pix-resume *scenarios:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ '{{line}}' = v5 ] || { echo "PIX is v5-only — run: LINE=v5 just pix-resume" >&2; exit 2; }
+    source scripts/integration/lib.sh
+    pix_build '{{hoprd_src}}'
+    just build-chain
+    pix_check_hoprd "${HOPRD_BIN}"
+    pix_check_localcluster "${HOPRD_LOCALCLUSTER_BIN}"
+    pix_check_resume_window "${HOPRD_LOCALCLUSTER_BIN}"
+
+    it_env
+    export LINE='{{line}}' TEST_TARGET=pix_resume HOPRNET_SHELL='{{hoprnet}}'
+    export SCENARIO_FILTERS='{{scenarios}}'
+    # A failed PIX run is unreadable without the node logs, and they are deleted at teardown.
+    export HOPRD_KEEP_ARTIFACTS="${HOPRD_KEEP_ARTIFACTS:-1}"
+    chain_start
+    trap chain_stop EXIT
+    export CHAIN_SHARED=1
+    # One v5 dependency set for the pin, the listing and every scenario; see `pix-relay-loss`.
+    bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      pin_line_deps
+      scenarios="${SCENARIO_FILTERS}"
+      [ -n "${scenarios}" ] || scenarios="$(list_scenarios pix_resume)"
+      rc=0
+      for scenario in ${scenarios}; do
+        SCENARIOS="${scenario}" bash scripts/integration/run-binchain.sh || rc=1
+      done
+      exit "${rc}"'
+
 # PIX at the DEPLOYED configuration (binary chain; manual, NOT run in CI, about ten minutes).
 #
 # Same build path as `just pix`, but at the geometry hoprnet#8519 ships as its default —

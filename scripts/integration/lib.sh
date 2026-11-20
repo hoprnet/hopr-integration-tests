@@ -490,6 +490,15 @@ run_tier() {
         for scenario in $(list_scenarios pix_relay_loss); do
           SCENARIOS="${scenario}" run_suite pix_relay_loss
         done
+        # Needs a localcluster that takes `resume_window` (hoprd#293); skipped, loudly, without it. Make
+        # this a hard failure (like the pix_shapes branch below) once that PR is on hoprd `main`.
+        if pix_check_resume_window "${HOPRD_LOCALCLUSTER_BIN}" 2>/dev/null; then
+          for scenario in $(list_scenarios pix_resume); do
+            SCENARIOS="${scenario}" run_suite pix_resume
+          done
+        else
+          echo "::warning::${HOPRD_LOCALCLUSTER_BIN} has no resume_window (hoprd#293); pix_resume skipped" >&2
+        fi
       fi
     else
       echo "::error::${HOPRD_LOCALCLUSTER_BIN} has no --pix-config, so the pix_shapes suite cannot" >&2
@@ -639,6 +648,21 @@ pix_check_localcluster() {
   local bin="${1:?usage: pix_check_localcluster <hoprd-localcluster>}"
   grep -qa 'pix-config' "${bin}" || {
     echo "${bin} has no --pix-config; HOPRD_SRC is behind the geometry seam." >&2
+    return 1
+  }
+}
+
+# `pix_resume` states the Exit's resume window through `--pix-config`, and localcluster's raw PIX
+# settings are `deny_unknown_fields`: a localcluster that predates `resume_window` rejects the
+# YAML at start-up. Probed up front so the failure names the cause instead of a cluster that never
+# came up. `resume_window` is a serde field name, so it is compiled into the binary as a string.
+# Only a hint: hopr-lib's own serde field of the same name can make this a false positive. The real
+# guard is that localcluster's `RawPixSettings` is `deny_unknown_fields`, so a binary that does not
+# know the key fails fast on the YAML.
+pix_check_resume_window() {
+  local bin="${1:?usage: pix_check_resume_window <hoprd-localcluster>}"
+  grep -qa 'resume_window' "${bin}" || {
+    echo "${bin} does not know \`resume_window\` in --pix-config; HOPRD_SRC is behind hoprd#293." >&2
     return 1
   }
 }

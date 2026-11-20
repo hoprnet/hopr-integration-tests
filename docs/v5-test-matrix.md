@@ -43,6 +43,13 @@ and the fill aims at 540 s.
 | F1  | `pix_relay_loss::a_pix_cycle_survives_a_relay_death_on_both_paths`    | #83    | nightly  | #83 7.5m (≈24m at production size)                        | 3     | kill half the return relays (1,1)    |
 | F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`   | #83    | nightly  | #83 7.6m                                                  | 3     | (0,1)                                |
 | F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`   | #83    | nightly  | #83 8.6m                                                  | 4     | (0,2)                                |
+| G1  | `pix_resume::a_session_resumed_within_the_window_keeps_its_paid_cycle`       | hoprnet#8711 | nightly | unmeasured                                         | 3     | clean close, re-open under the same pseudonym at once |
+| G2  | `pix_resume::a_session_resumed_after_a_pause_inside_the_window_continues`    | hoprnet#8711 | nightly | unmeasured                                         | 3     | as G1 after 0.6 x the resume window  |
+| G3  | `pix_resume::a_session_reopened_after_the_window_starts_a_new_cycle`         | hoprnet#8711 | nightly | unmeasured                                         | 3     | re-open after the window: pays again (control) |
+
+G1-G3 are unmeasured (cost and status fill in after the first real run). They need a hoprd with
+`resume_window` in localcluster's `--pix-config`, `hoprd#293 (resume_window)`, and a hoprnet that
+carries the resume window; the tier skips them with a warning on a localcluster that lacks it.
 
 Not in v5 CI: upload_survival, rotsee, profiling.
 
@@ -123,7 +130,7 @@ S = strict assertion, w = exercised but weakly or not asserted.
 | Tier      | Trigger                                             | v5 suites                                                                                     |
 | --------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `pr`      | `run-integration` label, merge queue, v5 dispatches | integration, dead_last_hop, pix, pix_shapes mixed                                             |
-| `nightly` | `run-integration-v5-nightly` label, `schedule`      | exit_origination, the other four pix_shapes, return_path (all but E12), pix_relay_loss        |
+| `nightly` | `run-integration-v5-nightly` label, `schedule`      | exit_origination, the other four pix_shapes, return_path (all but E12), pix_relay_loss, pix_resume |
 
 - `run.sh` picks the suites from `TIER`. v4 ignores it and runs everything, as before.
 - Each tier is its own job. The merge queue and v5 dispatches run `pr` only; the schedule runs v4

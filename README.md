@@ -28,6 +28,7 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 | `pix_shapes.rs`               | PIX under end-user traffic shapes (needs `--pix-config`)           | v5 only              | `LINE=v5 just pix-shapes`     |
 | `return_path.rs`              | reply spread over relayers, and survival when a relayer dies       | v4 1-hop, v5 nightly | `just return-path`            |
 | `pix_relay_loss.rs`           | a PIX cycle survives half its return relays dying, and is paid     | v5 nightly           | `LINE=v5 just pix-relay-loss` |
+| `pix_resume.rs`               | a resumed PIX Session keeps its paid cycle (needs `resume_window`) | v5 nightly           | `LINE=v5 just pix-resume`     |
 | `upload_survival.rs`          | sustained upload; fails until hoprnet#8417 reaches the line        | no                   | see `run.sh`                  |
 | `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`)  | no                   | `just rotsee`                 |
 | `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no                   | `just profile`                |
@@ -42,7 +43,7 @@ CI runs 8 scenarios on v4 (6 of them `return_path`). Suites share one chain per
 `run.sh` invocation, warm with frozen identities after the first. `return_path` runs last on v4,
 on a fresh chain and one cluster per scenario, and only its 1-hop scenarios: the 2- and 3-hop ones wait
 for the v5 fix and `spread` is held out for asserting a ratio on a random draw. The v5 nightly tier
-runs every `return_path` scenario but `spread`, and every `pix_relay_loss` one, one cluster each.
+runs every `return_path` scenario but `spread`, and every `pix_relay_loss` and `pix_resume` one, one cluster each.
 
 Every scenario is `#[ignore]` because it needs external binaries. Thresholds are constants in
 the test files, and there are no settings to change. Shared code is in `integration/src/`:
@@ -60,7 +61,7 @@ just ci-v5                      # the same for v5 (TIER=pr|nightly); PIX suites 
 # PIX hoprd + localcluster from HOPRD_SRC (a v5 hoprd git checkout, e.g. a `git worktree` of
 # hoprd main), since the flake has no darwin one.
 LINE=v5 HOPRD_SRC=../hoprd-main just tier pr        # integration, pix, mixed shape (~30 min)
-LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly   # exit_origination, other shapes, return_path, pix_relay_loss
+LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly   # exit_origination, other shapes, return_path, pix_relay_loss, pix_resume
 just tier                                           # v4: every suite
 
 just build build-chain          # hoprd + localcluster, bloklid + deployer + anvil (nix, cached)
