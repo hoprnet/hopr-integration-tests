@@ -43,8 +43,46 @@ and the fill aims at 540 s.
 | F1  | `pix_relay_loss::a_pix_cycle_survives_a_relay_death_on_both_paths`    | #83    | nightly  | #83 7.5m (≈24m at production size)                        | 3     | kill half the return relays (1,1)    |
 | F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`   | #83    | nightly  | #83 7.6m                                                  | 3     | (0,1)                                |
 | F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`   | #83    | nightly  | #83 8.6m                                                  | 4     | (0,2)                                |
+| G1  | `upload_survival::sustained_upload_keeps_the_return_path_alive`      | testenv T24 | nightly | | 3 | reply-opener cache shrunk to overflow |
 
-Not in v5 CI: upload_survival, rotsee, profiling.
+Not in v5 CI: rotsee, profiling.
+
+## gnosis_vpn-testenv tests (#49)
+
+`vpn.rs` runs gnosis_vpn-testenv's diagnostic tests on the HOPR layer: gnosis_vpn-client's WireGuard
+session (`IntegrationEnv::open_vpn_session`: 1 hop, `Segmentation | NoDelay`, maxed-out SURBs, the
+ping-to-main SURB ramp, robust flow control, PIX off) against a far end that echoes, sinks or pushes
+WireGuard-sized datagrams, judged by testenv's thresholds. One 3-node cluster with a flat 1 ms latency
+profile, so `delay_link` can impair a link at runtime.
+
+| testenv                                  | `vpn::`                                                     |
+| ---------------------------------------- | ----------------------------------------------------------- |
+| T04 fixed-throughput                     | `transfers_of_every_size_should_complete_without_a_stall`   |
+| T05 loaded-latency                       | `latency_next_to_a_saturating_load_should_stay_bounded`     |
+| T06 realtime-udp, echo arm               | `a_call_should_not_lose_packets`                            |
+| T06 upload arm                           | `an_upload_stream_should_not_lose_packets`                  |
+| T06 download arm                         | `a_download_stream_should_not_lose_packets`                 |
+| T06 after-bulk arm                       | `a_download_stream_after_transfers_should_not_lose_packets` |
+| T06 idle arm, T07's 75 s idle finding    | `an_idle_session_should_carry_a_call_when_it_resumes`       |
+| T07 cold-start, T15 warmup-knee          | `a_fresh_session_should_reach_full_rate_within_its_ramp`    |
+| T09 impairment-ladder                    | `return_relays_of_unequal_latency_should_carry_the_session` |
+| T10 forced-reconnect                     | `a_session_reopened_under_inbound_traffic_should_carry_it`  |
+| T11 capability-matrix                    | `the_exit_should_shape_exactly_the_rate_controlled_sessions` |
+| T12 balancer-sweep                       | `every_surb_upstream_should_carry_downloads`                |
+| T13 mtu-sweep                            | `every_tunnel_mtu_should_carry_transfers_and_uploads`       |
+| T18 capacity-ceiling                     | `a_download_should_hold_up_to_the_capacity_knee`            |
+| T19 background-load                      | `a_trickle_on_another_session_should_not_starve_a_transfer` |
+| T22 concurrent-clients                   | `concurrent_sessions_should_share_the_exit`                 |
+| T23 sustained-soak                       | `a_long_call_should_hold_its_loss_and_memory`               |
+| T24 sustained-upload                     | `upload_survival` (G1)                                      |
+| T31 frame-forensics                      | every `vpn` stream: a read that is not one whole datagram fails it |
+
+Already covered here before #49: T08's split (E11), T20 (E1–E13; its packet-loss ladder needs a loss
+rule the localcluster relays do not have), T30 (A1).
+
+Left in testenv, because the cause is not in the HOPR layer or the test is not a transport test: T01,
+T02, T03, T14, T16, T17, T21 (stack and client state), the client-side halves of T10 (WireGuard peer
+removal, liveness watchdog) and T12 (the ping-tier mask), T25–T29, T32, T33 (runbook and production).
 
 | Set (test time, build excluded) | Before                   | After                         |
 | ------------------------------- | ------------------------ | ----------------------------- |

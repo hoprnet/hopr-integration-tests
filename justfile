@@ -141,6 +141,21 @@ dead-last-hop: build build-chain
       fi
       exec bash scripts/integration/run-binchain.sh'
 
+# gnosis_vpn-testenv's diagnostic tests on gnosis_vpn-client's session (v5 nightly tier). See
+# integration/tests/vpn.rs. Optional args = test-name filters, e.g. `LINE=v5 just vpn a_call`.
+vpn *scenarios: build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ '{{line}}' = v5 ] || { echo "run: LINE=v5 just vpn" >&2; exit 2; }
+    unset TEST_TARGETS
+    export TEST_TARGET=vpn HOPRNET_SHELL='{{hoprnet}}'
+    [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
+    bash scripts/integration/with-v5-deps.sh bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      pin_line_deps
+      exec bash scripts/integration/run-binchain.sh'
+
 # End-to-end PIX with edgli as the paying entry (binary chain; CI's v5 `pr` tier runs it too).
 # Builds hoprd from HOPRD_SRC (default ../hoprd) because the nix flake has no PIX binary.
 # See integration/tests/pix.rs. Optional args = test-name filters.

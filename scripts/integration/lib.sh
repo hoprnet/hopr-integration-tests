@@ -472,8 +472,12 @@ run_tier() {
   # v5 only: the scenario drives the embedded edgli, which the v4 dependency set does not carry.
   [ "${LINE}" = v5 ] && in_tier pr && run_suite dead_last_hop
   in_tier nightly && run_suite exit_origination
-  # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore
-  # FAILS against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there.
+  # gnosis_vpn-testenv's diagnostic tests on the client's session (#49), and its sustained-upload
+  # guard. v4 stays out: release/4.0 lacks the reply-opener fix (hoprnet#8417) upload_survival needs.
+  if [ "${LINE}" = v5 ] && in_tier nightly; then
+    run_suite vpn
+    run_suite upload_survival
+  fi
 
   if [ -n "${PIX_BIN:-}" ]; then
     HOPRD_BIN="${PIX_BIN}"
@@ -733,7 +737,7 @@ warn_if_trace_capped() {
   find "${dir}" -name '*.log' ${newer[@]+"${newer[@]}"} -exec grep -qs 'the static max level is' {} \; -print |
     grep -q . || return 0
   echo "note: RUST_LOG asks for TRACE, but some binaries were built without TRACE logs." >&2
-  echo '      Run `just integration-trace` to build hoprd with TRACE logs.' >&2
+  echo "      Run \`just integration-trace\` to build hoprd with TRACE logs." >&2
 }
 
 # What "the state" is, in one place. Was four divergent lists. Under IT_TMP_ROOT, which CI sets

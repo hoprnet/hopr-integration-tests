@@ -622,6 +622,10 @@ pub async fn pump_halves(
         // Bytes offered since the last burst boundary, for `Shape::Burst`. Counted rather than
         // derived from `offset` so a burst boundary does not have to divide the payload evenly.
         let mut since_pause = 0usize;
+        // An absolute schedule: a relative sleep under the ~1 ms timer tick rounds up and halved
+        // a 12 Mbit/s offer of 1452 B chunks. Debt is capped, so a blocked write does not burst.
+        const MAX_PACE_DEBT: Duration = Duration::from_millis(10);
+        let mut next_write = tokio::time::Instant::now();
         while offset < payload.len() {
             let end = (offset + chunk).min(payload.len());
             tx.write_all(&payload[offset..end]).await?;
@@ -631,7 +635,9 @@ pub async fn pump_halves(
             match opts.shape.unwrap_or_default() {
                 Shape::Constant => {
                     if let Some(d) = pace {
-                        tokio::time::sleep(d).await;
+                        let floor = tokio::time::Instant::now() - MAX_PACE_DEBT;
+                        next_write = (next_write + d).max(floor);
+                        tokio::time::sleep_until(next_write).await;
                     }
                 }
                 Shape::Burst { on, off } => {
