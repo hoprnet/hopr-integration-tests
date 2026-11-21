@@ -45,7 +45,7 @@ and the fill aims at 540 s.
 | F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`   | #83    | nightly  | #83 8.6m                                                  | 4     | (0,2)                                |
 | G1  | `pix_resume::a_session_resumed_within_the_window_keeps_its_paid_cycle`       | hoprnet#8711 | nightly | unmeasured                                         | 3     | clean close, re-open under the same pseudonym at once |
 | G2  | `pix_resume::a_session_resumed_after_a_pause_inside_the_window_continues`    | hoprnet#8711 | nightly | unmeasured                                         | 3     | as G1 after 0.6 x the resume window  |
-| G3  | `pix_resume::a_session_reopened_after_the_window_starts_a_new_cycle`         | hoprnet#8711 | nightly | unmeasured                                         | 3     | re-open after the window: pays again (control) |
+| G3  | `pix_resume::a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays` | hoprnet#8711 | nightly | unmeasured                                         | 3     | re-open after the window: refused `NotResumable`, a fresh pseudonym pays again (control) |
 
 G1-G3 are unmeasured (cost and status fill in after the first real run). They need a hoprd with
 `resume_window` in localcluster's `--pix-config`, `hoprd#293 (resume_window)`, and a hoprnet that

@@ -7,8 +7,8 @@
 //! already paid sits at the old Session's stealth address. hoprnet#8711 lets the client re-open
 //! under the **same pseudonym**. The Exit *detaches* the funded Session when its data plane ends and
 //! holds it for a **resume window**; a re-initiation under that pseudonym *takes it over* and keeps
-//! the paid cycle. After the window the Exit lets go as before, and a re-open starts a fresh cycle,
-//! which is to say pays again.
+//! the paid cycle. After the window the Exit lets go as before, and a re-open under that pseudonym is
+//! refused (`NotResumable`): the client continues under a fresh pseudonym, which is to say pays again.
 //!
 //! The Entry is `edgli` in-process, as in `tests/pix.rs`, because that is what ships in
 //! `gnosis_vpn-client`. A clean `close()` of its session sends a terminating segment that reaches
@@ -34,10 +34,10 @@
 //! | --- | --- | --- |
 //! | `a_session_resumed_within_the_window_keeps_its_paid_cycle` | [`QUICK_GAP`] after the close | no second deposit for SSA 1; `taken_over == 1`; swept cycles are paid exactly once |
 //! | `a_session_resumed_after_a_pause_inside_the_window_continues` | [`PAUSED_GAP`] = 0.6 x the window | as above, and the Exit's fill, which keeps running while detached, has not finished the cycle by itself |
-//! | `a_session_reopened_after_the_window_starts_a_new_cycle` | [`EXPIRED_GAP`] = window + 5 s | `window_expired == 1`, `taken_over == 0`, the Entry deposits again, nothing is swept twice |
+//! | `a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays` | [`EXPIRED_GAP`] = window + 5 s | the re-open under the same pseudonym is refused `NotResumable` without retries; under a fresh one `window_expired == 1`, `taken_over == 0`, the Entry deposits again, nothing is swept twice |
 //!
 //! The third is the control and documents the designed boundary: **past the window the client pays
-//! again.**
+//! again, under a fresh pseudonym.**
 //!
 //! Each scenario reads `hopr_pix_resumptions_total{event}` and
 //! `hopr_pix_admission_rejections_total{reason="takeover_ineligible"}` on the Exit
@@ -60,7 +60,7 @@
 //!
 //! ```text
 //! HOPRD_SRC=../hoprd HOPRD_KEEP_ARTIFACTS=1 LINE=v5 just pix-resume > /tmp/pix-resume.log 2>&1
-//! LINE=v5 HOPRD_SRC=../hoprd just pix-resume a_session_reopened_after_the_window_starts_a_new_cycle
+//! LINE=v5 HOPRD_SRC=../hoprd just pix-resume a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays
 //! ```
 //!
 //! One cluster per scenario (a fresh chain state each, the Exit's `hopr_pix_*` family has no Session
@@ -114,6 +114,7 @@
 //! | resumed in window: Exit Safe gained | | exactly swept x deposit |
 //! | resumed after a pause: useful shares at re-open | | < [`USEFUL_TARGET`] (not recovered) |
 //! | resumed after a pause: `taken_over` | | exactly 1 |
+//! | reopened after the window: refused under the same pseudonym | | `NotResumable`, < [`REOPEN_BUDGET`] |
 //! | reopened after the window: `window_expired` | | exactly 1 |
 //! | reopened after the window: entry deposits | | >= first-session deposits + swept |
 //! | reopened after the window: cycles swept | | >= [`TARGET_SWEPT_CONTROL`], <= deposits |
@@ -553,6 +554,22 @@ async fn first_leg(
     Ok((tokio::time::Instant::now(), deposits))
 }
 
+/// Whether `error` is hopr-lib's `Rejected(NotResumable)`: the Exit cannot resume the pseudonym.
+fn is_not_resumable(error: &anyhow::Error) -> bool {
+    use edgli::hopr_lib::{
+        errors::{HoprLibError, HoprTransportError},
+        exports::transport::{StartErrorReason, TransportSessionError},
+    };
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<HoprLibError>(),
+            Some(HoprLibError::TransportError(HoprTransportError::Session(
+                TransportSessionError::Rejected(StartErrorReason::NotResumable)
+            )))
+        )
+    })
+}
+
 /// Re-open under `pseudonym` and return within [`REOPEN_BUDGET`].
 async fn reopen(
     env: &IntegrationEnv,
@@ -785,11 +802,13 @@ async fn a_session_resumed_after_a_pause_inside_the_window_continues() -> anyhow
     resumed_scenario(PAUSED_GAP).await
 }
 
-/// The control. Past the window the Exit lets the held Session go, the re-open starts a fresh
-/// cycle, and **the client pays again**: this is the designed boundary, not a defect.
+/// The control. Past the window the Exit lets the held Session go, a re-open under the same
+/// pseudonym is refused (`NotResumable`), and **the client pays again** under a fresh one: this is
+/// the designed boundary, not a defect.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires PIX binaries with the resume window, a localcluster with `resume_window`, and a chain"]
-async fn a_session_reopened_after_the_window_starts_a_new_cycle() -> anyhow::Result<()> {
+async fn a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays()
+-> anyhow::Result<()> {
     install_profile();
     let per_cycle = per_cycle()?;
     let env = IntegrationEnv::setup_pix_with(entry_config()?).await?;
@@ -806,7 +825,28 @@ async fn a_session_reopened_after_the_window_starts_a_new_cycle() -> anyhow::Res
     .await?;
     tracing::info!("before the re-open: {}", resumption_summary(&expired));
 
-    let (mut halves, open_time) = reopen(&env, pseudonym).await?;
+    // Refused at once: hopr-lib does not retry a `NotResumable`, and nothing is committed under `p`.
+    let started = std::time::Instant::now();
+    match open(&env, pseudonym).await {
+        Ok(_) => anyhow::bail!("the re-open under the expired pseudonym {pseudonym} was accepted"),
+        Err(error) => anyhow::ensure!(
+            is_not_resumable(&error),
+            "expected NotResumable, got {error:#}"
+        ),
+    }
+    let refused_in = started.elapsed();
+    tracing::info!(
+        ?refused_in,
+        "the re-open under the same pseudonym was refused as not resumable"
+    );
+    assert!(
+        refused_in < REOPEN_BUDGET,
+        "the refusal took {refused_in:?}"
+    );
+
+    let started = std::time::Instant::now();
+    let (mut halves, _) = open(&env, random_pseudonym()).await?;
+    let open_time = started.elapsed();
     assert!(open_time < REOPEN_BUDGET);
     let swept = sweep_and_settle(&mut halves, &base, TARGET_SWEPT_CONTROL).await?;
 
@@ -835,8 +875,14 @@ async fn a_session_reopened_after_the_window_starts_a_new_cycle() -> anyhow::Res
         "the Exit took over a Session whose window had expired ({})",
         resumption_summary(&gate)
     );
+    assert!(
+        gate.admission_rejections("not_resumable").unwrap_or(0) >= 1,
+        "the Exit did not refuse the re-open as not resumable ({})",
+        resumption_summary(&gate)
+    );
 
-    // The client paid again: the first Session's deposit, plus one per cycle the fresh one swept.
+    // The client paid again, under the fresh pseudonym: the first Session's deposit, plus one per
+    // cycle the fresh one swept.
     assert!(
         deposits >= deposits_first + TARGET_SWEPT_CONTROL,
         "the Entry made {deposits} deposits; {deposits_first} were for the first Session and the \
