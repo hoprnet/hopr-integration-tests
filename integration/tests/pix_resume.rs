@@ -12,7 +12,8 @@
 //!
 //! The Entry is `edgli` in-process, as in `tests/pix.rs`, because that is what ships in
 //! `gnosis_vpn-client`. A clean `close()` of its session sends a terminating segment that reaches
-//! the Exit; that is what makes the Exit detach.
+//! the Exit; that is what makes the Exit detach. A Session dropped without a close tells the Exit
+//! nothing, so it still holds the Session live, and the reconnect takes that over instead.
 //!
 //! # The Session
 //!
@@ -35,6 +36,7 @@
 //! | `a_session_resumed_within_the_window_keeps_its_paid_cycle` | [`QUICK_GAP`] after the close | no second deposit for SSA 1; `taken_over == 1`; swept cycles are paid exactly once |
 //! | `a_session_resumed_after_a_pause_inside_the_window_continues` | [`PAUSED_GAP`] = 0.6 x the window | as above, and the Exit's fill, which keeps running while detached, has not finished the cycle by itself |
 //! | `a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays` | [`EXPIRED_GAP`] = window + 5 s | the re-open under the same pseudonym is refused `NotResumable` without retries; under a fresh one `window_expired == 1`, `taken_over == 0`, the Entry deposits again, nothing is swept twice |
+//! | `a_session_dropped_without_a_close_is_taken_over_live` | [`QUICK_GAP`] after a drop, no close | as the first, but the Exit never detached (`detached == 0`): the live Session was taken over |
 //!
 //! The third is the control and documents the designed boundary: **past the window the client pays
 //! again, under a fresh pseudonym.**
@@ -488,6 +490,15 @@ async fn open(env: &IntegrationEnv, pseudonym: HoprPseudonym) -> anyhow::Result<
     Ok((tokio::io::split(session), exit))
 }
 
+/// How the client leaves the first Session.
+#[derive(Clone, Copy, Debug)]
+enum Leave {
+    /// A clean close, whose terminating segment makes the Exit detach.
+    Close,
+    /// Dropped without a close: the Exit is not told and still holds the Session live.
+    Drop,
+}
+
 /// Close cleanly: shutting the write half sends the terminating segment the Exit detaches on.
 /// Consumes the halves, so the client side is gone when this returns.
 async fn close(mut halves: Halves) -> anyhow::Result<()> {
@@ -517,14 +528,15 @@ async fn await_gate(
 }
 
 /// First leg, shared by every scenario: open under `pseudonym`, drive until SSA 1 is deposited and
-/// confirmed and the Exit shows share progress short of recovery, then close cleanly.
+/// confirmed and the Exit shows share progress short of recovery, then leave as `leave` says.
 ///
-/// Returns when the client has closed; the instant is what the gaps are measured from. Also the
+/// Returns when the client has left; the instant is what the gaps are measured from. Also the
 /// Entry's deposit count at the close.
 async fn first_leg(
     env: &IntegrationEnv,
     base: &Baseline,
     pseudonym: HoprPseudonym,
+    leave: Leave,
 ) -> anyhow::Result<(tokio::time::Instant, u64)> {
     let (mut halves, exit_addr) = open(env, pseudonym).await?;
     anyhow::ensure!(
@@ -549,8 +561,11 @@ async fn first_leg(
 
     let useful = base.exit_gate().await?.shares("useful");
     let deposits = base.entry_pix().deposits().unwrap_or(0);
-    tracing::info!(?useful, deposits, "closing the Session mid-cycle");
-    close(halves).await?;
+    tracing::info!(?useful, deposits, ?leave, "leaving the Session mid-cycle");
+    match leave {
+        Leave::Close => close(halves).await?,
+        Leave::Drop => drop(halves),
+    }
     Ok((tokio::time::Instant::now(), deposits))
 }
 
@@ -628,12 +643,15 @@ fn assert_strays_small(base: &Baseline) {
     );
 }
 
-/// What both resumed scenarios assert at the end, with the resumed Session still open.
+/// What the resumed scenarios assert at the end, with the resumed Session still open.
+///
+/// The Exit detached the first Session after a `Close` and never saw a `Drop` end.
 async fn assert_resumed(
     env: &IntegrationEnv,
     base: &Baseline,
     swept_cycles: u64,
     open_time: Duration,
+    leave: Leave,
 ) -> anyhow::Result<()> {
     // Entry before Exit: the Exit's `requested` can only have grown since the deposits were counted.
     let entry = base.entry_pix();
@@ -670,11 +688,19 @@ async fn assert_resumed(
         "fewer deposits ({deposits}) than swept cycles ({swept_cycles})"
     );
 
-    assert!(
-        gate.resumptions("detached").unwrap_or(0) >= 1,
-        "the Exit never detached the closed Session ({}): the terminating segment did not reach it",
-        resumption_summary(&gate)
-    );
+    match leave {
+        Leave::Close => assert!(
+            gate.resumptions("detached").unwrap_or(0) >= 1,
+            "the Exit never detached the closed Session ({}): the terminating segment did not reach it",
+            resumption_summary(&gate)
+        ),
+        Leave::Drop => assert_eq!(
+            gate.resumptions("detached").unwrap_or(0),
+            0,
+            "the Exit detached a Session that was dropped without a close ({})",
+            resumption_summary(&gate)
+        ),
+    }
     assert_eq!(
         gate.resumptions("taken_over"),
         Some(1),
@@ -741,8 +767,8 @@ async fn assert_resumed(
     Ok(())
 }
 
-/// Scenarios 1 and 2 differ in the gap only.
-async fn resumed_scenario(gap: Duration) -> anyhow::Result<()> {
+/// Scenarios 1, 2 and 4 differ in the gap and in how the first Session is left.
+async fn resumed_scenario(gap: Duration, leave: Leave) -> anyhow::Result<()> {
     install_profile();
     let per_cycle = per_cycle()?;
     let env = IntegrationEnv::setup_pix_with(entry_config()?).await?;
@@ -754,7 +780,7 @@ async fn resumed_scenario(gap: Duration) -> anyhow::Result<()> {
     );
 
     let pseudonym = random_pseudonym();
-    let (closed_at, deposits_at_close) = first_leg(&env, &base, pseudonym).await?;
+    let (closed_at, deposits_at_close) = first_leg(&env, &base, pseudonym, leave).await?;
     tokio::time::sleep_until(closed_at + gap).await;
 
     // After the pause: the cycle must still be in flight. Fill ran meanwhile, and this is the check
@@ -779,7 +805,7 @@ async fn resumed_scenario(gap: Duration) -> anyhow::Result<()> {
         base.entry_pix().deposits().unwrap_or(0) >= deposits_at_close,
         "the Entry's deposit count went backwards"
     );
-    assert_resumed(&env, &base, swept, open_time).await?;
+    assert_resumed(&env, &base, swept, open_time, leave).await?;
     let _ = close(halves).await;
     Ok(())
 }
@@ -791,7 +817,7 @@ async fn resumed_scenario(gap: Duration) -> anyhow::Result<()> {
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires PIX binaries with the resume window, a localcluster with `resume_window`, and a chain"]
 async fn a_session_resumed_within_the_window_keeps_its_paid_cycle() -> anyhow::Result<()> {
-    resumed_scenario(QUICK_GAP).await
+    resumed_scenario(QUICK_GAP, Leave::Close).await
 }
 
 /// As above, after a pause of 0.6 x the window: the funded cycle survives a quiet gap, and the
@@ -799,7 +825,15 @@ async fn a_session_resumed_within_the_window_keeps_its_paid_cycle() -> anyhow::R
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires PIX binaries with the resume window, a localcluster with `resume_window`, and a chain"]
 async fn a_session_resumed_after_a_pause_inside_the_window_continues() -> anyhow::Result<()> {
-    resumed_scenario(PAUSED_GAP).await
+    resumed_scenario(PAUSED_GAP, Leave::Close).await
+}
+
+/// The close never reaches the Exit: the client drops the Session and re-opens at once. The Exit still
+/// holds it live and takes it over (no detach), and the funded cycle is kept.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires PIX binaries with the resume window, a localcluster with `resume_window`, and a chain"]
+async fn a_session_dropped_without_a_close_is_taken_over_live() -> anyhow::Result<()> {
+    resumed_scenario(QUICK_GAP, Leave::Drop).await
 }
 
 /// The control. Past the window the Exit lets the held Session go, a re-open under the same
@@ -815,7 +849,7 @@ async fn a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pa
     let base = Baseline::take(&env).await?;
 
     let pseudonym = random_pseudonym();
-    let (closed_at, deposits_first) = first_leg(&env, &base, pseudonym).await?;
+    let (closed_at, deposits_first) = first_leg(&env, &base, pseudonym, Leave::Close).await?;
     anyhow::ensure!(deposits_first >= 1, "the first Session never deposited");
 
     tokio::time::sleep_until(closed_at + EXPIRED_GAP).await;

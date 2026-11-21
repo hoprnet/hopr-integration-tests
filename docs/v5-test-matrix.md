@@ -46,8 +46,9 @@ and the fill aims at 540 s.
 | G1  | `pix_resume::a_session_resumed_within_the_window_keeps_its_paid_cycle`       | hoprnet#8711 | nightly | unmeasured                                         | 3     | clean close, re-open under the same pseudonym at once |
 | G2  | `pix_resume::a_session_resumed_after_a_pause_inside_the_window_continues`    | hoprnet#8711 | nightly | unmeasured                                         | 3     | as G1 after 0.6 x the resume window  |
 | G3  | `pix_resume::a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays` | hoprnet#8711 | nightly | unmeasured                                         | 3     | re-open after the window: refused `NotResumable`, a fresh pseudonym pays again (control) |
+| G4  | `pix_resume::a_session_dropped_without_a_close_is_taken_over_live`           | hoprnet#8711 | nightly | unmeasured                                         | 3     | as G1 but dropped without a close: the Exit never detaches, the live Session is taken over |
 
-G1-G3 are unmeasured (cost and status fill in after the first real run). They need a hoprd with
+G1-G4 are unmeasured (cost and status fill in after the first real run). They need a hoprd with
 `resume_window` in localcluster's `--pix-config`, `hoprd#293 (resume_window)`, and a hoprnet that
 carries the resume window; the tier skips them with a warning on a localcluster that lacks it.
 
