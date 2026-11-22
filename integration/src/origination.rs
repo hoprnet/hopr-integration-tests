@@ -139,7 +139,7 @@ pub(crate) fn packets_of_type(body: &str, packet_type: &str) -> u64 {
     series(body, PACKETS_METRIC, |line| line.contains(&label))
 }
 
-fn parse(body: &str) -> OriginationSample {
+pub fn parse(body: &str) -> OriginationSample {
     OriginationSample {
         sent: packets_of_type(body, "sent"),
         forwarded: packets_of_type(body, "forwarded"),
