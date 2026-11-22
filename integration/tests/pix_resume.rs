@@ -23,11 +23,10 @@
 //!
 //! # Stray datagrams
 //!
-//! The first leg sends only ~100 datagrams each way, so hoprnet's successor-stream guard cannot tell
-//! the old stream from the new one, and a few datagrams in flight at the close can be delivered into
-//! the resumed Session in both directions; that is by design for unreliable Sessions. Every datagram
-//! therefore carries a leg tag ([`TAG_MAGIC`], leg, sequence), the reader ignores other legs' and
-//! counts them, and the run logs the count and asserts it is at most [`MAX_STRAYS`], never zero.
+//! The resumed Session's stream base makes both ends drop every frame of the previous leg, so no
+//! datagram of the first leg may reach the second. Every datagram carries a leg tag ([`TAG_MAGIC`],
+//! leg, sequence), the reader ignores other legs' and counts them, and the run logs the count and
+//! asserts it is zero.
 //!
 //! # What is asserted
 //!
@@ -110,7 +109,7 @@
 //! | | measured | asserted |
 //! | --- | --- | --- |
 //! | resumed in window: open time | | < [`REOPEN_BUDGET`] |
-//! | stray datagrams from the previous leg (any scenario) | | <= [`MAX_STRAYS`] |
+//! | stray datagrams from the previous leg (any scenario) | | == 0 |
 //! | resumed in window: cycles swept | | >= [`TARGET_SWEPT`] |
 //! | resumed in window: entry deposits / cycles requested | | deposits <= requested |
 //! | resumed in window: Exit Safe gained | | exactly swept x deposit |
@@ -220,14 +219,6 @@ const SEND_INTERVAL: Duration = Duration::from_millis(400);
 /// First byte of every datagram; the second is the leg, the next four a sequence number. The rest
 /// is random, so ciphertexts stay unique.
 const TAG_MAGIC: u8 = 0xA5;
-
-/// Most datagrams of a previous leg tolerated in the resumed Session, both directions together.
-///
-/// Bounded by what can be in flight at the close: the replies the Exit has queued against the
-/// Entry's SURB buffer (16 kB / 1452 B, ~11 SURBs) plus forward datagrams still crossing the mixnet
-/// (2.5 per second times a few seconds, ~13), ~24, rounded up to 32. A count above it means the
-/// resumed Session is replaying a stream, not leaking a tail.
-const MAX_STRAYS: u64 = 32;
 
 /// Useful shares to see before closing: a third of [`USEFUL_TARGET`].
 const PROGRESS_SHARES: u64 = 64;
@@ -628,18 +619,16 @@ async fn sweep_and_settle(
     }
 }
 
-/// Log how many datagrams of the first leg leaked into the second, and bound it by [`MAX_STRAYS`].
-fn assert_strays_small(base: &Baseline) {
+/// Log how many datagrams of the first leg leaked into the second, and require that none did.
+fn assert_no_strays(base: &Baseline) {
     let strays = base.strays.load(std::sync::atomic::Ordering::Relaxed);
     tracing::info!(
         strays,
-        MAX_STRAYS,
         "datagrams of the previous leg read in the resumed one"
     );
     assert!(
-        strays <= MAX_STRAYS,
-        "{strays} datagrams of the first leg were delivered into the second, above the {MAX_STRAYS} \
-         that can be in flight at the close"
+        strays == 0,
+        "{strays} datagrams of the first leg were delivered into the second"
     );
 }
 
@@ -669,7 +658,7 @@ async fn assert_resumed(
     );
 
     assert!(open_time < REOPEN_BUDGET, "the re-open took {open_time:?}");
-    assert_strays_small(base);
+    assert_no_strays(base);
     assert!(
         exit.observable() && gate.observable(),
         "the Exit exported no PIX series"
@@ -896,7 +885,7 @@ async fn a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pa
         entry.summary(), exit.summary(), resumption_summary(&gate), gate.closure_reasons(),
     );
 
-    assert_strays_small(&base);
+    assert_no_strays(&base);
     assert_eq!(
         gate.resumptions("window_expired"),
         Some(1),
