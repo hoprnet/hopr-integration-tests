@@ -490,14 +490,14 @@ run_tier() {
         for scenario in $(list_scenarios pix_relay_loss); do
           SCENARIOS="${scenario}" run_suite pix_relay_loss
         done
-        # Needs a localcluster that takes `resume_window` (hoprd#293); skipped, loudly, without it. Make
-        # this a hard failure (like the pix_shapes branch below) once that PR is on hoprd `main`.
-        if pix_check_resume_window "${HOPRD_LOCALCLUSTER_BIN}" 2>/dev/null; then
+        # Needs a localcluster that takes `resume_window` (hoprd#293).
+        if pix_check_resume_window "${HOPRD_LOCALCLUSTER_BIN}"; then
           for scenario in $(list_scenarios pix_resume); do
             SCENARIOS="${scenario}" run_suite pix_resume
           done
         else
-          echo "::warning::${HOPRD_LOCALCLUSTER_BIN} has no resume_window (hoprd#293); pix_resume skipped" >&2
+          echo "::error::${HOPRD_LOCALCLUSTER_BIN} has no resume_window (hoprd#293), so pix_resume cannot run." >&2
+          suite_rc=1
         fi
       fi
     else
