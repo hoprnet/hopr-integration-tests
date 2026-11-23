@@ -269,9 +269,17 @@ async fn run_tcp_download(env: &IntegrationEnv) -> anyhow::Result<()> {
         Ok::<(u64, _), anyhow::Error>((sent_acks, tx))
     };
 
+    struct DoneOnDrop(Arc<AtomicBool>);
+    impl Drop for DoneOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
     // Concurrent download reader: verify every received byte matches `PUSH_FILL`.
     let service_ref = &service;
     let dl_reader = async move {
+        let _done_guard = DoneOnDrop(done);
         let mut buf = vec![0u8; 64 * 1024];
         let mut received: u64 = 0;
         let mut ttfb: Option<Duration> = None;
@@ -301,7 +309,6 @@ async fn run_tcp_download(env: &IntegrationEnv) -> anyhow::Result<()> {
                 }
             }
         }
-        done.store(true, Ordering::Relaxed);
         let elapsed = started.elapsed();
         Ok::<(u64, Option<Duration>, Duration), anyhow::Error>((received, ttfb, elapsed))
     };
@@ -371,7 +378,11 @@ async fn run_tcp_download(env: &IntegrationEnv) -> anyhow::Result<()> {
         "tcp_download_1hop: exit data HOPR packets {} exceeded bound {max_exit_pkts} ({delta:?})",
         delta.exit_data_pkts()
     );
-    if after.entry.observable() {
+    if after
+        .entry
+        .get("hopr_session_surb_produced_total")
+        .is_some()
+    {
         let max_surbs = env_u64("HOPR_MAX_SURBS_PRODUCED_DL", DEFAULT_MAX_SURBS_PRODUCED_DL);
         assert!(
             delta.entry_surbs_produced > 0 && delta.entry_surbs_produced <= max_surbs,

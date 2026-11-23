@@ -328,11 +328,12 @@ attach *filter:
 # Override the default packet/SURB/ack-batch ceilings via HOPR_MAX_EXIT_PKTS_DL,
 # HOPR_MAX_SURBS_PRODUCED_DL, HOPR_MAX_EXIT_ACK_BATCHES_DL, and HOPR_MAX_EXIT_PKTS_LOOPBACK when
 # measuring an unoptimized baseline.
-traffic-overhead *filter: build-chain
+traffic-overhead *filter:
     #!/usr/bin/env bash
     set -euo pipefail
     unset TEST_TARGETS
     export LINE=v5
+    just build-chain
     export TEST_TARGET=traffic_overhead
     export TEST_PROFILE=release
     export TEST_ARGS="${TEST_ARGS:---nocapture}"
@@ -345,7 +346,7 @@ traffic-overhead *filter: build-chain
 # Mixed-version backwards-compatibility run: exercises both directions between an upgraded
 # checkout (`HOPRNET_PATH` + `UPGRADED_HOPRD_BIN`/`UPGRADED_LOCALCLUSTER_BIN`) and an unmodified
 # baseline checkout (`BASELINE_HOPRNET_PATH` + `BASELINE_HOPRD_BIN`/`BASELINE_LOCALCLUSTER_BIN`).
-traffic-overhead-compat: build-chain
+traffic-overhead-compat:
     #!/usr/bin/env bash
     set -euo pipefail
     : "${HOPRNET_PATH:?set HOPRNET_PATH to the upgraded hoprnet checkout}"

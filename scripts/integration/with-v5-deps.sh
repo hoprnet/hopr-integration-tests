@@ -34,7 +34,8 @@ if [ -n "${EDGLI_PATH:-}" ]; then
   # Match `hopr-strategy` version to the local `edge-client` checkout so only one copy links in.
   strat_ver="$(sed -nE 's/^hopr-strategy[[:space:]]*=[[:space:]]*\{[^}]*version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "${edgli_abs}/Cargo.toml" | head -n 1)"
   if [ -n "${strat_ver}" ]; then
-    sed -i -E "s/^(hopr-strategy[[:space:]]*=[[:space:]]*\{[[:space:]]*version[[:space:]]*=[[:space:]]*\")[^\"]+(\")/\1${strat_ver}\2/" "${CRATE}/Cargo.toml"
+    sed -E "s/^(hopr-strategy[[:space:]]*=[[:space:]]*\{[[:space:]]*version[[:space:]]*=[[:space:]]*\")[^\"]+(\")/\1${strat_ver}\2/" "${CRATE}/Cargo.toml" >"${BACKUP}/Cargo.toml.edited"
+    cat "${BACKUP}/Cargo.toml.edited" >"${CRATE}/Cargo.toml"
   fi
   cat >>"${CRATE}/Cargo.toml" <<EOF
 
