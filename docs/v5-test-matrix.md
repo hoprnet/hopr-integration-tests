@@ -43,21 +43,21 @@ and the fill aims at 540 s.
 | F1  | `pix_relay_loss::a_pix_cycle_survives_a_relay_death_on_both_paths`    | #83    | nightly  | #83 7.5m (≈24m at production size)                        | 3     | kill half the return relays (1,1)    |
 | F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`   | #83    | nightly  | #83 7.6m                                                  | 3     | (0,1)                                |
 | F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`   | #83    | nightly  | #83 8.6m                                                  | 4     | (0,2)                                |
-| G1  | `pix_resume::a_session_resumed_within_the_window_keeps_its_paid_cycle`       | hoprnet#8711 | nightly | unmeasured                                         | 3     | clean close, re-open under the same pseudonym at once |
-| G2  | `pix_resume::a_session_resumed_after_a_pause_inside_the_window_continues`    | hoprnet#8711 | nightly | unmeasured                                         | 3     | as G1 after 0.6 x the resume window  |
-| G3  | `pix_resume::a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays` | hoprnet#8711 | nightly | unmeasured                                         | 3     | re-open after the window: refused `NotResumable`, a fresh pseudonym pays again (control) |
-| G4  | `pix_resume::a_session_dropped_without_a_close_is_taken_over_live`           | hoprnet#8711 | nightly | unmeasured                                         | 3     | as G1 but dropped without a close: the Exit never detaches, the live Session is taken over |
+| G1  | `pix_resume::a_session_resumed_within_the_window_keeps_its_paid_cycle`       | hoprnet#8711 | nightly | L 7.7–7.8m                                         | 3     | clean close, re-open under the same pseudonym at once |
+| G2  | `pix_resume::a_session_resumed_after_a_pause_inside_the_window_continues`    | hoprnet#8711 | nightly | L 5.9m                                             | 3     | as G1 after 0.6 x the resume window  |
+| G3  | `pix_resume::a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays` | hoprnet#8711 | nightly | L 4.9–5.4m                                         | 3     | re-open after the window: refused `NotResumable`, a fresh pseudonym pays again (control) |
+| G4  | `pix_resume::a_session_dropped_without_a_close_is_taken_over_live`           | hoprnet#8711 | nightly | L 7.8–10.1m                                        | 3     | as G1 but dropped without a close: the Exit never detaches, the live Session is taken over |
 
-G1-G4 are unmeasured (cost and status fill in after the first real run). They need a hoprd with
-`resume_window` in localcluster's `--pix-config`, `hoprd#293 (resume_window)`, and a hoprnet that
-carries the resume window; the tier skips them with a warning on a localcluster that lacks it.
+G1-G4 were measured locally, twice each, cluster bring-up included. They need a localcluster that
+takes `resume_window` in `--pix-config` (hoprd#293) and a hoprnet with the resume window (hoprnet#8711)
+in both the Exit and the edgli Entry; the tier fails on a localcluster without the key.
 
 Not in v5 CI: upload_survival, rotsee, profiling.
 
-| Set (test time, build excluded) | Before                   | After                         |
-| ------------------------------- | ------------------------ | ----------------------------- |
-| v5 PR label `run-integration`   | 75m (~110m with #82/#83) | **pr: 26m in CI**             |
-| v5 nightly tier                 | –                        | ~41m, ~104m with #82/#83/#109 |
+| Set (test time, build excluded) | Before                   | After                                          |
+| ------------------------------- | ------------------------ | ---------------------------------------------- |
+| v5 PR label `run-integration`   | 75m (~110m with #82/#83) | **pr: 26m in CI**                              |
+| v5 nightly tier                 | –                        | ~41m, ~104m with #82/#83/#109, ~132m with #116 |
 
 ## Features
 
