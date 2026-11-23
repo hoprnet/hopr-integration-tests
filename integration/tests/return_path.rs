@@ -92,14 +92,15 @@
 //! - All lines on the test's own stdout come from the in-process entry; node logs are separate
 //!   files. A `hopr_transport` target in stdout is the entry, not a relayer.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use edgli::hopr_lib::exports::transport::SESSION_MTU;
 use hoprd_integration_test::{
     HoprSession, IntegrationEnv,
     cluster::{NodeInfo, request_cluster_size, request_latency_profile},
     pump::{
-        PumpOpts, PumpOutcome, Transfer, drain_until_quiet, pace_for_rate, pump_halves,
-        tagged_payload,
+        PumpOpts, PumpOutcome, RECORD_SIZE, Transfer, drain_until_quiet, pace_for_rate,
+        pace_for_rate_with_chunk, pump_halves, tagged_payload,
     },
     relayers::{self, RelayerSpread},
     session_metrics, surb_store,
@@ -178,6 +179,8 @@ struct Topology {
     /// Stall every cluster link of the victim instead: alive and connected everywhere, slow in any
     /// position of a path.
     stall_victim: bool,
+    /// After recovering, keep the load on until the dead relayer's probation SURBs are being spent.
+    hold_steady: bool,
 }
 
 /// Replies travel over one relay; the request path is direct.
@@ -191,6 +194,7 @@ const RETURN_PATH: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
 };
 
 /// The mirror image: requests travel over one relay, replies come back directly.
@@ -207,6 +211,7 @@ const FORWARD_PATH: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
 };
 
 /// One relay in each direction: what a real deployment runs.
@@ -222,6 +227,7 @@ const SYMMETRIC: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
 };
 
 /// Replies over one relay whose link to the exit is cut while Edgli still reaches it.
@@ -233,6 +239,15 @@ const RETURN_EXIT_CUT: Topology = Topology {
     cut_exit_link: true,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
+};
+
+/// As [`RETURN_EXIT_CUT`], held under load until well past the verdict lapsing into probation.
+#[cfg(feature = "v5")]
+const RETURN_EXIT_CUT_HELD: Topology = Topology {
+    direction: "return-exit-cut-held",
+    hold_steady: true,
+    ..RETURN_EXIT_CUT
 };
 
 /// As [`RETURN_EXIT_CUT`] over two-hop return paths.
@@ -244,6 +259,7 @@ const TWO_HOP_RETURN_EXIT_CUT: Topology = Topology {
     cut_exit_link: true,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
 };
 
 /// Replies over one relay whose link to the exit stalls periodically: alive, connected, too slow.
@@ -255,6 +271,7 @@ const RETURN_EXIT_STALL: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: true,
     stall_victim: false,
+    hold_steady: false,
 };
 
 /// Two relays each way, busiest one killed: the victim can sit anywhere on either path,
@@ -267,6 +284,7 @@ const TWO_HOP_SYMMETRIC: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
 };
 
 /// Three relays each way: a killed relayer sits in the middle or last position of most paths
@@ -279,6 +297,7 @@ const THREE_HOP_SYMMETRIC: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
 };
 
 /// Three relays each way with the busiest one stalling on every link.
@@ -290,6 +309,7 @@ const THREE_HOP_STALL: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: true,
+    hold_steady: false,
 };
 
 /// Warm-up payload: enough packets to make the relayer histogram unambiguous, no more.
@@ -811,6 +831,7 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
     } else {
         victim.kill()?;
     }
+    let fault_at = Instant::now();
 
     // Phase 3 -- settle: let the kill land before any new data is offered.
     //
@@ -874,7 +895,118 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         counters.nonzero()
     );
 
-    assert_recovered(&baseline, &after_kill, &spread, &spread_after)
+    assert_recovered(&baseline, &after_kill, &spread, &spread_after)?;
+    if topology.hold_steady {
+        let exit = exit_node(&env, &candidates)?;
+        hold_steady_past_probation(&exit, &mut rx, &mut tx, offered_mbps, fault_at).await?;
+    }
+    Ok(())
+}
+
+/// Phase tag for the load held on after recovery.
+const STEADY_PHASE: u8 = 5;
+
+/// Upstream `PENDING_SURB_TTL`: a dead verdict lapses into probation once this has passed without
+/// a reply through the relayer still due.
+const PENDING_SURB_TTL: Duration = Duration::from_secs(60);
+
+/// Upstream `IMPLAUSIBLE_PROBE_INTERVAL`: the planner's exploration may mint one SURB per interval
+/// through a relayer on probation. That probe is the only loss probation is meant to cost.
+const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long the held load is offered for, after the survival phase.
+const STEADY_LOAD_DURATION: Duration = Duration::from_secs(240);
+
+/// The final stretch of the held load that has to come back whole.
+const LATE_WINDOW: Duration = Duration::from_secs(60);
+
+const MIN_LATE_ARRIVAL_PCT: f64 = 99.0;
+
+/// One whole-record write per session segment, so a lost reply packet loses exactly one write.
+/// Larger writes span 63 segments and turn 1 % packet loss into ~50 % frame loss.
+const STEADY_CHUNK: usize = SESSION_MTU / RECORD_SIZE * RECORD_SIZE;
+
+/// Hoprnet#8750: a dead relayer that lapses into probation keeps being drawn for ordinary return
+/// paths, and the Exit spends those SURBs FIFO about one stock turnover later, losing the replies.
+/// Requires the last [`LATE_WINDOW`] of a long load to come back whole.
+async fn hold_steady_past_probation(
+    exit: &NodeInfo,
+    rx: &mut tokio::io::ReadHalf<HoprSession>,
+    tx: &mut tokio::io::WriteHalf<HoprSession>,
+    offered_mbps: f64,
+    fault_at: Instant,
+) -> anyhow::Result<()> {
+    drain_until_quiet(rx, DRAIN_QUIET, "survival").await;
+    let exit_stock = surb_store::surbs_held(exit).await?;
+    let bytes = (offered_mbps * 1_000_000.0 * STEADY_LOAD_DURATION.as_secs_f64()) as usize;
+    let started_after_fault = fault_at.elapsed();
+    tracing::info!(
+        ?started_after_fault,
+        ?exit_stock,
+        "holding {:.2} MB/s for {STEADY_LOAD_DURATION:?} in {STEADY_CHUNK} B writes",
+        offered_mbps
+    );
+    let steady = pump_halves(
+        rx,
+        tx,
+        &tagged_payload(STEADY_PHASE, bytes),
+        "steady",
+        PUMP_TIMEOUT,
+        PumpOpts {
+            pace: pace_for_rate_with_chunk(offered_mbps, STEADY_CHUNK),
+            phase: Some(STEADY_PHASE),
+            chunk: Some(STEADY_CHUNK),
+            idle_budget: Some(SURVIVAL_IDLE_BUDGET),
+            tail_grace: Some(SURVIVAL_TAIL_GRACE),
+            ..PumpOpts::default()
+        },
+    )
+    .await?;
+
+    let offer_seconds = steady
+        .offer_completed_at
+        .ok_or_else(|| anyhow::anyhow!("the held load was never fully offered"))?;
+    let writes_per_sec = steady.offered.len() as f64 / offer_seconds;
+    let window_from_fault =
+        started_after_fault.as_secs_f64() + offer_seconds - LATE_WINDOW.as_secs_f64();
+    // FIFO: a SURB minted at probation onset is spent one stock turnover later.
+    if let Some(stock) = exit_stock {
+        let poisoned_spend_from = PENDING_SURB_TTL.as_secs_f64() + stock as f64 / writes_per_sec;
+        anyhow::ensure!(
+            window_from_fault >= poisoned_spend_from,
+            "the late window opens {window_from_fault:.0} s after the fault, before the Exit spends \
+             SURBs minted at probation onset (~{poisoned_spend_from:.0} s: {stock} SURBs at \
+             {writes_per_sec:.0}/s); lengthen STEADY_LOAD_DURATION"
+        );
+    }
+
+    let (arrived, offered) = steady
+        .late_window_records(LATE_WINDOW)
+        .ok_or_else(|| anyhow::anyhow!("the held load ran shorter than {LATE_WINDOW:?}"))?;
+    let arrival_pct = arrived as f64 / offered.max(1) as f64 * 100.0;
+    let lost_replies_per_sec = (offered - arrived) as f64
+        / (STEADY_CHUNK / RECORD_SIZE) as f64
+        / LATE_WINDOW.as_secs_f64();
+    let probe_budget = 1.0 / PROBE_INTERVAL.as_secs_f64();
+    tracing::info!(
+        "late window (+{window_from_fault:.0} s to +{:.0} s after the fault): {arrival_pct:.2}% \
+         of {offered} records back, {lost_replies_per_sec:.2} replies lost/s against a probe \
+         budget of {probe_budget:.0}/s at {writes_per_sec:.0} replies/s; whole load {:.2}%",
+        window_from_fault + LATE_WINDOW.as_secs_f64(),
+        steady.arrival_pct(),
+    );
+    anyhow::ensure!(
+        arrival_pct >= MIN_LATE_ARRIVAL_PCT,
+        "only {arrival_pct:.2}% of the load offered over the last {LATE_WINDOW:?} came back (need \
+         {MIN_LATE_ARRIVAL_PCT}%), {window_from_fault:.0} s after the fault: replies are still \
+         being spent on SURBs through the dead relayer (hoprnet#8750)"
+    );
+    anyhow::ensure!(
+        lost_replies_per_sec <= probe_budget,
+        "{lost_replies_per_sec:.2} replies/s lost over the last {LATE_WINDOW:?}, above the \
+         {probe_budget:.0}/s probe budget a relayer on probation may cost (hoprnet#8750)"
+    );
+    Ok(())
 }
 
 /// The original incident: the entry reassembles the reply stream, and a return relay dies under it.
@@ -902,6 +1034,17 @@ async fn session_should_survive_forward_relayer_loss() -> anyhow::Result<()> {
 #[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
 async fn a_one_hop_session_should_survive_exit_losing_its_return_relayer() -> anyhow::Result<()> {
     session_should_survive_relayer_loss(RETURN_EXIT_CUT).await
+}
+
+/// As above, then held under load for four more minutes: the dead relayer goes on probation, and
+/// the stream must not keep losing the replies sent on SURBs through it (hoprnet#8750).
+/// v5 only: v4 has no probation to lapse into.
+#[cfg(feature = "v5")]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn a_one_hop_session_should_hold_steady_once_its_dead_return_relayer_is_on_probation()
+-> anyhow::Result<()> {
+    session_should_survive_relayer_loss(RETURN_EXIT_CUT_HELD).await
 }
 
 /// As above over two-hop return paths.
