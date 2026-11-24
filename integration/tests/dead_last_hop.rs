@@ -82,7 +82,7 @@ async fn a_one_hop_session_should_avoid_relays_that_drop_everything_toward_the_e
     // learns at startup says otherwise. The exit has to be named up front for the same reason.
     let env = step(
         "setup",
-        IntegrationEnv::setup_with(|cluster| {
+        IntegrationEnv::setup_with(async |cluster| {
             anyhow::ensure!(
                 cluster.nodes.len() == 1 + RELAYS,
                 "expected {} nodes, the cluster has {}",

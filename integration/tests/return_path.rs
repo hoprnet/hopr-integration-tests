@@ -96,8 +96,8 @@ use std::time::{Duration, Instant};
 
 use edgli::hopr_lib::exports::transport::SESSION_MTU;
 use hoprd_integration_test::{
-    HoprSession, IntegrationEnv,
-    cluster::{NodeInfo, request_cluster_size, request_latency_profile},
+    Address, HoprSession, IntegrationEnv,
+    cluster::{self, NodeInfo, request_cluster_size, request_latency_profile},
     pump::{
         PumpOpts, PumpOutcome, RECORD_SIZE, Transfer, drain_until_quiet, pace_for_rate,
         pace_for_rate_with_chunk, pump_halves, tagged_payload,
@@ -181,6 +181,9 @@ struct Topology {
     stall_victim: bool,
     /// After recovering, keep the load on until the dead relayer's probation SURBs are being spent.
     hold_steady: bool,
+    /// Close the exit's channels to all but this many relayers before the warm-up. The lab exit
+    /// had 3, so a relayer on probation came back as one of 3 return candidates, not one of 7.
+    exit_channels: Option<usize>,
 }
 
 /// Replies travel over one relay; the request path is direct.
@@ -195,6 +198,7 @@ const RETURN_PATH: Topology = Topology {
     stall_exit_link: false,
     stall_victim: false,
     hold_steady: false,
+    exit_channels: None,
 };
 
 /// The mirror image: requests travel over one relay, replies come back directly.
@@ -212,6 +216,7 @@ const FORWARD_PATH: Topology = Topology {
     stall_exit_link: false,
     stall_victim: false,
     hold_steady: false,
+    exit_channels: None,
 };
 
 /// One relay in each direction: what a real deployment runs.
@@ -228,6 +233,7 @@ const SYMMETRIC: Topology = Topology {
     stall_exit_link: false,
     stall_victim: false,
     hold_steady: false,
+    exit_channels: None,
 };
 
 /// Replies over one relay whose link to the exit is cut while Edgli still reaches it.
@@ -240,15 +246,22 @@ const RETURN_EXIT_CUT: Topology = Topology {
     stall_exit_link: false,
     stall_victim: false,
     hold_steady: false,
+    exit_channels: None,
 };
 
-/// As [`RETURN_EXIT_CUT`], held under load until well past the verdict lapsing into probation.
-#[cfg(feature = "v5")]
+/// As [`RETURN_EXIT_CUT`] in the shape of the 2026-11-23 lab arm, held under load until well past
+/// the verdict lapsing into probation: one hop each way, an exit with channels to three relayers,
+/// and an entry with a floor of three and no channel to the exit.
 const RETURN_EXIT_CUT_HELD: Topology = Topology {
     direction: "return-exit-cut-held",
+    forward_hops: 1,
     hold_steady: true,
+    exit_channels: Some(3),
     ..RETURN_EXIT_CUT
 };
+
+/// The lab client's `min_paths_anonymity_floor`.
+const LAB_ANONYMITY_FLOOR: usize = 3;
 
 /// As [`RETURN_EXIT_CUT`] over two-hop return paths.
 const TWO_HOP_RETURN_EXIT_CUT: Topology = Topology {
@@ -260,6 +273,7 @@ const TWO_HOP_RETURN_EXIT_CUT: Topology = Topology {
     stall_exit_link: false,
     stall_victim: false,
     hold_steady: false,
+    exit_channels: None,
 };
 
 /// Replies over one relay whose link to the exit stalls periodically: alive, connected, too slow.
@@ -272,6 +286,7 @@ const RETURN_EXIT_STALL: Topology = Topology {
     stall_exit_link: true,
     stall_victim: false,
     hold_steady: false,
+    exit_channels: None,
 };
 
 /// Two relays each way, busiest one killed: the victim can sit anywhere on either path,
@@ -285,6 +300,7 @@ const TWO_HOP_SYMMETRIC: Topology = Topology {
     stall_exit_link: false,
     stall_victim: false,
     hold_steady: false,
+    exit_channels: None,
 };
 
 /// Three relays each way: a killed relayer sits in the middle or last position of most paths
@@ -298,6 +314,7 @@ const THREE_HOP_SYMMETRIC: Topology = Topology {
     stall_exit_link: false,
     stall_victim: false,
     hold_steady: false,
+    exit_channels: None,
 };
 
 /// Three relays each way with the busiest one stalling on every link.
@@ -310,6 +327,7 @@ const THREE_HOP_STALL: Topology = Topology {
     stall_exit_link: false,
     stall_victim: true,
     hold_steady: false,
+    exit_channels: None,
 };
 
 /// Warm-up payload: enough packets to make the relayer histogram unambiguous, no more.
@@ -578,6 +596,55 @@ async fn setup_env_with_hops(
     Ok((env, session, candidates))
 }
 
+/// The 2026-11-23 lab arm's shape: before the entry boots, the exit (node 1, as in the other
+/// scenarios' runs) closes its channels to all but `keep` relayers and every relayer closes its
+/// channel to the exit; the entry then opens channels to every node but the exit. Returns the
+/// relayers the exit closed its channel to.
+async fn setup_lab_env(
+    topology: Topology,
+    keep: usize,
+) -> anyhow::Result<(IntegrationEnv, HoprSession, Vec<NodeInfo>, Vec<Address>)> {
+    request_cluster_size(topology.nodes);
+    request_latency_profile(LATENCY_PROFILE);
+    cluster::request_lab_entry(LAB_ANONYMITY_FLOOR);
+    let mut closed = Vec::new();
+    let env = IntegrationEnv::setup_with(async |cluster| {
+        let exit = cluster
+            .nodes
+            .get(1)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the lab shape needs at least two cluster nodes"))?;
+        let relayers: Vec<_> = cluster
+            .nodes
+            .iter()
+            .filter(|n| n.address != exit.address)
+            .cloned()
+            .collect();
+        let (kept, rest) = relayers.split_at(keep.min(relayers.len()));
+        close_channels(&exit, rest).await?;
+        // The lab exit had no incoming channel at all. Without a relayer -> exit edge in the entry's
+        // graph, neither a SURB round-trip nor a loopback probe can be attributed to exit -> relayer.
+        for relayer in &relayers {
+            close_channels(relayer, std::slice::from_ref(&exit)).await?;
+        }
+        tracing::info!(
+            kept = ?kept.iter().map(|n| n.address).collect::<Vec<_>>(),
+            "the exit keeps channels to these return relayers only, and none lead to it"
+        );
+        closed = rest.iter().map(|n| n.address).collect();
+        Ok(Some(exit.address))
+    })
+    .await?;
+    let (session, exit) = env
+        .open_unreliable_session_paths(topology.forward_hops, topology.return_hops)
+        .await?;
+    let candidates = env.relayer_candidates(exit)?;
+    // The lab client, once connected, probed at a low dial focused on the exits it was not using.
+    env.apply_connected_client_probing(&closed)?;
+    tracing::info!(%exit, candidates = candidates.len(), "lab-shaped env ready");
+    Ok((env, session, candidates, closed))
+}
+
 /// Pump `payload` while sampling the forwarded-packet counters either side of it.
 ///
 /// Takes the session halves by reference so a scenario can pump the *same* session more than once.
@@ -717,8 +784,15 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         "relayer-loss scenario"
     );
     // Held for the cluster lifetime; the scenario itself never opens a second session.
-    let (env, session, candidates) =
-        setup_env_with_hops(topology.forward_hops, topology.return_hops, topology.nodes).await?;
+    let (env, session, candidates, closed) = match topology.exit_channels {
+        Some(keep) => setup_lab_env(topology, keep).await?,
+        None => {
+            let (env, session, candidates) =
+                setup_env_with_hops(topology.forward_hops, topology.return_hops, topology.nodes)
+                    .await?;
+            (env, session, candidates, Vec::new())
+        }
+    };
 
     // Split once and keep the halves: both phases run over this one session, so what is measured
     // is the *established* stream surviving. A replacement session opened after the kill would
@@ -746,7 +820,6 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
          kill, so the result would say nothing about resilience",
         before_kill.arrival_pct(),
     );
-
     // Phase 2 -- quiesce: everything still in flight from the warm-up has to land before the kill,
     // or it is counted as survival-phase arrival and a dead stream reads as a recovering one.
     let leftover = drain_until_quiet(&mut rx, DRAIN_QUIET, "warm-up").await;
@@ -769,8 +842,12 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
     // session sustains. Never offer more than the paced baseline carried.
     let offered_mbps = offered_mbps.min(baseline.mbps);
 
+    // A relayer the exit has no channel to can still carry forward traffic, but no replies.
     let busiest = spread
-        .busiest()
+        .per_relayer
+        .iter()
+        .map(|(relayer, _)| *relayer)
+        .find(|relayer| !closed.contains(relayer))
         .ok_or_else(|| anyhow::anyhow!("no relayer forwarded anything; nothing to kill"))?;
     let victim = candidates
         .iter()
@@ -898,7 +975,17 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
     assert_recovered(&baseline, &after_kill, &spread, &spread_after)?;
     if topology.hold_steady {
         let exit = exit_node(&env, &candidates)?;
-        hold_steady_past_probation(&exit, &mut rx, &mut tx, offered_mbps, fault_at).await?;
+        tracing::info!(
+            "entry graph before the held load:\n{}",
+            env.graph_report().await
+        );
+        let held =
+            hold_steady_past_probation(&exit, &mut rx, &mut tx, offered_mbps, fault_at).await;
+        tracing::info!(
+            "entry graph after the held load:\n{}",
+            env.graph_report().await
+        );
+        held?;
     }
     Ok(())
 }
@@ -1038,8 +1125,6 @@ async fn a_one_hop_session_should_survive_exit_losing_its_return_relayer() -> an
 
 /// As above, then held under load for four more minutes: the dead relayer goes on probation, and
 /// the stream must not keep losing the replies sent on SURBs through it (hoprnet#8750).
-/// v5 only: v4 has no probation to lapse into.
-#[cfg(feature = "v5")]
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
 async fn a_one_hop_session_should_hold_steady_once_its_dead_return_relayer_is_on_probation()
@@ -1399,6 +1484,37 @@ async fn common_mode_return_outage(shape: OutageShape) -> anyhow::Result<()> {
 
 /// The cluster node outside `candidates`: the Exit, which [`IntegrationEnv::relayer_candidates`]
 /// leaves out.
+/// Closes `from`'s channels to each of `to`, and waits until `from`'s chain view agrees.
+async fn close_channels(from: &NodeInfo, to: &[NodeInfo]) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let open = cluster::open_outgoing_channels(from).await?;
+        let still_open: Vec<_> = to
+            .iter()
+            .filter(|peer| {
+                open.iter()
+                    .any(|(address, _)| address.eq_ignore_ascii_case(&peer.address.to_string()))
+            })
+            .collect();
+        if still_open.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "{} still lists channels it closed as open: {open:?}",
+            from.address
+        );
+        // The close tx often lands although the REST call times out waiting for it, so the chain
+        // view decides, not the status code.
+        for peer in still_open {
+            if let Err(error) = cluster::close_outgoing_channel(from, peer.address).await {
+                tracing::warn!(from = %from.address, to = %peer.address, "closing a channel: {error:#}");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
 fn exit_node(env: &IntegrationEnv, candidates: &[NodeInfo]) -> anyhow::Result<NodeInfo> {
     let mut others = env
         .cluster()?
