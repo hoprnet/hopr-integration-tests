@@ -34,12 +34,12 @@
 //! # Running
 //!
 //! ```text
-//! LINE=v5 just dead-last-hop
-//! LINE=v5 EDGLI_REF=<branch> just dead-last-hop      # an unmerged edge-client
-//! LINE=v5 EDGLI_REF=<branch> NETWORK_GRAPH_REF=<branch> just dead-last-hop   # and an unreleased graph
+//! just dead-last-hop
+//! EDGLI_REF=<branch> just dead-last-hop      # an unmerged edge-client
+//! EDGLI_REF=<branch> NETWORK_GRAPH_REF=<branch> just dead-last-hop   # and an unreleased graph
 //! ```
 //!
-//! One cluster. CI runs it in the v5 `pr` tier.
+//! One cluster. CI runs it in the `pr` tier.
 
 use std::time::Duration;
 

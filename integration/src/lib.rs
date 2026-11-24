@@ -17,23 +17,13 @@
 pub mod cluster;
 pub mod env;
 pub mod origination;
-// Ungated on purpose, though only `tests/pix.rs` drives it: the balance and counter readers are
-// plain parsers, and gating them would keep the subtlest logic in this crate — absent-vs-zero,
-// whole-multiple reconciliation — out of the v4 `cargo test --lib` that CI runs. Only the parts
-// naming edgli's PIX types are `#[cfg(feature = "v5")]`.
 pub mod pix;
-// Ungated for the same reason `pix` is, and with more at stake: this is the reader that tells a
-// parked egress gate apart from a starved one, and its subtlety is all in the parsing — cumulative
-// histogram buckets, a numeric `le`, and absent-versus-zero on a label that only exists once the
-// gate has failed. Those tests belong in the default `cargo test --lib`.
 pub mod pix_exit;
 pub mod prod_pix;
 pub mod pump;
+pub mod relay_loss;
 pub mod relayers;
 pub mod session_metrics;
-// Ungated for the same reason `pix` is: the profile is arithmetic over constants, and its
-// compile-time guards and unit tests are what catch a geometry edited without re-deriving what
-// depends on it. Those should run in the default `cargo test --lib`, on both lines.
 pub mod shapes;
 pub mod surb_store;
 // Installs itself when the process starts; see the module docs.
@@ -45,7 +35,6 @@ pub mod udp_service;
 pub const PAYLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
 pub use env::IntegrationEnv;
-#[cfg(feature = "v5")]
 pub use env::{HoprPseudonym, random_pseudonym};
 
 /// Runs one named phase of a test. A panic or error inside it fails the test with the step's
@@ -127,8 +116,6 @@ pub use edgli::hopr_lib::exports::transport::HoprSession;
 /// and `TcpStream` variants point at an ordinary socket on the Exit's host, which is how a shape
 /// gets traffic that is *not* symmetric — see `env::IntegrationEnv::open_pix_session_with`.
 pub use edgli::hopr_lib::exports::transport::SessionTarget;
-#[cfg(feature = "v5")]
-pub mod relay_loss;
 
 #[cfg(test)]
 mod tests {

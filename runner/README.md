@@ -41,23 +41,23 @@ The boxes are provisioned from the internal infrastructure repo, not here. Two b
 runner name ending in `-<box>-<instance>`. So up to 2 jobs run at once, one per box.
 `max-parallel: 4` in `integration.yaml` is only a ceiling; the runner count is the limit.
 
-One instance per box on purpose: with two, v5 failed next to any
+One instance per box on purpose: with two, runs failed next to any
 neighbour — `pix_shapes` evicted PIX shares from the Exit's SURB store and `2-hop` dropped
-to ~0.17 MB/s (0.28 alone) — while only v4 gained from the second slot.
+to ~0.17 MB/s (0.28 alone).
 
 Should a box ever run two instances again, the integration job keeps them apart itself: the
 "Claim this runner's ports and temp dir" step reads the instance number from `RUNNER_NAME`
 and, for instance N, shifts every port by `(N-1) * 1000` and roots the chain and socket
 folders at that runner's `RUNNER_TEMP`:
 
-| | instance 1 | instance 2 |
-| --- | --- | --- |
-| anvil (`ANVIL_PORT`) | 8545 | 9545 |
-| bloklid (`BLOKLI_API_PORT`) | 8080 | 9080 |
-| hoprd API (`HOPRD_API_PORT_BASE`) | 13000+ | 14000+ |
-| hoprd P2P (`HOPRD_P2P_PORT_BASE`) | 19000+ | 20000+ |
-| latency relays (`HOPRD_LATENCY_PORT_BASE`) | 9100+ | 10100+ |
-| chain + control sockets (`IT_TMP_ROOT`) | instance 1's `RUNNER_TEMP` | instance 2's `RUNNER_TEMP` |
+|                                            | instance 1                 | instance 2                 |
+| ------------------------------------------ | -------------------------- | -------------------------- |
+| anvil (`ANVIL_PORT`)                       | 8545                       | 9545                       |
+| bloklid (`BLOKLI_API_PORT`)                | 8080                       | 9080                       |
+| hoprd API (`HOPRD_API_PORT_BASE`)          | 13000+                     | 14000+                     |
+| hoprd P2P (`HOPRD_P2P_PORT_BASE`)          | 19000+                     | 20000+                     |
+| latency relays (`HOPRD_LATENCY_PORT_BASE`) | 9100+                      | 10100+                     |
+| chain + control sockets (`IT_TMP_ROOT`)    | instance 1's `RUNNER_TEMP` | instance 2's `RUNNER_TEMP` |
 
 `reap_nodes`, `chain_stop` and the hygiene steps match processes by their full path under
 the job's own checkout, never by name, so neither job kills the other's nodes. Outside CI
@@ -143,7 +143,7 @@ Unlike a hosted VM, nothing is reinstalled per run:
   involved** — a Cachix token is a _push_ credential, and nothing here pushes.
 
   Do not expect this to speed up the hoprd build. Measured 2026-09-03 with
-  `nix build --dry-run` against hoprd `release/4.1`
+  `nix build --dry-run` against hoprd's
   `packages.x86_64-linux.binary-hoprd-x86_64-linux`: **1015 derivations built,
   201 fetched — identical with and without both HOPR caches.** Neither cache
   carries hoprd's x86_64-linux musl outputs (nor `main`'s, nor the
@@ -208,51 +208,23 @@ dispatches in blokli's and hoprd's `merge.yaml`. See the prerequisites below.
 
 Optional repo _variables_:
 
-| Variable     | Default        | Meaning                                                                |
-| ------------ | -------------- | ---------------------------------------------------------------------- |
-| `HOPRD_LINE` | `release/4.1`  | hoprd release line the binaries and any dispatched rev must belong to  |
-| `HOPRD_REF`  | `$HOPRD_LINE`  | hoprd ref override                                                     |
-| `EDGLI_REF`  | `release/4.1`  | edge-client ref override (the v4 line — `main` is v5 since #151)       |
-| `BLOKLI_REF` | `release/0.13` | blokli ref override (default is a moving branch, not a release number) |
+| Variable     | Default | Meaning                                                                |
+| ------------ | ------- | ---------------------------------------------------------------------- |
+| `HOPRD_REF`  | `main`  | hoprd ref override                                                     |
+| `EDGLI_REF`  | `main`  | edge-client ref override                                               |
+| `BLOKLI_REF` | `main`  | blokli ref override (default is a moving branch, not a release number) |
 
 There are no gate variables — thresholds are hardcoded in
 `integration/tests/integration.rs`.
 
-## hoprd v4 / v5 split
+## How the upstream repos call in
 
-Both lines are supported, one per run: `LINE=v4` (default) builds hoprd from
-`release/4.1` against edge-client `release/4.1` and blokli `release/0.13`; `LINE=v5`
-builds from `main` against edge-client `main` and blokli `main`, and adds the PIX
-suite. `release/4.1` is the only v4 branch hoprd has — `4.0` exists as a hoprnet branch
-and as hoprd tags `v4.0.x`, not as a hoprd branch. The dependency sets live side by side
-in the crate (`Cargo.toml` = v4, `Cargo.v5.toml` = v5) and `run.sh` swaps the v5 one in
-for the run; the test bodies are shared source.
-
-`run.sh` **rejects** a dispatched hoprd rev not contained in `HOPRD_LINE`, before
-spending a build on it (bypass: `HOPRD_SKIP_LINE_CHECK=1`). Mixing the lines is not a
-matter of taste: blokli `release/0.13` cannot bootstrap a v5 localcluster at all
-(`service_registry` first appears in v0.14.0), and edge-client `main` repinned hopr-lib
-to hoprnet `master` in #151.
-
-**Upstream side:** each repo dispatches with the line matching the branch it merged —
-`client_payload[line]=v5` from a `main` merge, omitted (v4) from a `release/*` one. A v4
-gate that fires on a `main` merge fails fast with
-`hoprd ref '<sha>' is not on the 'release/4.1' line` instead of running a mismatched
-stack.
-
-### How the upstream repos call in
-
-| Trigger                               | Where                      | Behaviour                                                 |
-| ------------------------------------- | -------------------------- | --------------------------------------------------------- |
-| nightly 02:00 UTC                     | this repo, `main`          | The v4 lines' only automatic coverage — tips of all three |
-| PR labelled `run-integration`         | hoprd, edge-client, blokli | Waits, so the verdict is a check on that PR               |
-| merge queue                           | this repo, `main`          | Blocks this repo's own merges                             |
-| `merge_group` on a `release/*` branch | hoprd, edge-client, blokli | **Cannot fire** — see below                               |
-
-**A merge queue can only be attached to a repository's default branch.** All three
-upstream repos develop v4 on `release/*`, so none of them can gate merges into those
-branches. Their gate jobs keep the `merge_group` condition for the day that restriction
-lifts, but today only the label path fires there — which is why the nightly exists.
+| Trigger                       | Where                      | Behaviour                                   |
+| ----------------------------- | -------------------------- | ------------------------------------------- |
+| nightly 02:00 UTC             | this repo, `main`          | Both tiers against the tips of all three    |
+| PR labelled `run-integration` | hoprd, edge-client, blokli | Waits, so the verdict is a check on that PR |
+| merge queue on `main`         | hoprd, edge-client, blokli | Waits, and blocks the upstream merge        |
+| merge queue                   | this repo, `main`          | Blocks this repo's own merges               |
 
 The upstream gates use `repository_dispatch` to start the run and then **wait** on it,
 which needs a `marker`: a caller cannot otherwise identify its own run, since
@@ -261,22 +233,8 @@ dispatch inputs, and "newest run" is a race because three repos dispatch here an
 queues rather than starts while every runner is busy. The caller passes a
 unique marker, `run-name` puts it in the run title, and the caller polls for it.
 
-**Every dispatch names its line, and the default is v4.** A caller adds
-`client_payload[line]=v5` (or `-f line=v5` for `workflow_dispatch`) when the rev it is
-gating is on the v5 side; omitting it asks for v4. `run.sh` then rejects a rev that is
-not contained in that line's hoprd branch, so a v5 sha dispatched without `line=v5`
-fails in the first minute with the reason rather than after a 40-minute build.
-
-**hoprd's existing gate is scoped to the v4 line on purpose** — it keys on
-`vars.MAINTENANCE_RELEASE_BRANCH` rather than a literal branch, so a bump to
-`release/4.2` needs no workflow edit, and it sends no `line`, which is v4. Gating v5 is
-a merge queue on hoprd `main` (a queue can only attach to a repository's default
-branch), and that gate has to send `line=v5`.
-
-**A PR head is `ahead` of the line, not contained in it.** The containment check in
-`run.sh` accepts `identical`/`behind`/`ahead` and rejects only `diverged` — without
-`ahead` the label-triggered PR runs, which is exactly what the upstream repos fire,
-would all be refused.
+The dispatch payload carries `project`, `rev`, `marker` and optionally `tests_pr` and `tier`. Any other key
+(an old `line`) is ignored.
 
 ### This repo gates its own changes too
 
@@ -289,14 +247,14 @@ non-`pull_request` event, so only the trigger had to be added.
 Merge-queue runs compete with the dispatch runs for the same four runners. There is no
 job-level concurrency group, so nothing cancels a queued run (which would fail the queue
 entry); a job just waits for a free runner. With more than four jobs pending a candidate
-can still wait behind others, so keep the queue's max wait comfortably above that. A queue candidate itself takes about 2 hours (v4, v5 and v5
-nightly), against the ruleset's 320-minute check timeout.
+can still wait behind others, so keep the queue's max wait comfortably above that. A queue candidate
+itself runs the `pr` tier, about 45 minutes, against the ruleset's 320-minute check timeout.
 
 **hopr-integration-tests has no rulesets at all** as of 2026-09-04 — `main` is unprotected, so
 this trigger fires but nothing enforces it. To make it a real gate, create a ruleset
 for `main` with a merge queue rule and the fan-in `Integration throughput` among its required
-status checks. It passes only when every job of the run did (v4, v5 and v5 nightly on a queue
-candidate). The same goes for the fan-in `Format + clippy` and `Unit tests`. Do **not** require `Validate title` — it is PR-only and cannot
+status checks. It passes only when every job of the run did. The same goes for `Format + clippy`
+and `Merge gate`. Do **not** require `Validate title` — it is PR-only and cannot
 report on a merge group.
 
 ### Prerequisites in the upstream repos
@@ -313,47 +271,32 @@ report on a merge group.
   The older `HOPRD_TEST_DISPATCH_TOKEN` PAT is no longer used and its name predates
   the rename; there is nothing to migrate, but do not re-add it.
 
-### Nightly: v4 coverage and the v5 nightly tier
+### Nightly
 
-A **merge queue can only be attached to a repository's default branch.** hoprd,
-edge-client and blokli all develop v4 on `release/*` branches, so none of them can
-gate merges into those branches — the `merge_group` condition in their `pr.yaml`
-gates can never fire for a release branch, and only their `run-integration` label
-path works on demand.
-
-The nightly `schedule` here fills that hole, and runs two jobs side by side: v4 (every
-suite) and the v5 `nightly` tier. The v5 `pr` tier is left out: it runs on every PR label, queue
-and v5 gate.
-On v4 it falls through to `run.sh`'s defaults, which are exactly the v4 lines:
-
-| Project     | Nightly ref                   |
-| ----------- | ----------------------------- |
-| hoprd       | `release/4.1` (`HOPRD_LINE`)  |
-| edge-client | `release/4.1` (`EDGLI_REF`)   |
-| blokli      | `release/0.13` (`BLOKLI_REF`) |
-
-Each is resolved to its current head per run. A red night posts to Zulip with the trigger
-shown as `nightly` plus the line, tier, the three resolved revisions and the failures from
-the end-of-run summary.
+The nightly `schedule` runs both tiers side by side against run.sh's defaults: the current head of
+hoprd, edge-client and blokli `main`. A red night posts to Zulip with the trigger shown as
+`nightly` plus the tier, the three resolved revisions and the failures from the end-of-run summary.
 
 Scheduled runs only ever fire from the default branch, and wait for a free runner like
 every other run, so a nightly never cancels an in-flight run or is cancelled by one.
 
 ### What the gate runs
 
-v4 runs every suite on every trigger. v5 is split in two tiers (`TIER`, see
-[docs/v5-test-matrix.md](../docs/v5-test-matrix.md)), each its own job. The merge queue and v5
-dispatches run both, the schedule runs `nightly`, and PR labels pick a slice (table in the
-[README](../README.md#ci)).
+The suites are split in two tiers (`TIER`, see [docs/test-matrix.md](../docs/test-matrix.md)),
+each its own job. The merge queue and upstream dispatches run `pr`, the schedule runs both, and PR
+labels pick a slice (table in the [README](../README.md#ci)).
 
-| Suite              | Scenarios                                  | v4  | v5 tier |
-| ------------------ | ------------------------------------------ | --- | ------- |
-| `integration`      | `zero_one_two_hop`                         | yes | pr      |
-| `exit_origination` | the unresolvable-return-path repro         | yes | nightly |
-| `pix`              | deposits swept; session closes when unpaid | –   | pr      |
-| `pix_shapes`       | `a_mixed_session_sustains_its_cycles`      | –   | pr      |
-| `pix_shapes`       | browsing, download, idle, upload           | –   | nightly |
-| `return_path`      | the 1-hop relayer-loss scenarios           | yes | –       |
+| Suite              | Scenarios                                  | Tier    |
+| ------------------ | ------------------------------------------ | ------- |
+| `integration`      | `zero_one_two_hop`                         | pr      |
+| `dead_last_hop`    | a relay that acks and delivers nothing     | pr      |
+| `pix`              | deposits swept; session closes when unpaid | pr      |
+| `pix_shapes`       | `a_mixed_session_sustains_its_cycles`      | pr      |
+| `exit_origination` | the unresolvable-return-path repro         | nightly |
+| `pix_shapes`       | browsing, download, idle, upload           | nightly |
+| `return_path`      | every scenario but the tempering finding   | nightly |
+| `pix_relay_loss`   | every scenario                             | nightly |
+| `pix_resume`       | every scenario                             | nightly |
 
 Every run ends with a pytest-style summary (console and job summary) listing each test,
 and for a failure the step that failed and why.
@@ -371,10 +314,10 @@ A red run posts to Zulip (stream **HOPRd**, topic **integration**) naming the
 trigger and the three versions that actually ran, e.g.
 
 ```text
-**Integration throughput test FAILED** (v4) — PR [#22](…) (`em/hookup-ci`)
-* hoprd `release/4.1`
+**Integration throughput test FAILED** (pr tier) — PR [#22](…) (`em/hookup-ci`)
+* hoprd `main`
 * edge-client `main (58564a22)`
-* blokli `release/0.13`
+* blokli `main (1a2b3c4d)`
 [Run #48](…) · logs are attached to the run as an artifact.
 ```
 
@@ -387,18 +330,16 @@ stack.
 
 ## Triggering / validating
 
-- **On a hopr-integration-tests PR:** `run-integration` runs the v5 `pr` tier,
-  `run-integration-v4` the v4 suites, `run-integration-v5-nightly` the v5 `nightly` tier. Labels
-  add up; the jobs run side by side, one per box.
+- **On a hopr-integration-tests PR:** `run-integration` runs the `pr` tier,
+  `run-integration-nightly` the `nightly` tier. Labels add up; the jobs run side by side, one per box.
 - **Manual:** `gh workflow run integration.yaml -R hoprnet/hopr-integration-tests`
   then `gh run watch -R hoprnet/hopr-integration-tests --exit-status`.
 - **Simulate a merge trigger:**
   ```bash
   gh api repos/hoprnet/hopr-integration-tests/dispatches \
     -f event_type=integration \
-    -f 'client_payload[line]=v4' \
     -f 'client_payload[project]=edge-client' \
-    -f 'client_payload[rev]=<edge-client release/4.1 sha>'
+    -f 'client_payload[rev]=<edge-client main sha>'
   ```
 
 Concurrency: a new push to a PR cancels that PR's in-progress run. Otherwise runs and

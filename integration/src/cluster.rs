@@ -146,7 +146,6 @@ pub fn edgli_max_openers() -> Option<usize> {
     REQUESTED_EDGLI_MAX_OPENERS.get().copied()
 }
 
-#[cfg(feature = "v5")]
 static REQUESTED_PIX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Ask for the cluster to be started with PIX enabled, before the first [`bring_up`].
@@ -161,22 +160,16 @@ static REQUESTED_PIX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// the generated stanza and refuses to start, which is the loud failure; a binary built with the
 /// *other* pool starts normally and never deposits, which is not.
 ///
-/// Compiled out without the feature rather than left as a no-op knob: `--enable-pix` is a flag
-/// only a v5 `hoprd-localcluster` has, so a v4 build should not be able to name it at all.
-///
 /// First call in a test binary wins.
-#[cfg(feature = "v5")]
 pub fn request_pix() -> bool {
     *REQUESTED_PIX.get_or_init(|| true)
 }
 
 /// Whether [`request_pix`] was called.
-#[cfg(feature = "v5")]
 pub fn pix_enabled() -> bool {
     REQUESTED_PIX.get().copied().unwrap_or(false)
 }
 
-#[cfg(feature = "v5")]
 static REQUESTED_PIX_SETTINGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Ask for PIX to be enabled with a *named geometry*, before the first [`bring_up`].
@@ -198,7 +191,6 @@ static REQUESTED_PIX_SETTINGS: std::sync::OnceLock<String> = std::sync::OnceLock
 /// three from one profile.
 ///
 /// First call in a test binary wins.
-#[cfg(feature = "v5")]
 pub fn request_pix_settings(yaml: impl Into<String>) -> &'static str {
     request_pix();
     REQUESTED_PIX_SETTINGS.get_or_init(|| yaml.into())
@@ -671,7 +663,6 @@ async fn spawn_managed() -> anyhow::Result<ClusterHandle> {
         "--funding-amount",
         &channel_funding_amount(),
     ]);
-    #[cfg(feature = "v5")]
     if pix_enabled() {
         // `--pix-config` implies `--enable-pix`, so the two are exclusive rather than additive:
         // passing both would be harmless today but states the geometry twice.

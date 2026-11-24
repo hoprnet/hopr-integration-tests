@@ -7,16 +7,16 @@ The scenario is `integration/tests/pix_relay_loss.rs`; the profile is
 `integration/src/relay_loss.rs`.
 
 ```bash
-HOPRD_SRC=../hoprd LINE=v5 just pix-relay-loss                                 # every scenario
-HOPRD_PIX_ADDITIONAL_SHARES=16 HOPRD_SRC=../hoprd LINE=v5 just pix-relay-loss  # shipped surplus
-HOPRD_SRC=../hoprd LINE=v5 just pix-relay-loss a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe
+HOPRD_SRC=../hoprd just pix-relay-loss                                 # every scenario
+HOPRD_PIX_ADDITIONAL_SHARES=16 HOPRD_SRC=../hoprd just pix-relay-loss  # shipped surplus
+HOPRD_SRC=../hoprd just pix-relay-loss a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe
 ```
 
 `just pix-relay-loss` builds a PIX-enabled hoprd the way `just pix` does, starts **one chain**, and runs
 each scenario in an invocation of its own on it: each kills a cluster node, so a cluster is never
 shared. The Entry is linked into the test binary, so before the first scenario the recipe pins its
-edgli to edge-client's `main`, as CI and `just tier` do, rather than to the committed v5 lock, which
-trails it. `EDGLI_REF` picks another edge-client ref, and `gh` must be logged in. CI's v5 nightly
+edgli to edge-client's `main`, as CI and `just tier` do, rather than to the committed lock, which
+trails it. `EDGLI_REF` picks another edge-client ref, and `gh` must be logged in. CI's nightly
 tier runs every scenario too. Name scenarios to run only those. It forwards the environment:
 
 | variable | meaning | default |
@@ -454,7 +454,7 @@ wxHOPR). The environment of these runs:
 ```bash
 HOPRD_PIX_POLYS=4096 HOPRD_PIX_THRESHOLD=32 HOPRD_PIX_ADDITIONAL_SHARES=79 HOPRD_PIX_RATE=400 \
 HOPRD_PIX_SURB_BUFFER=7000 \
-  HOPRD_SRC=../hoprd LINE=v5 just pix-relay-loss a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe
+  HOPRD_SRC=../hoprd just pix-relay-loss a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe
 # and HOPRD_PIX_SURB_BUFFER=19264 for the deployed worst case
 ```
 

@@ -420,7 +420,7 @@ const MAX_FAIR_SHARES: f64 = 2.0;
 ///
 /// RFC-0014 scores this profile 1.0 / 0.7 / 0.3 / 0.15; two distinct draws per packet predict 2.12
 /// tempered (`w^0.5`) and 4.56 raw (pre-fix measured 4.63), so the bound sits between them. The
-/// live scores vary from run to run, and the ratio with them: recomputed from the logs of 40 v5
+/// live scores vary from run to run, and the ratio with them: recomputed from the logs of 40
 /// runs of the spread scenario (2026-11-03 to 11-06), it ranged 1.27 to 4.47 and exceeded this
 /// bound in 17. Hence a finding, not a gate: see [`return_paths_should_track_the_tempered_score`].
 const MAX_RELAYER_IMBALANCE: f64 = 3.0;
@@ -1061,7 +1061,7 @@ async fn session_should_survive_common_mode_return_outage() -> anyhow::Result<()
 /// [`LONG_OUTAGE`], and no [`KILL_SETTLE`] after the thaw, which would give a late refill time to
 /// land unseen. On top of the sibling's gates, the Exit must still hold
 /// [`MIN_EXIT_STOCK_AFTER_OUTAGE`] of its SURB stock when the path comes back, read from its
-/// `hopr_surb_store_surbs_held`, which v4 nodes do not export.
+/// `hopr_surb_store_surbs_held`.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
 async fn an_idle_session_should_survive_a_long_common_mode_return_outage() -> anyhow::Result<()> {

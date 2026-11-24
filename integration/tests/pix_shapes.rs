@@ -16,11 +16,9 @@
 //! HOPRD_SRC=../hoprd-shapes just pix <scenario>
 //! ```
 //!
-//! CI's v5 tier runs the mixed shape on every PR and the rest nightly. Each gets a fresh chain, and
+//! CI runs the mixed shape on every PR and the rest nightly. Each gets a fresh chain, and
 //! a full pass is hours rather than minutes. See `docs/pix-traffic-shapes.md` for the measured
 //! results and the configuration they pin.
-
-#![cfg(feature = "v5")]
 
 use std::time::Duration;
 

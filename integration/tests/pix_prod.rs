@@ -36,10 +36,10 @@
 //! # Running
 //!
 //! ```bash
-//! HOPRD_SRC=../hoprd LINE=v5 just pix-prod
+//! HOPRD_SRC=../hoprd just pix-prod
 //! ```
 //!
-//! Manual and never in CI, unlike `pix`, `pix_shapes` and `pix_relay_loss`, which CI's v5 tier
+//! Manual and never in CI, unlike `pix`, `pix_shapes` and `pix_relay_loss`, which CI
 //! runs. Needs a hoprd built with a deposit pool.
 //!
 //! # Which build each participant runs
@@ -54,8 +54,6 @@
 //! `4096 × (32 + 79)` or the surplus this scenario is exercising is not the one being run. The
 //! pool marker check in `scripts/integration/lib.sh` covers the Exit; the entry's dimensions are
 //! asserted from this process's own config by [`hoprd_integration_test::prod_pix::install_profile`].
-
-#![cfg(feature = "v5")]
 
 use std::time::Duration;
 

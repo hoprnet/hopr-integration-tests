@@ -82,14 +82,9 @@ pub const PIX_ADDITIONAL_SHARES: usize = 8;
 /// are delivered and all of them are billed.
 pub const CYCLE_PACKETS: u64 = (PIX_POLYS * (PIX_SHARES + PIX_ADDITIONAL_SHARES)) as u64;
 
-/// Bytes of quota one share is priced at, as the Exit computes it: one Session segment on v5
-/// (`PIX_QUOTA_BYTES_PER_SHARE`), the whole HOPR packet payload on v4.
-#[cfg(feature = "v5")]
+/// Bytes of quota one share is priced at, as the Exit computes it: one Session segment.
 pub const QUOTA_BYTES_PER_SHARE: u64 =
     edgli::hopr_lib::exports::transport::session::PIX_QUOTA_BYTES_PER_SHARE;
-#[cfg(not(feature = "v5"))]
-pub const QUOTA_BYTES_PER_SHARE: u64 =
-    edgli::hopr_lib::exports::transport::PACKET_PAYLOAD_SIZE as u64;
 
 /// Bytes one cycle costs the Entry — the per-SSA quota the Exit prices its deposit against.
 pub const QUOTA_PER_SSA: u64 = CYCLE_PACKETS * QUOTA_BYTES_PER_SHARE;
@@ -218,13 +213,10 @@ const _: () = assert!(
     "SURB buffer is too deep relative to a cycle"
 );
 
-/// The Session packet rate upstream's deadline floor is measured at: `MAX_ASSUMED_SESSION_PACKET_RATE`
-/// on v5, read from hopr-lib so the two cannot drift; on v4, its predecessor, 1.5 Mbps in packets.
-#[cfg(feature = "v5")]
+/// The Session packet rate upstream's deadline floor is measured at, read from hopr-lib so the two
+/// cannot drift.
 const DEADLINE_FLOOR_RATE: u64 =
     edgli::hopr_lib::exports::transport::session::MAX_ASSUMED_SESSION_PACKET_RATE;
-#[cfg(not(feature = "v5"))]
-const DEADLINE_FLOOR_RATE: u64 = 1_500_000 / 8 / QUOTA_BYTES_PER_SHARE;
 
 /// With fill off, the recovery deadline must clear a whole cycle at the widest accepted quota,
 /// measured at [`DEADLINE_FLOOR_RATE`]. `validate_incoming_session_pix_config` refuses the
@@ -388,7 +380,6 @@ pub fn surb_balancer() -> edgli::hopr_lib::exports::transport::SurbBalancerConfi
 /// Must agree with what [`cluster_pix_yaml`] gives the Exit: edgli derives the quota it announces
 /// from these and nothing else, and the Exit refuses any Session whose quota falls outside the
 /// window that YAML sets. [`install_profile`] is what keeps the two from being set separately.
-#[cfg(feature = "v5")]
 pub fn entry_dimensions() -> edgli::PixGlobalConfig {
     edgli::PixGlobalConfig {
         num_ssa_parts: PIX_POLYS,
@@ -399,7 +390,6 @@ pub fn entry_dimensions() -> edgli::PixGlobalConfig {
 }
 
 /// wxHOPR one completed cycle costs the Entry at this profile.
-#[cfg(feature = "v5")]
 pub fn per_cycle() -> anyhow::Result<crate::HoprBalance> {
     let price: crate::HoprBalance = format!("{PRICE_PER_BYTE_WXHOPR:.10} wxHOPR").parse()?;
     Ok(price * QUOTA_PER_SSA)
@@ -412,7 +402,6 @@ pub fn per_cycle() -> anyhow::Result<crate::HoprBalance> {
 /// per-deposit ceiling has to clear a quota 1 280x larger. Sharing one function would mean a
 /// scenario silently taking the demo price against this geometry, which refuses every deposit for
 /// being over `max_ssa_allocation`.
-#[cfg(feature = "v5")]
 pub fn entry_config() -> anyhow::Result<edgli::PixEntryConfig> {
     let per_cycle = per_cycle()?;
     Ok(edgli::PixEntryConfig {
@@ -444,7 +433,6 @@ pub fn entry_config() -> anyhow::Result<edgli::PixEntryConfig> {
 /// The Exit's admission window and the Entry's announced geometry are read by different processes
 /// and neither can derive the other, so this is the one call that sets them together. Calling it
 /// is what makes a scenario a *shape* scenario rather than a demo-geometry one.
-#[cfg(feature = "v5")]
 pub fn install_profile() {
     crate::cluster::request_pix_settings(cluster_pix_yaml());
     crate::pix::request_dimensions(entry_dimensions());
@@ -473,10 +461,7 @@ mod tests {
     #[test]
     fn the_profile_arithmetic_holds() {
         assert_eq!(40_960, CYCLE_PACKETS);
-        // A share is priced at the 1038 B payload on the v4 line and the 1452 B Session MTU on v5.
-        #[cfg(not(feature = "v5"))]
-        assert_eq!(42_516_480, QUOTA_PER_SSA);
-        #[cfg(feature = "v5")]
+        // A share is priced at the 1452 B Session MTU.
         assert_eq!(59_473_920, QUOTA_PER_SSA);
         assert_eq!(273, NOMINAL_CYCLE_SECS);
         assert_eq!(2_400, DEFAULT_SURB_BUFFER);

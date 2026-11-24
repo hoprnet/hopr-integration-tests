@@ -300,14 +300,11 @@ const _: () = assert!(
 /// The deployed quota must be exactly the Exit's own default maximum, or this profile is not
 /// running the deployed geometry however much its dimensions agree.
 ///
-/// `1452` is the Session MTU on the v5 line, which is the only line PIX exists on; the v4 line
-/// prices a share at the whole HOPR packet payload instead, so the literal is checked only there.
-/// The relation itself — quota = cycle packets x bytes per share — is checked on both lines.
+/// `1452` is the Session MTU a share is priced at.
 const _: () = assert!(
     QUOTA_PER_SSA == CYCLE_PACKETS * QUOTA_BYTES_PER_SHARE,
     "the quota is not the cycle's packet count times the bytes a share is priced at"
 );
-#[cfg(feature = "v5")]
 const _: () = assert!(
     QUOTA_PER_SSA == 4096 * (32 + 79) * 1452,
     "the quota is not the deployed polys x (threshold + surplus) x SESSION_MTU"
@@ -439,7 +436,6 @@ safe_deposit_float: \"{float:.4} wxHOPR\"
 /// Must agree with what [`cluster_pix_yaml`] gives the Exit: edgli derives the quota it announces
 /// from these and nothing else, and the Exit refuses any Session whose quota falls outside the
 /// window that YAML sets. [`install_profile`] is what keeps the two from being set separately.
-#[cfg(feature = "v5")]
 pub fn entry_dimensions() -> edgli::PixGlobalConfig {
     edgli::PixGlobalConfig {
         num_ssa_parts: PIX_POLYS,
@@ -450,14 +446,12 @@ pub fn entry_dimensions() -> edgli::PixGlobalConfig {
 }
 
 /// wxHOPR one completed cycle costs the Entry, as a parsed balance.
-#[cfg(feature = "v5")]
 pub fn per_cycle() -> anyhow::Result<crate::HoprBalance> {
     let price: crate::HoprBalance = format!("{PRICE_PER_BYTE_WXHOPR:.10} wxHOPR").parse()?;
     Ok(price * QUOTA_PER_SSA)
 }
 
 /// The Entry's settlement configuration for this profile, budgeted at [`BUDGETED_CYCLES`].
-#[cfg(feature = "v5")]
 pub fn entry_config() -> anyhow::Result<edgli::PixEntryConfig> {
     let per_cycle = per_cycle()?;
     Ok(edgli::PixEntryConfig {
@@ -489,7 +483,6 @@ pub fn entry_config() -> anyhow::Result<edgli::PixEntryConfig> {
 /// `target_surb_buffer_size` is the depth [`surb_buffer_target`] names, and `max_surbs_per_sec` the
 /// ceiling [`max_surbs_per_sec`] names — the two knobs a PIX Session has a measured failure on both
 /// sides of.
-#[cfg(feature = "v5")]
 pub fn surb_balancer() -> edgli::hopr_lib::exports::transport::SurbBalancerConfig {
     edgli::hopr_lib::exports::transport::SurbBalancerConfig {
         target_surb_buffer_size: surb_buffer_target(),
@@ -502,7 +495,6 @@ pub fn surb_balancer() -> edgli::hopr_lib::exports::transport::SurbBalancerConfi
 ///
 /// The Exit's admission window and the Entry's announced geometry are read by different processes
 /// and neither can derive the other, so this is the one call that sets them together.
-#[cfg(feature = "v5")]
 pub fn install_profile() {
     crate::cluster::request_pix_settings(cluster_pix_yaml());
     crate::pix::request_dimensions(entry_dimensions());
@@ -538,9 +530,7 @@ mod tests {
     #[test]
     fn the_deployed_arithmetic_holds() {
         assert_eq!(454_656, CYCLE_PACKETS, "4096 x (32 + 79)");
-        // The published figure is the v5 line's: 4096 x 111 x 1452 B = 629.6 MiB. The v4 line
-        // prices a share at the whole HOPR payload instead, so only the relation is common.
-        #[cfg(feature = "v5")]
+        // The published figure: 4096 x 111 x 1452 B = 629.6 MiB.
         assert_eq!(660_160_512, QUOTA_PER_SSA, "629.6 MiB per cycle");
         assert_eq!(CYCLE_PACKETS * QUOTA_BYTES_PER_SHARE, QUOTA_PER_SSA);
     }
@@ -667,10 +657,8 @@ mod tests {
 
     /// The rendered YAML names every field the profile means to move.
     ///
-    /// The quota window is checked against the constants on both lines, and against hoprnet#8519's
-    /// published figures only on v5: the v4 line prices a share at its own `SESSION_MTU` (1 020 B
-    /// rather than 1 452), so the same geometry renders a smaller window there — see
-    /// [`the_deployed_arithmetic_holds`].
+    /// The quota window is checked against the constants and against hoprnet#8519's published
+    /// figures — see [`the_deployed_arithmetic_holds`].
     #[test]
     fn the_rendered_yaml_carries_the_geometry() {
         let yaml = cluster_pix_yaml();
@@ -682,9 +670,7 @@ mod tests {
             "additional_shares: 79",
             quota_min.as_str(),
             quota_max.as_str(),
-            #[cfg(feature = "v5")]
             "quota_range_min: 165040128",
-            #[cfg(feature = "v5")]
             "quota_range_max: 660160512",
             "max_recovery_time: 14400s",
             "max_deposit_wait: 60s",
@@ -702,9 +688,7 @@ mod tests {
     #[test]
     fn the_deposit_is_affordable_from_the_configured_float() {
         let per_cycle = per_cycle_wxhopr();
-        // ~472 wxHOPR is the v5 line's figure, over its 629.6 MiB quota. The v4 line's smaller
-        // `SESSION_MTU` makes the same geometry's quota, and so its deposit, smaller (~332).
-        #[cfg(feature = "v5")]
+        // ~472 wxHOPR over the 629.6 MiB quota.
         assert!(
             (400.0..550.0).contains(&per_cycle),
             "one cycle costs {per_cycle} wxHOPR, outside the ~472 the price implies"

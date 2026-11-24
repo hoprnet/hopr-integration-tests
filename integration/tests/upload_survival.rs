@@ -20,10 +20,8 @@
 //! reply it sends becomes undecryptable and the return stream dies. A download consumes SURBs at
 //! the data rate, so the openers are used before they can pile up, and the cache never overflows.
 //!
-//! The exit-side pop order (`SurbPopOrder`) does not save this. On v4, where production pops LIFO,
-//! the freshest SURB is the one whose opener was most likely just evicted. That is a different
-//! failure from the return-path *staleness* LIFO was introduced to fix (see `return_path.rs`);
-//! v5 is FIFO-only since hoprnet#8473. The mechanism (and its fix) is proven deterministically, in isolation, by the
+//! The exit-side pop order (`SurbPopOrder`) does not save this: it is FIFO-only since
+//! hoprnet#8473. The mechanism (and its fix) is proven deterministically, in isolation, by the
 //! hoprnet `protocols/hopr/src/surb_store.rs` unit tests
 //! (`a_sustained_upload_keeps_the_return_path_alive_at_the_deployed_config` and the retention probe
 //! `a_sustained_upload_keeps_the_newest_reply_openers_and_sheds_the_stalest`); this test is the

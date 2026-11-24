@@ -40,12 +40,12 @@
 //! without closing it, so the exit never tears the slot down — stops the SURB supply while the
 //! keep-alives go on: once the last SURB is spent, the next keep-alive has nothing to carry it.
 //!
-//! An admitted Session's SURB ring has no idle timeout, so on v5 the SURBs are spent, not expired.
+//! An admitted Session's SURB ring has no idle timeout, so the SURBs are spent, not expired.
 //! An exit that holds no SURBs back spends them all on the victim's warm-up echo. One that holds
 //! its data back for a keep-alive reserve leaves the last few to the keep-alives, which spend one per
 //! notify period (see `SURB_NOTIFY_PERIOD`).
 //!
-//! # On v5 the fault no longer arms, and that is what the v5 run checks
+//! # The fault no longer arms, and that is what this run checks
 //!
 //! Since hoprnet#8629 an exit sends its SURB-level notification only to an entry that has shown it
 //! reads them (a keep-alive carrying SURBs), and only while its own SURB estimate is above zero, so
@@ -53,13 +53,12 @@
 //! it never sends a keep-alive: the exit never notifies it, holds its data back for the reserve, and
 //! the victim's last SURBs stay unspent. No return route goes unresolvable.
 //!
-//! The v5 run therefore checks that guarantee instead of the starvation: after the same
+//! The run therefore checks that guarantee instead of the starvation: after the same
 //! abandonment the exit must never log a starved return route, and must keep originating for the
 //! canary. An exit without the gate brings the old behaviour back (a notification every
 //! `SURB_NOTIFY_PERIOD` spends the twelve reserve SURBs within a minute, and the next one starves),
 //! so the run then fails on the starvation evidence. The resolver's bounded wait, which a starved
 //! packet would still exercise, stays covered at unit level in `hopr_transport::path::resolve`.
-//! The v4 run is unchanged: its exit has no such gate, and the fault must arm there.
 //!
 //! The production `pseudonyms_lifetime` is 600 s, which is longer than the Session idle timeout, so
 //! the scenario shortens it to the minimum the config validator accepts. That is the only setting
@@ -94,18 +93,15 @@ const SURB_PSEUDONYM_LIFETIME: Duration = Duration::from_secs(30);
 
 const SURB_LIFETIME_ENV: &str = "HOPR_INTERNAL_SURB_PSEUDONYM_LIFETIME_MS";
 
-/// Short enough for the keep-alives to empty the victim's last SURBs inside [`WEDGE_WINDOW`]. A v5
+/// Short enough for the keep-alives to empty the victim's last SURBs inside [`WEDGE_WINDOW`]. The
 /// exit holds its data back while a Session's SURB stock is down to the keep-alive reserve (1 % of
 /// the target the entry announced, at least 32, at most a quarter of it), so the victim's warm-up no
 /// longer drains its pool: twelve SURBs (a quarter of its target of 50) are left, and only the
 /// keep-alives spend them, one per period. At 5 s they are gone within a minute of the abandonment.
 /// An admitted Session's SURB ring has no idle timeout, so this, not the pseudonym lifetime, is how
 /// its return route goes unresolvable here.
-/// v5 only: on v4 the victim never holds SURBs, and the longer period starves the idle canary.
-#[cfg(feature = "v5")]
 const SURB_NOTIFY_PERIOD: Duration = Duration::from_secs(5);
 
-#[cfg(feature = "v5")]
 const SURB_NOTIFY_PERIOD_ENV: &str = "HOPR_SESSION_SURB_BALANCE_NOTIFY_PERIOD_MS";
 
 /// What the exit logs when a return route had no SURB for the whole resolution wait.
@@ -119,7 +115,7 @@ const STARVATION_EVIDENCE: &str = "no SURB for its return path within the wait";
 
 /// How long to wait for the exit to notice the SURBs are gone and emit a keep-alive into the void.
 ///
-/// The exit notifies its SURB level on `surb_balance_notify_period`, set to 60 s on v5, so the first
+/// The exit notifies its SURB level on `surb_balance_notify_period`, set to 60 s by default, so the first
 /// unresolvable packet lands somewhere in the 30–90 s after the session is abandoned. Waiting the
 /// full period plus the lifetime plus a margin makes the window deterministic.
 const WEDGE_WINDOW: Duration = Duration::from_secs(105);
@@ -168,7 +164,6 @@ async fn exit_should_keep_originating_when_a_return_path_becomes_unresolvable() 
             SURB_LIFETIME_ENV.to_string(),
             SURB_PSEUDONYM_LIFETIME.as_millis().to_string(),
         ),
-        #[cfg(feature = "v5")]
         (
             SURB_NOTIFY_PERIOD_ENV.to_string(),
             SURB_NOTIFY_PERIOD.as_millis().to_string(),
@@ -305,26 +300,9 @@ async fn exit_should_keep_originating_when_a_return_path_becomes_unresolvable() 
         .cluster()?
         .node_log_contains(exit_addr, STARVATION_EVIDENCE)?;
 
-    // v4: everything above passes just as well on a run where the fault was never armed: if the
-    // pseudonym-lifetime override did not reach the nodes, the victim's SURBs never expire, no
-    // return route ever goes unresolvable, and a node that was never under test reports healthy.
-    // That is the same class of failure as a participant silently running a build that predates the
-    // change under test, and it is indistinguishable from success — so require positive evidence
-    // that the exit actually hit, and survived, a starved return route.
-    #[cfg(not(feature = "v5"))]
-    anyhow::ensure!(
-        starved,
-        "the exit never reported a starved return route, so the fault was not armed and this run \
-         says nothing about the stall. Check that {SURB_LIFETIME_ENV} reached the hoprd processes \
-         (expected {:?}) — {}",
-        SURB_PSEUDONYM_LIFETIME,
-        verdict.summary(),
-    );
-
-    // v5: the exit must not have starved the abandoned victim at all (hoprnet#8629, see the module
+    // The exit must not have starved the abandoned victim at all (hoprnet#8629, see the module
     // docs). Starvation here means the exit sent a return-routed packet into an empty store, which
     // the notification gate exists to prevent.
-    #[cfg(feature = "v5")]
     anyhow::ensure!(
         !starved,
         "the exit reported a starved return route for the abandoned session: it sent a return-routed \
