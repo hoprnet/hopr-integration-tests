@@ -93,6 +93,14 @@ const CYCLES: &str = "hopr_pix_cycles_total";
 /// Sessions the PIX supervisor closed, by `reason` (`recovery_idle`, deposit timeouts, ...).
 const CLOSURES: &str = "hopr_pix_closures_total";
 
+/// What happened to a funded Session whose data plane ended, by `event`: `detached`, `taken_over`,
+/// `window_expired` or `refused` (hoprnet#8711, the resume window; default 60 s).
+const RESUMPTIONS: &str = "hopr_pix_resumptions_total";
+
+/// Initiations the Exit's PIX admission refused, by `reason`. `takeover_ineligible` is the one the
+/// resume window added: a re-initiation under a held pseudonym that cannot take the Session over.
+const ADMISSION_REJECTIONS: &str = "hopr_pix_admission_rejections_total";
+
 /// What the Exit's SURB store dropped, by `cache` and `cause` (`hopr-protocol-hopr`). Of its
 /// `cache` values only `ring_share` matters here: a share-bearing SURB a full ring buffer evicted
 /// (`cause="size"`), whose share reaches the reconstructor only when the SURB is *used* and so is
@@ -309,6 +317,24 @@ impl ExitTelemetry {
     /// Cycle transitions of one `event`.
     pub fn cycles(&self, event: &str) -> Option<u64> {
         self.counter(CYCLES, "event", event)
+    }
+
+    /// Resume-window transitions of one `event`: `"detached"`, `"taken_over"`, `"window_expired"` or
+    /// `"refused"`.
+    ///
+    /// `None` until the first such event: a `MultiCounter` label materialises when it is first
+    /// incremented, so on an Exit that carries the resume window `None` means the event never
+    /// happened, and on one that predates it the family does not exist at all. Check
+    /// [`Self::observable`] first, and read `None` as zero only on a build known to carry it.
+    pub fn resumptions(&self, event: &str) -> Option<u64> {
+        self.counter(RESUMPTIONS, "event", event)
+    }
+
+    /// Initiations refused at PIX admission for one `reason`, e.g. `"takeover_ineligible"`.
+    ///
+    /// Same absent-versus-zero reading as [`Self::resumptions`].
+    pub fn admission_rejections(&self, reason: &str) -> Option<u64> {
+        self.counter(ADMISSION_REJECTIONS, "reason", reason)
     }
 
     /// Successor `SsaRequest`s the Exit had to re-send because the Entry had not answered them
@@ -982,6 +1008,37 @@ hopr_pix_cycle_accepted_share_fraction_bucket{outcome=\"recovered\",le=\"1.25\"}
 hopr_pix_cycle_accepted_share_fraction_bucket{outcome=\"recovered\",le=\"1.5\"} 1
 hopr_pix_cycle_accepted_share_fraction_bucket{outcome=\"recovered\",le=\"+Inf\"} 1
 ";
+
+    /// The resume-window families: labelled counters that appear only once an event happened, so an
+    /// event that never did must read as `None`, and the delta must difference them like any other.
+    #[test]
+    fn resume_window_events_should_be_read_by_label() {
+        let t = parse(
+            "hopr_pix_resumptions_total{event=\"detached\"} 2\n\
+             hopr_pix_resumptions_total{event=\"taken_over\"} 1\n\
+             hopr_pix_admission_rejections_total{reason=\"takeover_ineligible\"} 3\n",
+        );
+        assert_eq!(Some(2), t.resumptions("detached"));
+        assert_eq!(Some(1), t.resumptions("taken_over"));
+        assert_eq!(None, t.resumptions("window_expired"));
+        assert_eq!(Some(3), t.admission_rejections("takeover_ineligible"));
+        assert_eq!(None, t.admission_rejections("something_else"));
+
+        let later = parse(
+            "hopr_pix_resumptions_total{event=\"detached\"} 5\n\
+             hopr_pix_resumptions_total{event=\"taken_over\"} 1\n",
+        );
+        let d = t.delta(&later);
+        assert_eq!(Some(3), d.resumptions("detached"));
+        assert_eq!(Some(0), d.resumptions("taken_over"));
+    }
+
+    #[test]
+    fn the_resume_families_should_not_leak_into_closures() {
+        let t = parse("hopr_pix_resumptions_total{event=\"detached\"} 1\n");
+        assert!(t.closure_reasons().is_empty());
+        assert!(t.observable());
+    }
 
     #[test]
     fn the_share_kinds_should_stay_apart() {

@@ -24,6 +24,16 @@ use edgli::{
     traits::EdgeNodeApi,
 };
 
+#[cfg(feature = "v5")]
+pub use edgli::hopr_lib::api::types::internal::protocol::HoprPseudonym;
+
+/// A fresh random pseudonym, for a Session that has to be re-opened under the identity it had.
+#[cfg(feature = "v5")]
+pub fn random_pseudonym() -> HoprPseudonym {
+    use edgli::hopr_lib::api::types::crypto_random::Randomizable as _;
+    HoprPseudonym::random()
+}
+
 use crate::{
     Address,
     cluster::{
@@ -544,7 +554,20 @@ impl IntegrationEnv {
              {return_hops} return): the share encryption key derives from the first return \
              relayer's acknowledgement, so a zero-hop return path is refused"
         );
-        self.open_pix_session_with(
+        self.open_pix_session_with_pseudonym(forward_hops, return_hops, None)
+            .await
+    }
+
+    /// [`open_pix_session`](Self::open_pix_session) under an explicit pseudonym; see
+    /// [`open_pix_session_as`](Self::open_pix_session_as). `None` is the plain open.
+    #[cfg(feature = "v5")]
+    pub async fn open_pix_session_with_pseudonym(
+        &self,
+        forward_hops: usize,
+        return_hops: usize,
+        pseudonym: Option<HoprPseudonym>,
+    ) -> anyhow::Result<(HoprSession, Address)> {
+        self.open_pix_session_as(
             forward_hops,
             return_hops,
             SurbBalancerConfig {
@@ -553,6 +576,7 @@ impl IntegrationEnv {
                 ..SurbBalancerConfig::default()
             },
             SessionTarget::ExitNode(0),
+            pseudonym,
         )
         .await
     }
@@ -579,6 +603,25 @@ impl IntegrationEnv {
         surb_management: SurbBalancerConfig,
         target: SessionTarget,
     ) -> anyhow::Result<(HoprSession, Address)> {
+        self.open_pix_session_as(forward_hops, return_hops, surb_management, target, None)
+            .await
+    }
+
+    /// [`open_pix_session_with`](Self::open_pix_session_with) under an explicit **pseudonym**.
+    ///
+    /// A client that is forced to reconnect re-opens its Session under the pseudonym it had, and an
+    /// Exit holding that Session's funded cycle hands it back instead of starting a new one, so the
+    /// client does not pay another deposit (`tests/pix_resume.rs`). `None` leaves the choice to the
+    /// node, which draws a fresh random one per Session: that is what every other caller wants.
+    #[cfg(feature = "v5")]
+    pub async fn open_pix_session_as(
+        &self,
+        forward_hops: usize,
+        return_hops: usize,
+        surb_management: SurbBalancerConfig,
+        target: SessionTarget,
+        pseudonym: Option<HoprPseudonym>,
+    ) -> anyhow::Result<(HoprSession, Address)> {
         // Only the *return* path needs a relay: the share encryption key derives from the first
         // return relayer's acknowledgement. A direct forward path carries no share and needs none.
         anyhow::ensure!(
@@ -599,6 +642,7 @@ impl IntegrationEnv {
             // the buffer at the depth the balancer was given.
             max_surbs_per_data_packet: 1,
             surb_management: Some(surb_management),
+            pseudonym,
             ..Default::default()
         };
         let (session, _) = self
