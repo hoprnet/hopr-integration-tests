@@ -90,10 +90,11 @@ impl ExtraStrategies {
     }
 }
 
-/// Response buffer a PIX Session provisions, in bytes. See `IntegrationEnv::open_pix_session` —
-/// this is a share-delivery pipeline depth, not a throughput knob, and small is the point.
+/// Response buffer a PIX Session provisions, in bytes (22 SURBs at the 1452 B Session MTU). See
+/// `IntegrationEnv::open_pix_session` — this is a share-delivery pipeline depth, not a throughput
+/// knob, and small is the point, but not so small that the Exit's ring overflows (hoprnet#8737).
 #[cfg(feature = "v5")]
-const PIX_RESPONSE_BUFFER_BYTES: u64 = 16_000;
+const PIX_RESPONSE_BUFFER_BYTES: u64 = 32_000;
 /// Ceiling on artificial SURB generation for a PIX Session, in bits per second.
 ///
 /// Generous on purpose: with a buffer that small the balancer has to refill promptly, and this
@@ -524,16 +525,20 @@ impl IntegrationEnv {
     /// fills the announced quota from this node's own `protocol.pix`. One call rather than two
     /// fields because either alone is a defect the node can only report at open time.
     ///
-    /// **The SURB buffer is tiny** — 16 kB against the throughput tests' 10 MB — and this is the
+    /// **The SURB buffer is small** — 32 kB against the throughput tests' 10 MB — and this is the
     /// least obvious knob in the whole scenario. A PIX share is baked into a SURB when the SURB is
     /// *minted*, and the exit spends its buffer roughly in order, so the buffer is a pipeline delay
     /// between share generation and share delivery. At 10 MB the exit works through SURBs minted
     /// during SSA #1 long before it touches one carrying an SSA #2 share, so cycles stop completing
-    /// — which reads as a broken strategy rather than a mis-set buffer. 16 kB is ~16 SURBs, so a
+    /// — which reads as a broken strategy rather than a mis-set buffer. 32 kB is 22 SURBs, so a
     /// new SSA's shares start landing within seconds of its commitment.
     ///
     /// Measured, not reasoned: the same scenario run at 10 MB recovered and swept **1** cycle where
     /// 16 kB recovered and swept **6**, and failed on the deposit-confirmation assertion.
+    ///
+    /// Nor smaller: the Exit's ring holds 1.5 x the target, at least 16. At 16 kB (11 SURBs) that
+    /// ring stayed full, the SURBs of each `SsaCommit` evicted share-bearing ones, and half the
+    /// sweep runs left an SSA one share short (hoprnet#8737). At 32 kB, none of 30 did.
     ///
     /// Only the **return** path needs a relay. The share encryption key is derived from the first
     /// *return* relayer's acknowledgement, so a zero-hop return path has nothing to derive it from
