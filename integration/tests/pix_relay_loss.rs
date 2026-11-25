@@ -58,9 +58,9 @@
 //!
 //! # Past the first sweep
 //!
-//! The three single-cycle scenarios stop once the cycle in flight at the kill is swept, so they
-//! show that its successor was *requested* and nothing more. A fourth carries [`RETURN_ONLY`] on
-//! for [`SUSTAINED_CYCLES`] swept cycles: the successor is where the loss can still bite, since the
+//! The two single-cycle scenarios stop once the cycle in flight at the kill is swept, so they show
+//! that its successor was *requested* and nothing more. A third carries [`RETURN_ONLY`] on for
+//! [`SUSTAINED_CYCLES`] swept cycles, its first being that shape's single-cycle check: the successor is where the loss can still bite, since the
 //! Entry funds it only once the replies it has counted clear its successor gate, and the burst left
 //! that count short. See [`a_pix_session_keeps_completing_cycles_after_a_return_relay_death`].
 //!
@@ -756,20 +756,6 @@ async fn a_pix_cycle_survives_a_relay_death_on_both_paths() -> anyhow::Result<()
     a_pix_session_survives_losing_half_its_return_relayers(SYMMETRIC, 1).await
 }
 
-/// Requests travel direct and only the replies are relayed, which is the harder case.
-///
-/// Worth its own scenario rather than being a variant nobody runs: it is the only one of the two
-/// that reaches the generation-bump wipe, because that needs the detector to corroborate a dead
-/// relay against a sibling that is still delivering — and when the kill silences the forward path
-/// too, there is no such sibling. The burst this shape inflicts is therefore the larger one, and
-/// it is the one `relay_loss`'s surplus is sized against.
-#[test_log::test(tokio::test(flavor = "multi_thread"))]
-#[ignore = "requires PIX-enabled hoprd/hoprd-localcluster binaries and a chain"]
-async fn a_pix_cycle_survives_a_return_relay_death_with_the_forward_path_intact()
--> anyhow::Result<()> {
-    a_pix_session_survives_losing_half_its_return_relayers(RETURN_ONLY, 1).await
-}
-
 /// A relay dies in the middle of two-hop return paths. The Exit drops the SURBs that start with it
 /// on its own; the ones that pass through it second are invisible to the Exit and only the Entry's
 /// dead-verdict generation bump removes them -- by wiping the Exit's whole stock for the Session.
@@ -783,7 +769,9 @@ async fn a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe(
 
 /// The cycle in flight at a return relay's death recovers, and so do the cycles after it.
 ///
-/// [`RETURN_ONLY`] again, carried past the first sweep to [`SUSTAINED_CYCLES`]. The scenarios above
+/// [`RETURN_ONLY`]: requests direct, replies relayed. The harder shape, and the only one that reaches
+/// the generation-bump wipe, since the detector needs a sibling leg still delivering. It is carried
+/// past the first sweep to [`SUSTAINED_CYCLES`]. The scenarios above
 /// stop at the cycle in flight, which shows its successor was *requested* and nothing more. The
 /// successor is where the loss can still bite: the Entry funds it only once the replies it has
 /// counted clear its successor gate, and the burst left that count short. Before hoprnet#8525 the

@@ -373,6 +373,38 @@ impl ClusterSummary {
         self.append_link_rule("stalled_links", a, b, &timing)
     }
 
+    /// Adds a constant `delay` to every datagram between `a` and `b`: a stall that never ends.
+    pub fn delay_link(
+        &self,
+        a: Address,
+        b: Address,
+        delay: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        let always = std::time::Duration::from_secs(1);
+        self.stall_link(a, b, always, always, delay)
+    }
+
+    /// Drops every cut, stall and delay added so far. The relays re-read the files every 250 ms.
+    pub fn clear_link_rules(&self) -> anyhow::Result<()> {
+        let data_dir = self.data_dir()?;
+        for file in ["blocked_links", "stalled_links"] {
+            match std::fs::remove_file(data_dir.join(file)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("removing {file}"));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn data_dir(&self) -> anyhow::Result<&std::path::Path> {
+        self.log_dir
+            .as_ref()
+            .and_then(|d| d.parent())
+            .ok_or_else(|| anyhow::anyhow!("cluster data dir unknown; cannot change link rules"))
+    }
+
     fn append_link_rule(
         &self,
         file: &str,
@@ -386,11 +418,7 @@ impl ClusterSummary {
                 .position(|n| n.address == node)
                 .ok_or_else(|| anyhow::anyhow!("{node} is not a cluster node"))
         };
-        let data_dir = self
-            .log_dir
-            .as_ref()
-            .and_then(|d| d.parent())
-            .ok_or_else(|| anyhow::anyhow!("cluster data dir unknown; cannot cut a link"))?;
+        let data_dir = self.data_dir()?;
         let line = format!("{} {}{rest}\n", index(a)?, index(b)?);
         std::fs::OpenOptions::new()
             .create(true)

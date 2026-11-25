@@ -132,6 +132,21 @@ dead-last-hop: build build-chain
       fi
       exec bash scripts/integration/run-binchain.sh'
 
+# gnosis_vpn-testenv's diagnostic tests on gnosis_vpn-client's session (nightly tier). See
+# integration/tests/wireguard.rs. Optional args = test-name filters, e.g. `just wireguard short_tcp`.
+wireguard *scenarios: build build-chain
+    #!/usr/bin/env bash
+    set -euo pipefail
+    unset TEST_TARGETS
+    export TEST_TARGET=wireguard HOPRNET_SHELL='{{hoprnet}}'
+    [ -n '{{scenarios}}' ] && export SCENARIOS='{{scenarios}}'
+    source scripts/integration/lib.sh
+    with_restored_manifest bash -c '
+      set -euo pipefail
+      source scripts/integration/lib.sh
+      pin_deps
+      exec bash scripts/integration/run-binchain.sh'
+
 # End-to-end PIX with edgli as the paying entry (binary chain; CI's `pr` tier runs it too).
 # Builds hoprd from HOPRD_SRC (default ../hoprd) because the nix flake has no PIX binary.
 # See integration/tests/pix.rs. Optional args = test-name filters.

@@ -273,9 +273,11 @@ report on a merge group.
 
 ### Nightly
 
-The nightly `schedule` runs both tiers side by side against run.sh's defaults: the current head of
-hoprd, edge-client and blokli `main`. A red night posts to Zulip with the trigger shown as
-`nightly` plus the tier, the three resolved revisions and the failures from the end-of-run summary.
+The nightly `schedule` runs the `pr` tier and the `nightly` tier's two shards side by side, `a`
+(exit_origination, wireguard, pix_relay_loss) and `b` (pix_shapes, return_path, pix_resume), against
+run.sh's defaults: the current head of hoprd, edge-client and blokli `main`. A red night posts to
+Zulip with the trigger shown as `nightly` plus the tier and shard, the three resolved revisions and
+the failures from the end-of-run summary.
 
 Scheduled runs only ever fire from the default branch, and wait for a free runner like
 every other run, so a nightly never cancels an in-flight run or is cancelled by one.

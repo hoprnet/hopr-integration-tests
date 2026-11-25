@@ -21,13 +21,14 @@ Runner setup, secrets and the upstream gates are described in [`runner/README.md
 | `return_path.rs`              | reply spread over relayers, and survival when a relayer dies       | nightly                | `just return-path`            |
 | `pix_relay_loss.rs`           | a PIX cycle survives half its return relays dying, and is paid     | nightly                | `just pix-relay-loss`         |
 | `pix_resume.rs`               | a resumed PIX Session keeps its paid cycle (needs `resume_window`) | nightly                | `just pix-resume`             |
-| `upload_survival.rs`          | sustained upload keeps its return path (hoprnet#8417)              | no                     | `TEST_TARGET=upload_survival` |
+| `wireguard.rs`                | gnosis_vpn-testenv's diagnostic tests on the client's session      | short pr, rest nightly | `just wireguard`              |
+| `upload_survival.rs`          | sustained upload; fails on master despite hoprnet#8417             | no                     | `TEST_TARGET=upload_survival` |
 | `rotsee.rs`                   | the same pump against a funded Rotsee identity (`EDGLI_ROTSEE_*`)  | no                     | `just rotsee`                 |
 | `profiling.rs`                | tokio-console and Perfetto traces, no pass/fail result             | no                     | `just profile`                |
 
 The suites are split in two tiers, chosen with `TIER` (see [`docs/test-matrix.md`](docs/test-matrix.md)
-for what each test covers and costs): `pr` (integration, dead_last_hop, pix, the mixed shape) is the fast
-happy-path set, `nightly` runs the rest. Which jobs each trigger runs is listed under [CI](#ci).
+for what each test covers and costs): `pr` (integration, dead_last_hop, pix, the mixed shape, short TCP
+over WireGuard) is the fast happy-path set, `nightly` runs the rest. Which jobs each trigger runs is listed under [CI](#ci).
 Every run ends with a summary of each test, naming the step a failed test broke in.
 
 Suites share one chain per `run.sh` invocation, warm with frozen identities after the first. The
@@ -48,8 +49,9 @@ just ci                         # what CI runs: resolve refs, build, run TIER=pr
 # A tier exactly as CI selects it, from binaries built here; works on darwin too. Builds the
 # PIX hoprd + localcluster from HOPRD_SRC (a hoprd git checkout, e.g. a `git worktree` of
 # hoprd main), since the flake has no darwin one.
-HOPRD_SRC=../hoprd-main just tier pr        # integration, dead_last_hop, pix, mixed shape (~30 min)
-HOPRD_SRC=../hoprd-main just tier nightly   # exit_origination, other shapes, return_path, pix_relay_loss, pix_resume
+HOPRD_SRC=../hoprd-main just tier pr        # integration, dead_last_hop, pix, mixed shape, short TCP (~30 min)
+HOPRD_SRC=../hoprd-main just tier nightly   # exit_origination, wireguard, other shapes, return_path, pix_relay_loss, pix_resume
+SHARD=a just tier nightly                   # one CI shard only (a or b)
 
 just build build-chain          # hoprd + localcluster, bloklid + deployer + anvil (nix, cached)
 just integration-binchain       # integration.rs on a fresh chain
@@ -181,7 +183,8 @@ dedicated self-hosted runners. It is triggered by:
 - a nightly run at 02:00 UTC;
 - manual runs: `gh workflow run integration.yaml -f tier=nightly -f project=hoprd -f rev=<sha>`.
 
-Each trigger runs one job per tier, side by side when runners are free:
+Each trigger runs one job per tier, side by side when runners are free. The `nightly` tier is two
+jobs, shards `a` and `b` (`SHARD`, see `run_tier` in `scripts/integration/lib.sh`), on two runners:
 
 | Trigger                            | `pr` | `nightly` |
 | ---------------------------------- | ---- | --------- |
