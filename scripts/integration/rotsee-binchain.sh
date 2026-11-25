@@ -7,7 +7,7 @@
 #
 # Prereqs (build first): result-hoprd, result-localcluster, result-bloklid, result-foundry.
 #   just build          # hoprd + localcluster
-#   just build-chain    # bloklid + anvil (blokli release/0.13)
+#   just build-chain    # bloklid + anvil (blokli main)
 #
 # Run inside the dev shell (needs cargo + jq), e.g. via `just rotsee-local`, or:
 #   nix develop github:hoprnet/hoprnet -c bash scripts/integration/rotsee-binchain.sh

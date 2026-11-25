@@ -1,39 +1,29 @@
 name: Integration throughput test
-# Runs the integration suites (full stack). v5 is split in a `pr` and a `nightly` tier, see
-# docs/v5-test-matrix.md; v4 runs every suite on either. Which jobs a trigger runs is the
-# `plan` step below (table in README "CI"). Triggered by:
-#   * hoprd, blokli or edge-client merging to the branch the chosen line names (via
-#     workflow_dispatch / repository_dispatch from those repos),
-#   * a nightly schedule, which is the ONLY coverage the v4 release lines get: a
-#     merge queue can only be attached to a repository's default branch, so
-#     hoprd/edge-client/blokli cannot gate merges into their `release/*` branches,
+# Runs the integration suites (full stack), split in a `pr` and a `nightly` tier, see
+# docs/test-matrix.md. Which jobs a trigger runs is the `plan` step below (table in README "CI").
+# Triggered by:
+#   * hoprd, blokli or edge-client merge queues for `main` (via repository_dispatch),
+#   * a nightly schedule, running both tiers,
 #   * manual workflow_dispatch,
 #   * the MERGE QUEUE for this repo's own `main` — so a change here cannot land
 #     without the test passing, whether or not anyone remembered the label,
-#   * a hopr-integration-tests PR labelled `run-integration` (v5 pr tier), `run-integration-v4`
-#     or `run-integration-v5-nightly` (to run it before queueing).
+#   * a hopr-integration-tests PR labelled `run-integration` (pr tier) or
+#     `run-integration-nightly` (nightly tier), to run it before queueing.
 #
-# README has the branch table. The dispatching project supplies its rev, everything else
-# resolves to the head of its branch on that line.
+# The dispatching project supplies its rev, everything else resolves to the head of its `main`.
 on:
   repository_dispatch:
     types: [integration]
   workflow_dispatch:
     inputs:
-      line:
-        description: "Release line to test"
-        required: false
-        type: choice
-        default: "v4"
-        options: ["v4", "v5"]
       tier:
-        description: "v5 suites to run: all (both tiers, a job each), pr (happy paths) or nightly (the rest)"
+        description: "Suites to run: all (both tiers, a job each), pr (happy paths) or nightly (the rest)"
         required: false
         type: choice
         default: "pr"
         options: ["all", "pr", "nightly"]
       project:
-        description: "Triggering project (hoprd | edge-client | blokli); empty = every ref defaults to the head of its branch on the chosen line"
+        description: "Triggering project (hoprd | edge-client | blokli); empty = every ref defaults to the head of its `main`"
         required: false
         default: ""
       rev:
@@ -65,14 +55,12 @@ on:
   merge_group:
     types: [checks_requested]
   schedule:
-    # 02:00 UTC. No inputs, so run.sh falls through to its defaults, which ARE the v4
-    # lines (hoprd release/4.1, edge-client release/4.1, blokli release/0.13) — that
-    # is the whole point of this trigger.
+    # 02:00 UTC. No inputs, so run.sh falls through to its defaults: every repo's `main`.
     - cron: "0 2 * * *"
 # Uniform indentation on purpose: `>-` only folds lines at the SAME indent as the
 # first one, so an indented continuation would leave real newlines in this string.
 run-name: >-
-  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration {0} ({1} {2})', github.event.client_payload.line || 'v4', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly)' || 'Integration throughput test'))) }}
+  ${{ (inputs.marker || github.event.client_payload.marker) != '' && format('Integration [{0}]', inputs.marker || github.event.client_payload.marker) || (github.event_name == 'repository_dispatch' && format('Integration ({0} {1})', github.event.client_payload.project, github.event.client_payload.rev) || (github.event_name == 'merge_group' && format('Integration (merge queue {0})', github.event.merge_group.head_sha) || (github.event_name == 'schedule' && 'Integration (nightly)' || 'Integration throughput test'))) }}
 # Only lets a new push supersede a PR's previous run; every other run is its own group.
 # Nothing else serialises runs: jobs wait for a free self-hosted runner.
 permissions: {}
@@ -94,38 +82,35 @@ jobs:
       tests_sha: ${{ steps.resolve.outputs.tests_sha }}
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      # One job per (line, tier). Gates (merge queue, upstream dispatches) run the pr tier only; the
-      # v5 nightly tier runs on the schedule or when asked for (label, tier=nightly).
+      # One job per tier. Gates (merge queue, upstream dispatches) run the pr tier only; the
+      # nightly tier runs on the schedule or when asked for (label, tier=nightly).
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          LINE: ${{ inputs.line || github.event.client_payload.line || 'v4' }}
           TIER: ${{ inputs.tier || github.event.client_payload.tier || 'pr' }}
         run: |
           set -euo pipefail
           jobs=()
           case "${EVENT}" in
-          schedule) jobs=(v4:pr v5:nightly) ;;
-          merge_group) jobs=(v4:pr v5:pr) ;;
+          schedule) jobs=(pr nightly) ;;
+          merge_group) jobs=(pr) ;;
           pull_request)
             while read -r label; do
               case "${label}" in
-              run-integration) jobs+=(v5:pr) ;;
-              run-integration-v4) jobs+=(v4:pr) ;;
-              run-integration-v5-nightly) jobs+=(v5:nightly) ;;
+              run-integration) jobs+=(pr) ;;
+              run-integration-nightly) jobs+=(nightly) ;;
               esac
             done < <(jq -r '.[]' <<<"${LABELS}")
             ;;
           *)
-            case "${LINE}:${TIER}" in
-            v4:*) jobs=(v4:pr) ;;
-            v5:all) jobs=(v5:pr v5:nightly) ;;
-            *) jobs=("${LINE}:${TIER}") ;;
+            case "${TIER}" in
+            all) jobs=(pr nightly) ;;
+            *) jobs=("${TIER}") ;;
             esac
             ;;
           esac
-          matrix=$(printf '%s\n' "${jobs[@]}" | jq -Rnc '[inputs | select(length > 0) | split(":") | {line: .[0], tier: .[1]}]')
+          matrix=$(printf '%s\n' "${jobs[@]}" | jq -Rnc '[inputs | select(length > 0) | {tier: .}]')
           echo "jobs: ${matrix}"
           echo "matrix=${matrix}" >>"${GITHUB_OUTPUT}"
       - id: resolve
@@ -152,8 +137,8 @@ jobs:
             echo "tests_sha=${tests_sha}"
           } >>"${GITHUB_OUTPUT}"
   integration:
-    # The pr tier keeps the bare line name, which is what upstream gates and required checks match.
-    name: Integration throughput (${{ matrix.line }}${{ matrix.tier == 'nightly' && ', nightly' || '' }})
+    # Required checks and upstream gates match the `gate` job below, never this name.
+    name: Integration throughput (${{ matrix.tier }})
     needs: companions
     # Empty on a PR with no `run-integration*` label.
     if: needs.companions.outputs.matrix != '[]'
@@ -165,7 +150,7 @@ jobs:
       contents: read
       pull-requests: read
       actions: read
-    # `fail-fast: false` so a v5 break still reports the v4 verdict.
+    # `fail-fast: false` so a nightly break still reports the pr verdict.
     strategy:
       fail-fast: false
       # Legs run side by side. Two runners share each box; "Claim this runner's ports" below
@@ -173,12 +158,10 @@ jobs:
       max-parallel: 4
       matrix:
         include: ${{ fromJSON(needs.companions.outputs.matrix) }}
-    # Per job: ~40 min of tests on v4, ~29 on v5 pr and ~100 on v5 nightly (one shared chain each),
+    # Per job: ~29 min of tests on pr and ~130 on nightly (one shared chain each),
     # plus 15-20 min of build on a Cachix miss.
     timeout-minutes: 180
     env:
-      # Which branch + dependency set run.sh resolves; the rest override within it.
-      LINE: ${{ matrix.line }}
       TIER: ${{ matrix.tier }}
       PROJECT: ${{ inputs.project || github.event.client_payload.project }}
       OVERRIDE_REV: ${{ inputs.rev || github.event.client_payload.rev }}
@@ -188,10 +171,7 @@ jobs:
       # dispatch silently arrives with the field empty. Same shape as
       # gnosis_vpn-infrastructure's restart-hoprd.yaml.
       #
-      # All empty by default so each follows LINE, re-resolved per run. HOPRD_LINE is
-      # also the line a dispatched rev must be contained in — that is what rejects a v5
-      # sha sent at v4. A repo variable pins it for BOTH lines, rarely what you want.
-      HOPRD_LINE: ${{ vars.HOPRD_LINE }}
+      # All empty by default so each follows its repo's `main`, re-resolved per run.
       HOPRD_REF: ${{ vars.HOPRD_REF }}
       EDGLI_REF: ${{ vars.EDGLI_REF }}
       BLOKLI_REF: ${{ vars.BLOKLI_REF }}
@@ -360,7 +340,6 @@ jobs:
           if [ "${EVENT}" = "schedule" ]; then
             echo "TRIGGER=nightly"
           elif [ "${EVENT}" = "merge_group" ]; then
-            # Fans out over both lines; ${LINE} says which one this job is.
             # This repo's own merge queue: the candidate is this PR merged into main.
             echo "TRIGGER=hopr-integration-tests merge queue ([\`${MQ_SHA:0:8}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${MQ_SHA}))"
           elif [ "${EVENT}" = "pull_request" ]; then
@@ -438,7 +417,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: integration-logs-${{ matrix.line }}-${{ matrix.tier }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: integration-logs-${{ matrix.tier }}-${{ github.run_id }}-${{ github.run_attempt }}
           # Cluster dirs live under HOPR_LOG_DIR (logs/ci/); the shared chain under IT_TMP_ROOT.
           # Nothing from /tmp: the other runner on this box writes there too.
           path: |
@@ -462,7 +441,7 @@ jobs:
           # job died before run.sh got as far as resolving them (a runner/setup problem
           # rather than a stack problem), which is itself the useful signal.
           content: |
-            **Integration throughput test FAILED** (${{ env.RESOLVED_LINE || matrix.line }}, ${{ matrix.tier }} tier) — ${{ env.TRIGGER }}${{ env.TESTS_FROM }}
+            **Integration throughput test FAILED** (${{ matrix.tier }} tier) — ${{ env.TRIGGER }}${{ env.TESTS_FROM }}
             * hoprd `${{ env.RESOLVED_HOPRD || 'unresolved' }}`
             * edge-client `${{ env.RESOLVED_EDGLI || 'unresolved' }}`
             * blokli `${{ env.RESOLVED_BLOKLI || 'unresolved' }}`

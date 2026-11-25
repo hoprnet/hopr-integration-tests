@@ -67,18 +67,16 @@
 //! # Running
 //!
 //! ```text
-//! LINE=v5 HOPRD_SRC=../hoprd just pix-relay-loss                      # every scenario
-//! HOPRD_PIX_ADDITIONAL_SHARES=16 LINE=v5 … just pix-relay-loss        # the shipped surplus
-//! HOPRD_PIX_ADDITIONAL_SHARES=4  LINE=v5 … just pix-relay-loss        # the negative control
-//! LINE=v5 … just pix-relay-loss a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe
+//! HOPRD_SRC=../hoprd just pix-relay-loss                      # every scenario
+//! HOPRD_PIX_ADDITIONAL_SHARES=16 … just pix-relay-loss        # the shipped surplus
+//! HOPRD_PIX_ADDITIONAL_SHARES=4  … just pix-relay-loss        # the negative control
+//! … just pix-relay-loss a_pix_cycle_survives_a_deep_return_relay_death_and_the_generation_wipe
 //! ```
 //!
-//! CI's v5 nightly tier runs every scenario. **One cluster per scenario**: each kills a cluster
+//! CI's nightly tier runs every scenario. **One cluster per scenario**: each kills a cluster
 //! node, so the cluster cannot be shared with anything after it. The recipe gives each scenario an
 //! invocation of its own on one chain; name one with `SCENARIOS=` when driving `run-binchain.sh`
 //! directly.
-
-#![cfg(feature = "v5")]
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},

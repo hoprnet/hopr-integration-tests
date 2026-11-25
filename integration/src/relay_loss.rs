@@ -228,12 +228,8 @@ pub fn fill_max_rate() -> u32 {
 }
 
 /// Bytes of quota one share is priced at, as the Exit computes it.
-#[cfg(feature = "v5")]
 pub const QUOTA_BYTES_PER_SHARE: u64 =
     edgli::hopr_lib::exports::transport::session::PIX_QUOTA_BYTES_PER_SHARE;
-#[cfg(not(feature = "v5"))]
-pub const QUOTA_BYTES_PER_SHARE: u64 =
-    edgli::hopr_lib::exports::transport::PACKET_PAYLOAD_SIZE as u64;
 
 /// Surplus shares per polynomial, honouring `HOPRD_PIX_ADDITIONAL_SHARES`.
 ///
@@ -537,7 +533,6 @@ pub const MAX_SURB_UPSTREAM_BITS: u64 = MAX_SURBS_PER_SEC * 8 * SURB_SIZE as u64
 // ── Entry side ───────────────────────────────────────────────────────────────
 
 /// This profile as the Entry's own generator dimensions.
-#[cfg(feature = "v5")]
 pub fn entry_dimensions() -> edgli::PixGlobalConfig {
     edgli::PixGlobalConfig {
         num_ssa_parts: pix_polys(),
@@ -548,14 +543,12 @@ pub fn entry_dimensions() -> edgli::PixGlobalConfig {
 }
 
 /// wxHOPR one completed cycle costs the Entry at this profile.
-#[cfg(feature = "v5")]
 pub fn per_cycle() -> anyhow::Result<crate::HoprBalance> {
     let price: crate::HoprBalance = format!("{PRICE_PER_BYTE_WXHOPR:.10} wxHOPR").parse()?;
     Ok(price * quota_per_ssa())
 }
 
 /// The Entry's settlement configuration for this profile.
-#[cfg(feature = "v5")]
 pub fn entry_config() -> anyhow::Result<edgli::PixEntryConfig> {
     let per_cycle = per_cycle()?;
     // Against the widest admitted quota, matching `cluster_pix_yaml`: the two ceilings are read by
@@ -581,7 +574,6 @@ pub fn entry_config() -> anyhow::Result<edgli::PixEntryConfig> {
 }
 
 /// Point both halves of the run at this profile, before the cluster is brought up.
-#[cfg(feature = "v5")]
 pub fn install_profile() {
     crate::cluster::request_pix_settings(cluster_pix_yaml());
     crate::pix::request_dimensions(entry_dimensions());
@@ -630,7 +622,6 @@ mod tests {
         assert_eq!(2_400, surb_buffer_target());
         assert_eq!(16_384, free_credit());
         assert_eq!(327, nominal_cycle_secs());
-        #[cfg(feature = "v5")]
         assert_eq!(71_368_704, quota_per_ssa());
     }
 

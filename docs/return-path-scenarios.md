@@ -105,7 +105,7 @@ the 40 runs under _Test_ show. The bound alone is no evidence either way.
 
 _Test:_ `return_paths_should_spread_across_distinct_relayers` gates concentration only: at least
 three of the four candidates carry 5 % or more, and the busiest at most two fair shares. That
-passed all 40 v5 runs recorded 2026-11-03 to 11-06 (busiest at most 48 %). The ratio above is
+passed all 40 runs recorded 2026-11-03 to 11-06 (busiest at most 48 %). The ratio above is
 `return_paths_should_track_the_tempered_score`, held out of every tier: over the same 40 runs it
 ranged 1.27 to 4.47 and exceeded its bound of 3.0 in 17, because it follows the run's live scores.
 
@@ -146,19 +146,10 @@ ticket unredeemable (§3.1), so those replies are lost rather than rerouted.
 _Watch out:_ closure is not instant — `PENDING_TO_CLOSE` holds for `T_closure` (§3.1).
 Gate on the channel status the exit reports, not on a sleep.
 
-### S4 — Stale SURB backlog drains before a path change takes effect · **not implemented**
+### S4 — Stale SURB backlog drains before a path change takes effect · **obsolete**
 
-_Isolates:_ #8328 FIFO vs LIFO pop order — the "a return-path change only takes effect
-after ~10 MB of stale backlog is consumed" half of the incident. v4 only: hoprnet#8473 made v5
-FIFO-only.
-
-_Setup:_ provision a large SURB buffer and let it fill (the session config already asks for
-a production-scale 10 MB / `always_max_out_surbs`), quiesce the reply stream so the backlog
-is genuinely stale, close a channel as in S3, then resume.
-
-_Signal:_ time (or bytes) from the change until replies first appear on the new path. FIFO
-must drain the backlog first; LIFO uses the freshest SURB immediately. Vary the **hoprd**
-pin; the metric is a latency-to-recovery, not a share.
+_Isolated:_ #8328 FIFO vs LIFO pop order. hoprnet#8473 made the pop order FIFO-only, so there is
+no LIFO left to compare against.
 
 ### S5 — 0-hop return path must not be invalidated · **not implemented**
 

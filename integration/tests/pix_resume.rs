@@ -1,4 +1,4 @@
-//! A resumed PIX Session keeps its paid cycle (CI's v5 nightly tier; `just pix-resume` locally).
+//! A resumed PIX Session keeps its paid cycle (CI's nightly tier; `just pix-resume` locally).
 //!
 //! # The question
 //!
@@ -60,8 +60,8 @@
 //! # Running
 //!
 //! ```text
-//! HOPRD_SRC=../hoprd HOPRD_KEEP_ARTIFACTS=1 LINE=v5 just pix-resume > /tmp/pix-resume.log 2>&1
-//! LINE=v5 HOPRD_SRC=../hoprd just pix-resume a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays
+//! HOPRD_SRC=../hoprd HOPRD_KEEP_ARTIFACTS=1 just pix-resume > /tmp/pix-resume.log 2>&1
+//! HOPRD_SRC=../hoprd just pix-resume a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays
 //! ```
 //!
 //! One cluster per scenario (a fresh chain state each, the Exit's `hopr_pix_*` family has no Session
@@ -124,8 +124,6 @@
 //!
 //! As `tests/pix.rs`: the Entry is the `edgli` compiled into this binary, the Exit and relay are
 //! `$HOPRD_BIN` at runtime. Both must carry the resume window or the tests mean nothing.
-
-#![cfg(feature = "v5")]
 
 use std::{future::Future, time::Duration};
 

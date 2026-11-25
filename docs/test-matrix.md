@@ -1,13 +1,13 @@
-# v5 integration tests: inventory, coverage and tiers
+# Integration tests: inventory, coverage and tiers
 
-What every v5 test checks, what it costs in CI, which ones overlap, and which tier runs it.
+What every test checks, what it costs in CI, which ones overlap, and which tier runs it.
 Issues: #63 (combine overlapping scenarios), #65 (PR vs nightly tiers). Rows marked #82 / #83 / #109
 come from those PRs.
 
 Wall times are per scenario, setup included:
 
-- **CI**: merge-queue run 40487443693, v5 job.
-- **L**: local v5 runs of #82 (`return_path`, min–max over 3 runs).
+- **CI**: merge-queue run 40487443693.
+- **L**: local runs of #82 (`return_path`, min–max over 3 runs).
 - **#83**: the prototype runs in that PR's body.
 
 After the first scenario on a chain, setup costs about 17 s (frozen 5-node cluster) or about 48 s
@@ -16,48 +16,48 @@ and the fill aims at 540 s.
 
 ## Tests
 
-| ID  | Binary::test                                                          | Origin | Tier     | Wall                                                      | Nodes | Fault                                |
-| --- | --------------------------------------------------------------------- | ------ | -------- | --------------------------------------------------------- | ----- | ------------------------------------ |
-| A1  | `integration::zero_one_two_hop` (was `one_hop` + `zero_hop`)          | main   | pr       | CI 2.1m for the old two (+2.2m first bring-up), 2-hop new | 3     | –                                    |
-| B1  | `exit_origination::exit_should_keep_originating_…`                    | main   | nightly  | CI 4.2m                                                   | 3     | abandoned session: v4 starves it; v5 must not (hoprnet#8629) |
-| C1  | `pix::a_session_should_close_when_the_entry_can_no_longer_deposit`    | main   | pr       | CI ~3.5m                                                  | 3     | entry budget exhausted               |
-| C2  | `pix::edgli_entry_deposits_should_be_swept_into_the_exit_safe`        | main   | pr       | CI ~2.3m                                                  | 3     | –                                    |
-| D2  | `pix_shapes::a_browsing_session_sustains_its_cycles`                  | main   | nightly  | CI 9.2m                                                   | 3     | –                                    |
-| D3  | `pix_shapes::a_download_session_sustains_its_cycles`                  | main   | nightly  | CI 9.0m                                                   | 3     | –                                    |
-| D4  | `pix_shapes::a_mixed_session_sustains_its_cycles` (+ former spike D1) | main   | pr       | CI 14.5m                                                  | 3     | –                                    |
-| D5  | `pix_shapes::an_idle_session_completes_its_cycle_on_exit_fill`        | main   | nightly  | CI 10.6m                                                  | 3     | –                                    |
-| D6  | `pix_shapes::an_upload_session_completes_on_fill`                     | main   | nightly  | CI 8.3m                                                   | 3     | –                                    |
-| E1  | `return_path::session_should_survive_return_relayer_loss`             | #82    | nightly  | L 5.4–5.9m (first bring-up)                               | 5     | SIGKILL return relay (0,1)           |
-| E2  | `return_path::session_should_survive_forward_relayer_loss`            | #82    | nightly  | L 2.9–3.0m                                                | 5     | SIGKILL forward relay (1,0)          |
-| E3  | `return_path::a_symmetric_session_should_survive_relayer_loss`        | #82    | nightly  | L 2.0–2.5m                                                | 5     | SIGKILL relay (1,1)                  |
-| E4  | `return_path::a_one_hop_…_exit_losing_its_return_relayer`             | #82    | nightly  | L 5.3–5.4m (first 8-node)                                 | 8     | exit↔relay link cut (0,1)           |
-| E5  | `return_path::a_one_hop_…_a_stalling_return_relayer`                  | #82    | nightly  | L 3.2–3.3m                                                | 8     | exit↔relay link stall (0,1)         |
-| E6  | `return_path::session_should_survive_common_mode_return_outage`       | #82    | nightly  | L 2.7–2.9m                                                | 5     | SIGSTOP all return relays, then thaw |
-| E7  | `return_path::a_two_hop_…_exit_losing_its_return_relayer`             | #82    | nightly  | L 2.7–2.8m                                                | 8     | link cut (0,2)                       |
-| E8  | `return_path::a_two_hop_session_should_survive_relayer_loss`          | #82    | nightly  | L 2.7–2.9m                                                | 8     | SIGKILL (2,2)                        |
-| E9  | `return_path::a_three_hop_session_should_survive_relayer_loss`        | #82    | nightly  | L 3.0–3.1m                                                | 8     | SIGKILL (3,3)                        |
-| E10 | `return_path::a_three_hop_session_should_survive_a_stalling_relayer`  | #82    | nightly  | L 3.0–3.1m                                                | 8     | victim stalls every link (3,3)       |
-| E11 | `return_path::return_paths_should_spread_across_distinct_relayers`    | main   | nightly  | L 0.4–0.6m                                                | 5     | –                                    |
-| E12 | `return_path::return_paths_should_track_the_tempered_score`         | #82    | held out | L 0.4–0.6m (as E11)                                       | 5     | – (finding, hoprnet#8331)            |
-| E13 | `return_path::an_idle_session_should_survive_a_long_common_mode_…`    | #109   | nightly  | L 3.2–3.7m                                                | 5     | E6 after 35 s idle, 40 s, no settle  |
-| F1  | `pix_relay_loss::a_pix_cycle_survives_a_relay_death_on_both_paths`    | #83    | nightly  | #83 7.5m (≈24m at production size)                        | 3     | kill half the return relays (1,1)    |
-| F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`   | #83    | nightly  | #83 7.6m                                                  | 3     | (0,1)                                |
-| F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`   | #83    | nightly  | #83 8.6m                                                  | 4     | (0,2)                                |
-| G1  | `pix_resume::a_session_resumed_within_the_window_keeps_its_paid_cycle`       | hoprnet#8711 | nightly | L 7.7–7.8m                                         | 3     | clean close, re-open under the same pseudonym at once |
-| G2  | `pix_resume::a_session_resumed_after_a_pause_inside_the_window_continues`    | hoprnet#8711 | nightly | L 5.9m                                             | 3     | as G1 after 0.6 x the resume window  |
-| G3  | `pix_resume::a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays` | hoprnet#8711 | nightly | L 4.9–5.4m                                         | 3     | re-open after the window: refused `NotResumable`, a fresh pseudonym pays again (control) |
-| G4  | `pix_resume::a_session_dropped_without_a_close_is_taken_over_live`           | hoprnet#8711 | nightly | L 7.8–10.1m                                        | 3     | as G1 but dropped without a close: the Exit never detaches, the live Session is taken over |
+| ID  | Binary::test                                                                            | Origin       | Tier     | Wall                                                      | Nodes | Fault                                                                                      |
+| --- | --------------------------------------------------------------------------------------- | ------------ | -------- | --------------------------------------------------------- | ----- | ------------------------------------------------------------------------------------------ |
+| A1  | `integration::zero_one_two_hop` (was `one_hop` + `zero_hop`)                            | main         | pr       | CI 2.1m for the old two (+2.2m first bring-up), 2-hop new | 3     | –                                                                                          |
+| B1  | `exit_origination::exit_should_keep_originating_…`                                      | main         | nightly  | CI 4.2m                                                   | 3     | abandoned session must not starve (hoprnet#8629)                                           |
+| C1  | `pix::a_session_should_close_when_the_entry_can_no_longer_deposit`                      | main         | pr       | CI ~3.5m                                                  | 3     | entry budget exhausted                                                                     |
+| C2  | `pix::edgli_entry_deposits_should_be_swept_into_the_exit_safe`                          | main         | pr       | CI ~2.3m                                                  | 3     | –                                                                                          |
+| D2  | `pix_shapes::a_browsing_session_sustains_its_cycles`                                    | main         | nightly  | CI 9.2m                                                   | 3     | –                                                                                          |
+| D3  | `pix_shapes::a_download_session_sustains_its_cycles`                                    | main         | nightly  | CI 9.0m                                                   | 3     | –                                                                                          |
+| D4  | `pix_shapes::a_mixed_session_sustains_its_cycles` (+ former spike D1)                   | main         | pr       | CI 14.5m                                                  | 3     | –                                                                                          |
+| D5  | `pix_shapes::an_idle_session_completes_its_cycle_on_exit_fill`                          | main         | nightly  | CI 10.6m                                                  | 3     | –                                                                                          |
+| D6  | `pix_shapes::an_upload_session_completes_on_fill`                                       | main         | nightly  | CI 8.3m                                                   | 3     | –                                                                                          |
+| E1  | `return_path::session_should_survive_return_relayer_loss`                               | #82          | nightly  | L 5.4–5.9m (first bring-up)                               | 5     | SIGKILL return relay (0,1)                                                                 |
+| E2  | `return_path::session_should_survive_forward_relayer_loss`                              | #82          | nightly  | L 2.9–3.0m                                                | 5     | SIGKILL forward relay (1,0)                                                                |
+| E3  | `return_path::a_symmetric_session_should_survive_relayer_loss`                          | #82          | nightly  | L 2.0–2.5m                                                | 5     | SIGKILL relay (1,1)                                                                        |
+| E4  | `return_path::a_one_hop_…_exit_losing_its_return_relayer`                               | #82          | nightly  | L 5.3–5.4m (first 8-node)                                 | 8     | exit↔relay link cut (0,1)                                                                 |
+| E5  | `return_path::a_one_hop_…_a_stalling_return_relayer`                                    | #82          | nightly  | L 3.2–3.3m                                                | 8     | exit↔relay link stall (0,1)                                                               |
+| E6  | `return_path::session_should_survive_common_mode_return_outage`                         | #82          | nightly  | L 2.7–2.9m                                                | 5     | SIGSTOP all return relays, then thaw                                                       |
+| E7  | `return_path::a_two_hop_…_exit_losing_its_return_relayer`                               | #82          | nightly  | L 2.7–2.8m                                                | 8     | link cut (0,2)                                                                             |
+| E8  | `return_path::a_two_hop_session_should_survive_relayer_loss`                            | #82          | nightly  | L 2.7–2.9m                                                | 8     | SIGKILL (2,2)                                                                              |
+| E9  | `return_path::a_three_hop_session_should_survive_relayer_loss`                          | #82          | nightly  | L 3.0–3.1m                                                | 8     | SIGKILL (3,3)                                                                              |
+| E10 | `return_path::a_three_hop_session_should_survive_a_stalling_relayer`                    | #82          | nightly  | L 3.0–3.1m                                                | 8     | victim stalls every link (3,3)                                                             |
+| E11 | `return_path::return_paths_should_spread_across_distinct_relayers`                      | main         | nightly  | L 0.4–0.6m                                                | 5     | –                                                                                          |
+| E12 | `return_path::return_paths_should_track_the_tempered_score`                             | #82          | held out | L 0.4–0.6m (as E11)                                       | 5     | – (finding, hoprnet#8331)                                                                  |
+| E13 | `return_path::an_idle_session_should_survive_a_long_common_mode_…`                      | #109         | nightly  | L 3.2–3.7m                                                | 5     | E6 after 35 s idle, 40 s, no settle                                                        |
+| F1  | `pix_relay_loss::a_pix_cycle_survives_a_relay_death_on_both_paths`                      | #83          | nightly  | #83 7.5m (≈24m at production size)                        | 3     | kill half the return relays (1,1)                                                          |
+| F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`                     | #83          | nightly  | #83 7.6m                                                  | 3     | (0,1)                                                                                      |
+| F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`                     | #83          | nightly  | #83 8.6m                                                  | 4     | (0,2)                                                                                      |
+| G1  | `pix_resume::a_session_resumed_within_the_window_keeps_its_paid_cycle`                  | hoprnet#8711 | nightly  | L 7.7–7.8m                                                | 3     | clean close, re-open under the same pseudonym at once                                      |
+| G2  | `pix_resume::a_session_resumed_after_a_pause_inside_the_window_continues`               | hoprnet#8711 | nightly  | L 5.9m                                                    | 3     | as G1 after 0.6 x the resume window                                                        |
+| G3  | `pix_resume::a_session_reopened_after_the_window_is_refused_and_a_fresh_pseudonym_pays` | hoprnet#8711 | nightly  | L 4.9–5.4m                                                | 3     | re-open after the window: refused `NotResumable`, a fresh pseudonym pays again (control)   |
+| G4  | `pix_resume::a_session_dropped_without_a_close_is_taken_over_live`                      | hoprnet#8711 | nightly  | L 7.8–10.1m                                               | 3     | as G1 but dropped without a close: the Exit never detaches, the live Session is taken over |
 
 G1-G4 were measured locally, twice each, cluster bring-up included. They need a localcluster that
 takes `resume_window` in `--pix-config` (hoprd#293) and a hoprnet with the resume window (hoprnet#8711)
 in both the Exit and the edgli Entry; the tier fails on a localcluster without the key.
 
-Not in v5 CI: upload_survival, rotsee, profiling.
+Not in CI: upload_survival, rotsee, profiling.
 
 | Set (test time, build excluded) | Before                   | After                                          |
 | ------------------------------- | ------------------------ | ---------------------------------------------- |
-| v5 PR label `run-integration`   | 75m (~110m with #82/#83) | **pr: 26m in CI**                              |
-| v5 nightly tier                 | –                        | ~41m, ~104m with #82/#83/#109, ~132m with #116 |
+| PR label `run-integration`      | 75m (~110m with #82/#83) | **pr: 26m in CI**                              |
+| nightly tier                    | –                        | ~41m, ~104m with #82/#83/#109, ~132m with #116 |
 
 ## Features
 
@@ -75,7 +75,7 @@ Not in v5 CI: upload_survival, rotsee, profiling.
 | R4    | Exit-only detection: exit↔relay link cut (1 / 2 hops)            | the recovery checks                                                                                   |
 | R5    | Stall that never disconnects                                      | the recovery checks                                                                                   |
 | R6    | Common-mode outage                                                | session not closed during the outage, then the recovery checks                                        |
-| X1    | Exit keeps originating while one session is SURB-starved          | ingress and origination counters move, canary ≥50 %, starvation log line seen                         |
+| X1    | Exit keeps originating while one session is SURB-starved          | ingress and origination counters move, canary ≥50 %, no starvation log line                           |
 | P1    | PIX demo cycle (32 packets): deposit → confirm → recover → sweep  | ≥4 cycles, whole-multiple accounting, Safe drop ≥ recovered, 0 failed / over-budget / timed out       |
 | P2    | PIX budget exhaustion                                             | exactly 2 deposits, over-budget ≥1, Exit times out the deposit, Session not Complete                  |
 | P3    | Production-profile geometry (40 960-packet cycle, `--pix-config`) | Exit observable, cycle swept within 3 nominal cycles                                                  |
@@ -116,26 +116,26 @@ S = strict assertion, w = exercised but weakly or not asserted.
 
 ## Combining
 
-| ID  | Change                                                                                 | Status            | Saves (v5)     | Coverage change                                               |
+| ID  | Change                                                                                 | Status            | Saves          | Coverage change                                               |
 | --- | -------------------------------------------------------------------------------------- | ----------------- | -------------- | ------------------------------------------------------------- |
 | K1  | `zero_one_two_hop`: one 3-node cluster, steps 1-hop, 0-hop, 2-hop                      | done              | one edgli boot | **gains** a strict healthy 2-hop (S2)                         |
 | K2  | Spike D1 folded into mixed D4; its `observable()` check moves into D4's `setup` step   | done              | **−7.1m**      | none: D4's bulk phase is the same cycle with stricter asserts |
 | K3  | E11 (spread) becomes a logged metric of E1's warm-up                                   | for #82           | −0.5m          | none, it is not gated                                         |
-| K4  | Run return_path on PIX sessions with the cycle asserts, dropping F1–F3 or E1/E3/E7     | rejected          | −20m           | v5 still runs plain sessions, so both families stay           |
+| K4  | Run return_path on PIX sessions with the cycle asserts, dropping F1–F3 or E1/E3/E7     | rejected          | −20m           | plain sessions still run, so both families stay               |
 | K5  | Chain recoverable faults on one cluster (E6 then E1; E4 then E5)                       | open, low value   | ~−2m           | victim and baseline conditions change                         |
 | K6  | Run D2, D3, D5, D6 concurrently on distinct exits (separate edgli, per-exit telemetry) | open, spike first | −30m nightly   | none                                                          |
 | K7  | Run the 5-node scenarios on the 8-node identities                                      | open              | ~−3m           | 4 → 7 candidates, so thresholds need re-deriving              |
 
 ## Tiers
 
-| Tier      | Trigger                                             | v5 suites                                                                                     |
-| --------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `pr`      | `run-integration` label, merge queue, v5 dispatches | integration, dead_last_hop, pix, pix_shapes mixed                                             |
-| `nightly` | `run-integration-v5-nightly` label, `schedule`      | exit_origination, the other four pix_shapes, return_path (all but E12), pix_relay_loss, pix_resume |
+| Tier      | Trigger                                                      | Suites                                                                                             |
+| --------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `pr`      | `run-integration` label, merge queue, dispatches, `schedule` | integration, dead_last_hop, pix, pix_shapes mixed                                                  |
+| `nightly` | `run-integration-nightly` label, `schedule`                  | exit_origination, the other four pix_shapes, return_path (all but E12), pix_relay_loss, pix_resume |
 
-- `run.sh` picks the suites from `TIER`. v4 ignores it and runs everything, as before.
-- Each tier is its own job. The merge queue and v5 dispatches run `pr` only; the schedule runs v4
-  and v5 `nightly`, and the label runs `nightly` on a PR before it is queued. The full table is in the README, under CI.
+- `run.sh` picks the suites from `TIER`.
+- Each tier is its own job. The merge queue and dispatches run `pr` only; the schedule runs both
+  tiers, and the label runs `nightly` on a PR before it is queued. The full table is in the README, under CI.
 - The pass marker's fingerprint carries the tier, so a merge gate never reuses a nightly green.
 
 ## Measured locally
@@ -160,14 +160,14 @@ The summary time includes the local build checks and the chain start.
 
 `just tier <pr|nightly>` runs the same suites CI does (`run_tier` in `scripts/integration/lib.sh`,
 shared with `run.sh`) from binaries built on the machine. The flake's PIX hoprd is x86_64-linux
-only, so on v5 the recipe builds the PIX hoprd and the `--pix-config` localcluster from
-`HOPRD_SRC`, a v5 hoprd git checkout, and pins edgli to edge-client's line head like CI. It has to
+only, so the recipe builds the PIX hoprd and the `--pix-config` localcluster from
+`HOPRD_SRC`, a hoprd git checkout, and pins edgli to edge-client's `main` head like CI. It has to
 be a git checkout: nix copies a plain directory into the store whole, `target/` included.
 
 ```bash
 git -C ../hoprd worktree add ../hoprd-main origin/main   # once
-LINE=v5 HOPRD_SRC=../hoprd-main just tier pr
-LINE=v5 HOPRD_SRC=../hoprd-main just tier nightly
+HOPRD_SRC=../hoprd-main just tier pr
+HOPRD_SRC=../hoprd-main just tier nightly
 ```
 
 The run ends with the same summary CI prints. One suite or scenario: `just pix-shapes <name>`,

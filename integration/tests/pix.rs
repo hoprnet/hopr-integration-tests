@@ -1,4 +1,4 @@
-//! End-to-end PIX with **edgli as the paying Entry** (CI's v5 `pr` tier; `just pix` locally).
+//! End-to-end PIX with **edgli as the paying Entry** (CI's `pr` tier; `just pix` locally).
 //!
 //! hoprd's own `session_pix` covers hoprd-Entry ↔ hoprd-Exit over the REST API. This covers the
 //! configuration that actually ships: `gnosis_vpn-client` embeds edgli, so in production the node
@@ -92,8 +92,7 @@
 //!
 //! Compile-time on one side and runtime on the other, so the two can silently disagree — and both
 //! must carry PIX for anything here to mean what it says. The pool marker check covers the Exit;
-//! this binary existing only on the v5 line, which always enables PIX, covers the entry.
-#![cfg(feature = "v5")]
+//! this crate always enabling edgli's `pix-test` pool covers the entry.
 
 use std::time::Duration;
 

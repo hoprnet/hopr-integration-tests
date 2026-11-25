@@ -42,11 +42,11 @@ print(pr or "")
 PY
 }
 
-# Sets EDGLI_REF / HOPRD_REF / BLOKLI_REF to the open companions on LINE. Read from the checkout,
+# Sets EDGLI_REF / HOPRD_REF / BLOKLI_REF to the open companions. Read from the checkout,
 # not the workflow: a dispatch runs main's workflow, but this script from the tests PR.
 # shellcheck disable=SC2034  # read by run.sh
 companion_refs() {
-  local source_pr body companions repo num state base sha fork line
+  local source_pr body companions repo num state base sha fork
   source_pr="$(companion_source_pr)"
   [ -n "${source_pr}" ] || return 0
   body="$(gh pr view "${source_pr}" -R "${GITHUB_REPOSITORY}" --json body -q .body)"
@@ -64,17 +64,9 @@ companion_refs() {
       echo "::error::hoprnet/${repo}#${num} is a fork PR; its head must not run on the self-hosted box" >&2
       return 1
     fi
-    case "${base}" in
-    main) line=v5 ;;
-    release/*) line=v4 ;;
-    *)
-      echo "::error::hoprnet/${repo}#${num} targets '${base}', which maps to no line" >&2
-      return 1
-      ;;
-    esac
     case "${state}" in
     MERGED)
-      echo "hoprnet/${repo}#${num} is merged: ${line} uses the ${base} head"
+      echo "hoprnet/${repo}#${num} is merged: using the ${base} head"
       continue
       ;;
     OPEN) ;;
@@ -83,40 +75,22 @@ companion_refs() {
       return 1
       ;;
     esac
+    if [ "${base}" != main ]; then
+      echo "::error::hoprnet/${repo}#${num} targets '${base}'; companions must target main" >&2
+      return 1
+    fi
     if [ "${GITHUB_EVENT_NAME:-}" = merge_group ]; then
       echo "::error::merge hoprnet/${repo}#${num} first: main must not get ahead of ${repo}" >&2
       return 1
     fi
-    [ "${line}" = "${LINE:-v4}" ] || continue
     case "${repo}" in
     edge-client) EDGLI_REF="${sha}" ;;
-    hoprd) HOPRD_REF="${sha}" HOPRD_PR_BASE="${base}" ;;
+    hoprd) HOPRD_REF="${sha}" ;;
     blokli) BLOKLI_REF="${sha}" ;;
     esac
     echo "companion: ${repo} at ${sha} (hoprnet/${repo}#${num}, from #${source_pr})" |
       tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
   done <<<"${companions}"
-}
-
-# Per-line defaults; an explicit env override or a companion still wins.
-# shellcheck disable=SC2034  # read by run.sh
-line_refs() {
-  case "${LINE:-v4}" in
-  v4)
-    HOPRD_LINE="${HOPRD_LINE:-release/4.1}"
-    EDGLI_REF="${EDGLI_REF:-release/4.1}"
-    BLOKLI_DEFAULT="release/0.13"
-    ;;
-  v5)
-    HOPRD_LINE="${HOPRD_LINE:-main}"
-    EDGLI_REF="${EDGLI_REF:-main}"
-    BLOKLI_DEFAULT="${BLOKLI_DEFAULT:-main}"
-    ;;
-  *)
-    echo "unknown LINE '${LINE}' (expected v4 or v5)" >&2
-    return 2
-    ;;
-  esac
 }
 
 # Cargo git `rev` needs a commit, not a branch. `gh api` rather than `git ls-remote`: the dev
@@ -167,14 +141,14 @@ if n == 0:
 src = src[: stanza.start()] + pinned + src[stanza.end() :]
 print(f"  edgli pinned: {pinned.splitlines()[0]}")
 
-# v5's direct `hopr-lib` / `hopr-strategy` MUST name what edgli resolves, else the lock carries two
-# copies and metrics are registered by one and incremented by the other. No-op on v4.
+# The direct `hopr-lib` / `hopr-strategy` MUST name what edgli resolves, else the lock carries two
+# copies and metrics are registered by one and incremented by the other.
 KEY = r'\b(?:branch|rev|tag)\s*=\s*"[^"]*"'
 for dep, keypat in (("hopr-lib", KEY), ("hopr-strategy", r'\bversion\s*=\s*"[^"]*"')):
     stanza_re = r'^' + dep + r'\s*=\s*\{.*?\}'
     ours = re.search(stanza_re, src, re.S | re.M)
     if not ours:
-        continue
+        sys.exit(f"pin_edgli: no `{dep}` stanza in {path} to mirror onto")
     theirs = re.search(stanza_re, os.environ['EDGLI_MANIFEST'], re.S | re.M)
     if not theirs:
         sys.exit(f"pin_edgli: edge-client's manifest has no `{dep}` stanza to mirror")
@@ -212,11 +186,27 @@ PY
   done
 }
 
-# The PR checks' entry point: the edgli run.sh would test on LINE, without building anything.
-pin_line_deps() {
+# Runs a command, then restores the committed manifest and lock that `pin_edgli` rewrites in place.
+# A subshell, so its traps never replace the caller's.
+with_restored_manifest() (
+  crate="${LIB_ROOT}/integration" backup="$(mktemp -d)"
+  cp "${crate}/Cargo.toml" "${crate}/Cargo.lock" "${backup}/"
+  # shellcheck disable=SC2329  # invoked indirectly via the trap below
+  restore() {
+    cp "${backup}/Cargo.toml" "${backup}/Cargo.lock" "${crate}/"
+    rm -rf "${backup}"
+  }
+  # A handler does not end the shell, hence the explicit exit.
+  trap restore EXIT
+  trap 'exit 143' HUP INT TERM
+  "$@"
+)
+
+# The PR checks' entry point: the edgli run.sh would test, without building anything.
+pin_deps() {
   local sha
   companion_refs || return 1
-  line_refs || return 1
+  EDGLI_REF="${EDGLI_REF:-main}"
   sha="$(resolve_sha hoprnet/edge-client "${EDGLI_REF}")"
   [ -n "${sha}" ] || {
     echo "could not resolve edge-client ref '${EDGLI_REF}'" >&2
@@ -424,7 +414,7 @@ cluster_wait() {
 # both enter it before calling the runner, which used to open a second shell per scenario.
 # Extra args after the target are libtest filters; SKIP_SCENARIOS names tests to hold out.
 # The test binary builds in release unless TEST_PROFILE=debug: in debug, return_path at three hops
-# pins the test process at ~1800 % CPU and v5's in-process PIX Entry starves and over-fills.
+# pins the test process at ~1800 % CPU and the in-process PIX Entry starves and over-fills.
 # `list_scenarios` takes the same profile, so listing and running share one binary.
 cargo_it() {
   local target="${1:?usage: cargo_it <test-target> [filter...]}"
@@ -444,10 +434,10 @@ cargo_it() {
     --no-fail-fast -- --include-ignored --test-threads=1 ${skips[@]+"${skips[@]}"} ${test_args[@]+"${test_args[@]}"}
 }
 
-# Runs LINE/TIER's suites on the chain the caller started, then prints the summary; non-zero if any
-# suite failed. Suites do not short-circuit, so a red run reports everything broken. v5 is tiered
-# (#65, docs/v5-test-matrix.md): `pr` gates merges on the happy paths, `nightly` runs the rest; v4
-# runs everything on either. PIX_BIN, a hoprd with the deposit pool, enables the PIX suites.
+# Runs TIER's suites on the chain the caller started, then prints the summary; non-zero if any
+# suite failed. Suites do not short-circuit, so a red run reports everything broken. Tiered
+# (#65, docs/test-matrix.md): `pr` gates merges on the happy paths, `nightly` runs the rest.
+# PIX_BIN, a hoprd with the deposit pool, enables the PIX suites.
 # `rotsee` needs a funded Gnosis identity and `profiling` emits traces, so neither is a suite here.
 run_tier() {
   local suite_rc=0 nodes_bin="${HOPRD_BIN}" mixed scenarios scenario held_out
@@ -455,7 +445,7 @@ run_tier() {
   IT_RESULTS="$(mktemp)" IT_STEP_LOG="$(mktemp)"
   export IT_RESULTS IT_STEP_LOG
 
-  in_tier() { [ "${LINE}" = v4 ] || [ "${TIER}" = "$1" ]; }
+  in_tier() { [ "${TIER}" = "$1" ]; }
   run_suite() { # target, then any scenarios to HOLD OUT of it
     local target="$1"
     shift
@@ -467,13 +457,10 @@ run_tier() {
     fi
   }
 
-  echo "running integration tests (binary chain, ${LINE}, tier ${TIER}) ..."
+  echo "running integration tests (binary chain, tier ${TIER}) ..."
   in_tier pr && run_suite integration
-  # v5 only: the scenario drives the embedded edgli, which the v4 dependency set does not carry.
-  [ "${LINE}" = v5 ] && in_tier pr && run_suite dead_last_hop
+  in_tier pr && run_suite dead_last_hop
   in_tier nightly && run_suite exit_origination
-  # Gated: `upload_survival` reproduces the sustained-upload return-path collapse and therefore
-  # FAILS against release/4.0 until the reply-opener LRU fix (hoprnet#8417) lands there.
 
   if [ -n "${PIX_BIN:-}" ]; then
     HOPRD_BIN="${PIX_BIN}"
@@ -509,29 +496,14 @@ run_tier() {
   fi
 
   # `return_path` last and on a fresh chain: its clusters leave nodes channelled but offline, and
-  # the scenarios kill nodes or cut links, so one cluster each. The tempering finding is held out on
-  # both lines: its busiest/least-busy ratio follows the run's live scores (1.27 to 4.47 over 40 v5
-  # runs against a bound of 3.0), so a red says nothing. The spread gate runs on v5, where it
-  # passed all 40 (busiest relayer at most 48 % against 50 %); v4 keeps it out, untested there.
-  #
-  # v4 runs the 1-hop scenarios only: it mitigates a dead relayer one hop deep (hoprnet#8498) and the
-  # 2- and 3-hop ones wait for the v5 fix. v5 runs them all in the nightly tier: the multi-hop
-  # scenarios need the dead-relayer recovery (hoprnet#8506, #8576, #8581) in edge-client's lock.
-  # The idle-Session outage is v5 only too: release/4.0 has neither the Entry's silence sustain that
-  # keeps the Exit supplied through it nor the Exit's hopr_surb_store_surbs_held it reads.
-  if [ "${LINE}" = v4 ] || in_tier nightly; then
+  # the scenarios kill nodes or cut links, so one cluster each. The tempering finding is held out:
+  # its busiest/least-busy ratio follows the run's live scores (1.27 to 4.47 over 40 runs against a
+  # bound of 3.0), so a red says nothing.
+  if in_tier nightly; then
     chain_stop
     chain_start
     scenarios="$(list_scenarios return_path)"
     held_out="return_paths_should_track_the_tempered_score"
-    if [ "${LINE}" = v4 ]; then
-      held_out="${held_out} return_paths_should_spread_across_distinct_relayers"
-      held_out="${held_out} a_two_hop_session_should_survive_exit_losing_its_return_relayer"
-      held_out="${held_out} a_two_hop_session_should_survive_relayer_loss"
-      held_out="${held_out} a_three_hop_session_should_survive_relayer_loss"
-      held_out="${held_out} a_three_hop_session_should_survive_a_stalling_relayer"
-      held_out="${held_out} an_idle_session_should_survive_a_long_common_mode_return_outage"
-    fi
     for scenario in ${scenarios}; do
       case " ${held_out} " in *" ${scenario} "*) continue ;; esac
       SCENARIOS="${scenario}" run_suite return_path
@@ -606,7 +578,7 @@ print_summary() {
   printf '═══════ summary ═══════\n%s\n' "${report}"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     local fence='```'
-    printf '### Integration (%s)\n%s\n%s\n%s\n' "${LINE:-}${TIER:+, ${TIER}}" "${fence}" "${report}" "${fence}" >>"${GITHUB_STEP_SUMMARY}"
+    printf '### Integration (%s)\n%s\n%s\n%s\n' "${TIER:-}" "${fence}" "${report}" "${fence}" >>"${GITHUB_STEP_SUMMARY}"
   fi
   if [ -n "${GITHUB_ENV:-}" ]; then
     {
@@ -672,7 +644,7 @@ pix_check_resume_window() {
 pix_build() {
   local src
   src="$(cd "${1:?usage: pix_build <hoprd-src>}" 2>/dev/null && pwd)" || {
-    echo "HOPRD_SRC '${1}' is not a directory — point it at a v5 hoprd checkout." >&2
+    echo "HOPRD_SRC '${1}' is not a directory — point it at a hoprd checkout." >&2
     return 2
   }
   echo "building PIX-enabled hoprd + hoprd-localcluster from ${src}"
@@ -696,8 +668,8 @@ pix_build() {
 # They go to `<hoprd>/target/trace/`, apart from a normal release build. The settings and the exact
 # hopr-* dependency revisions are written next to them in `trace-build.txt`.
 #
-# Args: <hoprd-src> [expected-branch]. With an expected branch (the release line's `hoprd_ref`),
-# a checkout on another branch is reported, because the binaries would not match that line.
+# Args: <hoprd-src> [expected-branch]. With an expected branch (the justfile's `hoprd_ref`),
+# a checkout on another branch is reported, because the binaries would not match what CI builds.
 trace_build() {
   local src expected_ref="${2:-}"
   src="$(cd "${1:?usage: trace_build <hoprd-src> [expected-branch]}" 2>/dev/null && pwd)" || {
@@ -709,12 +681,12 @@ trace_build() {
   branch="$(git -C "${src}" rev-parse --abbrev-ref HEAD 2>/dev/null)"
   rev="$(git -C "${src}" rev-parse HEAD 2>/dev/null)"
   git -C "${src}" diff --quiet HEAD 2>/dev/null || dirty="-dirty"
-  # A detached checkout (e.g. a worktree of origin/release/4.1) has no branch name; it matches
-  # the line when it is at the tip of the remote branch.
+  # A detached checkout (e.g. a worktree of origin/main) has no branch name; it matches the
+  # expected branch when it is at the tip of the remote one.
   [ "${branch}" = HEAD ] && branch="(detached)"
   if [ -n "${expected_ref}" ] && [ "${branch}" != "${expected_ref}" ] &&
     [ "${rev}" != "$(git -C "${src}" rev-parse --verify -q "origin/${expected_ref}" 2>/dev/null)" ]; then
-    echo "note: ${src} is on '${branch}', not '${expected_ref}' (this line's hoprd branch)." >&2
+    echo "note: ${src} is on '${branch}', not '${expected_ref}' (the expected hoprd branch)." >&2
   fi
   echo "building hoprd + hoprd-localcluster with TRACE logs from ${src} (${branch} ${rev:0:10}${dirty})"
   (
@@ -757,7 +729,7 @@ warn_if_trace_capped() {
   find "${dir}" -name '*.log' ${newer[@]+"${newer[@]}"} -exec grep -qs 'the static max level is' {} \; -print |
     grep -q . || return 0
   echo "note: RUST_LOG asks for TRACE, but some binaries were built without TRACE logs." >&2
-  echo '      Run `just integration-trace` to build hoprd with TRACE logs.' >&2
+  echo "      Run \`just integration-trace\` to build hoprd with TRACE logs." >&2
 }
 
 # What "the state" is, in one place. Was four divergent lists. Under IT_TMP_ROOT, which CI sets
