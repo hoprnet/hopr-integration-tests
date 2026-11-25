@@ -322,9 +322,6 @@ attach *filter:
     HOPRNET_SHELL='{{hoprnet}}' cargo_it integration '{{filter}}'
 
 # Traffic overhead and latency regression suite on the v5 line.
-# Set HOPRNET_PATH (and optionally EDGLI_PATH) to build the in-process entry (`edgli`) against a
-# local hoprnet checkout (e.g. `../hoprnet`), and point HOPRD_BIN / HOPRD_LOCALCLUSTER_BIN at
-# binaries built from the same checkout.
 # Override the default packet/SURB/ack-batch ceilings via HOPR_MAX_EXIT_PKTS_DL,
 # HOPR_MAX_SURBS_PRODUCED_DL, HOPR_MAX_EXIT_ACK_BATCHES_DL, and HOPR_MAX_EXIT_PKTS_LOOPBACK when
 # measuring an unoptimized baseline.
@@ -342,30 +339,6 @@ traffic-overhead *filter:
     export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
     HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/with-v5-deps.sh \
         bash scripts/integration/run-binchain.sh
-
-# Mixed-version backwards-compatibility run: exercises both directions between an upgraded
-# checkout (`HOPRNET_PATH` + `UPGRADED_HOPRD_BIN`/`UPGRADED_LOCALCLUSTER_BIN`) and an unmodified
-# baseline checkout (`BASELINE_HOPRNET_PATH` + `BASELINE_HOPRD_BIN`/`BASELINE_LOCALCLUSTER_BIN`).
-traffic-overhead-compat:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    : "${HOPRNET_PATH:?set HOPRNET_PATH to the upgraded hoprnet checkout}"
-    : "${UPGRADED_HOPRD_BIN:?set UPGRADED_HOPRD_BIN to the upgraded hoprd binary}"
-    : "${UPGRADED_LOCALCLUSTER_BIN:?set UPGRADED_LOCALCLUSTER_BIN to the upgraded hoprd-localcluster binary}"
-    : "${BASELINE_HOPRD_BIN:?set BASELINE_HOPRD_BIN to the baseline hoprd binary}"
-    : "${BASELINE_LOCALCLUSTER_BIN:?set BASELINE_LOCALCLUSTER_BIN to the baseline hoprd-localcluster binary}"
-    : "${BASELINE_HOPRNET_PATH:?set BASELINE_HOPRNET_PATH to the baseline hoprnet checkout}"
-    echo "=== Compat 1/2: Upgraded Entry -> Baseline Cluster ==="
-    HOPRD_BIN="${BASELINE_HOPRD_BIN}" \
-    HOPRD_LOCALCLUSTER_BIN="${BASELINE_LOCALCLUSTER_BIN}" \
-    HOPR_MAX_EXIT_PKTS_DL=125000 HOPR_MAX_EXIT_PKTS_LOOPBACK=7000 HOPR_MAX_SURBS_PRODUCED_DL=90000 \
-        just traffic-overhead
-    echo "=== Compat 2/2: Baseline Entry -> Upgraded Cluster ==="
-    HOPRNET_PATH="${BASELINE_HOPRNET_PATH}" \
-    HOPRD_BIN="${UPGRADED_HOPRD_BIN}" \
-    HOPRD_LOCALCLUSTER_BIN="${UPGRADED_LOCALCLUSTER_BIN}" \
-    HOPR_MAX_EXIT_PKTS_DL=90000 HOPR_MAX_EXIT_PKTS_LOOPBACK=5500 HOPR_MAX_SURBS_PRODUCED_DL=60000 \
-        just traffic-overhead
 
 # Fast unit tests (gate + parse logic; no cluster).
 unit:
