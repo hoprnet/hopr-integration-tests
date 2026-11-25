@@ -358,6 +358,26 @@ impl Transfer {
         Some((arrived, window_records.len()))
     }
 
+    /// When each write that did not come back whole was offered, in seconds since the pump started:
+    /// a write counts as lost if any of its records is missing. Empty for an unphased pump.
+    pub fn lost_writes(&self) -> Vec<f64> {
+        if self.arrived_records.is_empty() {
+            return Vec::new();
+        }
+        let mut previous = 0;
+        self.offered
+            .iter()
+            .filter_map(|&(at, cumulative)| {
+                let records = previous / RECORD_SIZE..cumulative / RECORD_SIZE;
+                previous = cumulative;
+                let lost = records
+                    .into_iter()
+                    .any(|i| !self.arrived_records.get(i).copied().unwrap_or(false));
+                lost.then_some(at)
+            })
+            .collect()
+    }
+
     /// Seconds until throughput first sustains `target_mbps` over a `window`.
     ///
     /// This is the statistic a recovery target is actually about: how long the transfer stayed
@@ -1028,6 +1048,21 @@ mod tests {
             "records 60..100 were offered after +7 s; the odd ones from 90 on are lost"
         );
         assert_eq!(t.late_window_records(Duration::from_secs(11)), None);
+    }
+
+    #[test]
+    fn lost_writes_should_list_the_offer_time_of_every_write_missing_a_record() {
+        let mut t = transfer(10.0, &[]);
+        t.offered = (1..=10).map(|s| (s as f64, s * 10 * RECORD_SIZE)).collect();
+        t.arrived_records = (0..100).map(|i| i != 35 && i < 90).collect();
+
+        assert_eq!(t.lost_writes(), vec![4.0, 10.0]);
+
+        t.arrived_records.clear();
+        assert!(
+            t.lost_writes().is_empty(),
+            "an unphased pump has no records"
+        );
     }
 
     /// One megabyte per arrival, one arrival per second, from `from` to `to` inclusive.

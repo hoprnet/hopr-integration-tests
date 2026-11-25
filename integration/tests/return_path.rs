@@ -985,6 +985,62 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
             "entry graph after the held load:\n{}",
             env.graph_report().await
         );
+        // Diagnostic, off by default. With `HOPRD_HEAL_SECS=<n>` the cut is lifted after the held
+        // load and the same paced load is offered for another n seconds. The log then shows whether
+        // the relayer comes back: the entry's `relayer revived by a reply` line against `healed`
+        // below, and the victim's share of the return packets. Nothing here is gated.
+        let heal_secs = std::env::var("HOPRD_HEAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        if heal_secs > 0 && topology.cut_exit_link {
+            env.cluster()?.restore_links()?;
+            let healed_after_fault = fault_at.elapsed();
+            tracing::info!(
+                "healed: the exit link is restored {:.0} s after the fault",
+                healed_after_fault.as_secs_f64()
+            );
+            drain_until_quiet(&mut rx, DRAIN_QUIET, "steady").await;
+            let bytes = (offered_mbps * 1_000_000.0 * heal_secs as f64) as usize;
+            let heal = pump_and_measure(
+                &mut rx,
+                &mut tx,
+                &candidates,
+                &tagged_payload(HEAL_PHASE, bytes),
+                "heal",
+                PumpOpts {
+                    pace: pace_for_rate_with_chunk(offered_mbps, STEADY_CHUNK),
+                    phase: Some(HEAL_PHASE),
+                    chunk: Some(STEADY_CHUNK),
+                    idle_budget: Some(SURVIVAL_IDLE_BUDGET),
+                    tail_grace: Some(SURVIVAL_TAIL_GRACE),
+                    ..PumpOpts::default()
+                },
+            )
+            .await;
+            match heal {
+                Ok((transfer, spread)) => {
+                    let lost = transfer.lost_writes();
+                    let victim_packets = spread
+                        .per_relayer
+                        .iter()
+                        .find(|(address, _)| *address == victim.address)
+                        .map_or(0, |&(_, packets)| packets);
+                    tracing::info!(
+                        "heal phase: {:.2}% of the load back, {} of {} writes lost (s after the heal: {}); \
+                         victim {} forwarded {victim_packets} of {} return packets ({:.1}%)",
+                        transfer.arrival_pct(),
+                        lost.len(),
+                        transfer.offered.len(),
+                        format_offer_times(&lost, 0.0, 100),
+                        victim.address,
+                        spread.total,
+                        victim_packets as f64 / spread.total.max(1) as f64 * 100.0,
+                    );
+                }
+                Err(error) => tracing::warn!("the heal phase failed: {error:#}"),
+            }
+        }
         held?;
     }
     Ok(())
@@ -992,6 +1048,23 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
 
 /// Phase tag for the load held on after recovery.
 const STEADY_PHASE: u8 = 5;
+
+/// Phase tag for the load offered after the exit link is restored.
+const HEAL_PHASE: u8 = 6;
+
+/// `+123.4` for each offer time shifted by `offset`, space separated, at most `limit` of them.
+fn format_offer_times(times: &[f64], offset: f64, limit: usize) -> String {
+    let mut list = times
+        .iter()
+        .take(limit)
+        .map(|at| format!("+{:.1}", at + offset))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if times.len() > limit {
+        list.push_str(" ...");
+    }
+    list
+}
 
 /// Upstream `PENDING_SURB_TTL`: a dead verdict lapses into probation once this has passed without
 /// a reply through the relayer still due.
@@ -1049,6 +1122,26 @@ async fn hold_steady_past_probation(
         },
     )
     .await?;
+
+    let lost = steady.lost_writes();
+    let at_fault = started_after_fault.as_secs_f64();
+    tracing::info!(
+        "held load: {} writes offered, {} lost; lost at (s after the fault): {}",
+        steady.offered.len(),
+        lost.len(),
+        format_offer_times(&lost, at_fault, 600)
+    );
+    let mut per_30s = vec![
+        0usize;
+        steady
+            .offered
+            .last()
+            .map_or(0, |&(at, _)| ((at_fault + at) / 30.0) as usize + 1)
+    ];
+    for at in &lost {
+        per_30s[((at_fault + at) / 30.0) as usize] += 1;
+    }
+    tracing::info!("held load: lost writes per 30 s from the fault: {per_30s:?}");
 
     let offer_seconds = steady
         .offer_completed_at

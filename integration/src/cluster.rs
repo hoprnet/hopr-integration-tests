@@ -368,6 +368,22 @@ impl ClusterSummary {
         self.append_link_rule("blocked_links", a, b, "")
     }
 
+    /// Lifts every cut made with [`cut_link`](Self::cut_link): the latency relays re-read the file, so
+    /// emptying it restores the links within their poll interval (250 ms).
+    pub fn restore_links(&self) -> anyhow::Result<()> {
+        let data_dir = self
+            .log_dir
+            .as_ref()
+            .and_then(|d| d.parent())
+            .ok_or_else(|| anyhow::anyhow!("cluster data dir unknown; cannot restore the links"))?;
+        std::fs::write(data_dir.join("blocked_links"), b"").context("writing blocked_links")?;
+        tracing::info!(
+            file = "blocked_links",
+            "lifted every link cut between cluster nodes"
+        );
+        Ok(())
+    }
+
     /// Stalls all traffic between `a` and `b`: for `stall` out of every `period` each datagram is
     /// held an extra `delay`, so the link trickles without ever going silent. Needs a latency profile.
     pub fn stall_link(
