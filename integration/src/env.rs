@@ -135,15 +135,20 @@ impl NetTuning {
                 min_ack_rate: 0.1, // local cluster probes succeed
                 ..Default::default()
             },
-            probe: cluster::requested_probe_interval().map_or_else(
-                ProbeConfig::default,
-                |interval| ProbeConfig {
-                    timeout: interval,
-                    interval,
-                    recheck_threshold: interval * 10,
-                    ..Default::default()
-                },
-            ),
+            // 40 probes/s, twice the 50 ms default; with probe share 0.4 it held return_path's
+            // three-hop stalling relayer 8/8 (recovery 2.0-7.8 s of 15 s).
+            probe: ProbeConfig {
+                pace: Duration::from_millis(25),
+                ..cluster::requested_probe_interval().map_or_else(
+                    ProbeConfig::default,
+                    |interval| ProbeConfig {
+                        timeout: interval,
+                        interval,
+                        recheck_threshold: interval * 10,
+                        ..Default::default()
+                    },
+                )
+            },
             strategy_tick: Duration::from_secs(10),
             channel_open_timeout: LOCAL_CHANNEL_OPEN_TIMEOUT,
         }
@@ -770,12 +775,6 @@ async fn boot_edgli(
         |s: EdgliInitState| tracing::info!(?s, "edgli init"),
     )
     .await?;
-    // Probe dial (hoprnet#8717) 2x the 20 probes/s base, with probe share 0.4: swept from dial 1 up, the
-    // first pair to hold return_path's three-hop stalling relayer 8/8 (recovery 4.7-13.9 s of 15 s).
-    edgli.set_probing_dial(Some(
-        edgli::Dial::try_from(2.0).map_err(anyhow::Error::msg)?,
-    ));
-
     tracing::info!("waiting for Edgli to connect to ≥2 peers");
     await_edgli_peers_connected(&edgli, 2).await?;
     if let Some(nodes) = cluster_nodes {
@@ -994,7 +993,7 @@ fn edgli_config(
         ..Default::default()
     };
     // Slots probes keep while session data is queued (hoprnet#8705, default 0.1). Entry only; see
-    // the probe dial in boot_edgli.
+    // the probe pace in NetTuning::local.
     cfg.protocol.output_priority.probe_share = 0.4;
     cfg
 }
