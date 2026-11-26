@@ -178,6 +178,8 @@ struct Topology {
     /// Stall every cluster link of the victim instead: alive and connected everywhere, slow in any
     /// position of a path.
     stall_victim: bool,
+    /// Idle stretch between the drained baseline and the kill.
+    idle_before_kill: Duration,
 }
 
 /// Replies travel over one relay; the request path is direct.
@@ -191,6 +193,7 @@ const RETURN_PATH: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    idle_before_kill: Duration::ZERO,
 };
 
 /// The mirror image: requests travel over one relay, replies come back directly.
@@ -207,6 +210,7 @@ const FORWARD_PATH: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    idle_before_kill: Duration::ZERO,
 };
 
 /// One relay in each direction: what a real deployment runs.
@@ -222,6 +226,7 @@ const SYMMETRIC: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    idle_before_kill: Duration::ZERO,
 };
 
 /// Replies over one relay whose link to the exit is cut while Edgli still reaches it.
@@ -233,6 +238,7 @@ const RETURN_EXIT_CUT: Topology = Topology {
     cut_exit_link: true,
     stall_exit_link: false,
     stall_victim: false,
+    idle_before_kill: Duration::ZERO,
 };
 
 /// As [`RETURN_EXIT_CUT`] over two-hop return paths.
@@ -244,6 +250,7 @@ const TWO_HOP_RETURN_EXIT_CUT: Topology = Topology {
     cut_exit_link: true,
     stall_exit_link: false,
     stall_victim: false,
+    idle_before_kill: Duration::ZERO,
 };
 
 /// Replies over one relay whose link to the exit stalls periodically: alive, connected, too slow.
@@ -255,6 +262,7 @@ const RETURN_EXIT_STALL: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: true,
     stall_victim: false,
+    idle_before_kill: Duration::ZERO,
 };
 
 /// Two relays each way, busiest one killed: the victim can sit anywhere on either path,
@@ -267,6 +275,7 @@ const TWO_HOP_SYMMETRIC: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    idle_before_kill: Duration::ZERO,
 };
 
 /// Three relays each way: a killed relayer sits in the middle or last position of most paths
@@ -279,6 +288,24 @@ const THREE_HOP_SYMMETRIC: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    idle_before_kill: Duration::ZERO,
+};
+
+/// Idle stretch before the kill in the idle variants.
+const IDLE_BEFORE_KILL: Duration = Duration::from_secs(150);
+
+/// As [`TWO_HOP_SYMMETRIC`], with the session idle before the kill.
+const TWO_HOP_SYMMETRIC_IDLE: Topology = Topology {
+    direction: "two-hop-symmetric-idle",
+    idle_before_kill: IDLE_BEFORE_KILL,
+    ..TWO_HOP_SYMMETRIC
+};
+
+/// As [`THREE_HOP_SYMMETRIC`], with the session idle before the kill.
+const THREE_HOP_SYMMETRIC_IDLE: Topology = Topology {
+    direction: "three-hop-symmetric-idle",
+    idle_before_kill: IDLE_BEFORE_KILL,
+    ..THREE_HOP_SYMMETRIC
 };
 
 /// Three relays each way with the busiest one stalling on every link.
@@ -290,6 +317,7 @@ const THREE_HOP_STALL: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: true,
+    idle_before_kill: Duration::ZERO,
 };
 
 /// Warm-up payload: enough packets to make the relayer histogram unambiguous, no more.
@@ -749,6 +777,17 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
     // session sustains. Never offer more than the paced baseline carried.
     let offered_mbps = offered_mbps.min(baseline.mbps);
 
+    if !topology.idle_before_kill.is_zero() {
+        let idle = topology.idle_before_kill;
+        tracing::info!(?idle, "holding the session idle before the kill");
+        let late = drain_until_quiet(&mut rx, idle, "idle-before-kill").await;
+        tracing::info!(
+            ?idle,
+            late_bytes = late,
+            "the session was idle before the kill"
+        );
+    }
+
     let busiest = spread
         .busiest()
         .ok_or_else(|| anyhow::anyhow!("no relayer forwarded anything; nothing to kill"))?;
@@ -931,6 +970,20 @@ async fn a_two_hop_session_should_survive_relayer_loss() -> anyhow::Result<()> {
 #[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
 async fn a_three_hop_session_should_survive_relayer_loss() -> anyhow::Result<()> {
     session_should_survive_relayer_loss(THREE_HOP_SYMMETRIC).await
+}
+
+/// Two relays each way, the busiest one killed after a 150 s idle.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn a_two_hop_session_should_survive_relayer_loss_after_an_idle() -> anyhow::Result<()> {
+    session_should_survive_relayer_loss(TWO_HOP_SYMMETRIC_IDLE).await
+}
+
+/// Three relays each way, the busiest one killed after a 150 s idle.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn a_three_hop_session_should_survive_relayer_loss_after_an_idle() -> anyhow::Result<()> {
+    session_should_survive_relayer_loss(THREE_HOP_SYMMETRIC_IDLE).await
 }
 
 /// Three relays each way with the busiest one stalling in every position.
