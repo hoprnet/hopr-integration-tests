@@ -41,7 +41,7 @@ and the fill aims at 540 s.
 | E12 | `return_path::return_paths_should_track_the_tempered_score`                             | #82          | held out | L 0.4–0.6m (as E11)                                       | 5     | – (finding, hoprnet#8331)                                                                  |
 | E13 | `return_path::an_idle_session_should_survive_a_long_common_mode_…`                      | #109         | nightly  | L 3.2–3.7m                                                | 5     | E6 after 35 s idle, 40 s, no settle                                                        |
 | F1  | `pix_relay_loss::a_pix_cycle_survives_a_relay_death_on_both_paths`                      | #83          | nightly  | #83 7.5m (≈24m at production size)                        | 3     | kill half the return relays (1,1)                                                          |
-| F2  | `pix_relay_loss::…_return_relay_death_with_the_forward_path_intact`                     | #83          | nightly  | #83 7.6m                                                  | 3     | (0,1)                                                                                      |
+| F2  | `pix_relay_loss::…_keeps_completing_cycles_after_a_return_relay_death` (+ former F2)    | #83          | nightly  | CI 17.5m (was 4.9m + 17.5m)                               | 3     | (0,1), 3 cycles; absorbed `…_forward_path_intact`                                          |
 | F3  | `pix_relay_loss::…_deep_return_relay_death_and_the_generation_wipe`                     | #83          | nightly  | #83 8.6m                                                  | 4     | (0,2)                                                                                      |
 | G1  | `pix_resume::a_session_resumed_within_the_window_keeps_its_paid_cycle`                  | hoprnet#8711 | nightly  | L 7.7–7.8m                                                | 3     | clean close, re-open under the same pseudonym at once                                      |
 | G2  | `pix_resume::a_session_resumed_after_a_pause_inside_the_window_continues`               | hoprnet#8711 | nightly  | L 5.9m                                                    | 3     | as G1 after 0.6 x the resume window                                                        |
@@ -52,12 +52,49 @@ G1-G4 were measured locally, twice each, cluster bring-up included. They need a 
 takes `resume_window` in `--pix-config` (hoprd#293) and a hoprnet with the resume window (hoprnet#8711)
 in both the Exit and the edgli Entry; the tier fails on a localcluster without the key.
 
-Not in CI: upload_survival, rotsee, profiling.
+Not in CI: upload_survival (T24 with a shrunk opener cache; fails end to end on hoprnet master
+`2acc3a5` although it carries hoprnet#8417: 15 % echoed, 13 s stall), rotsee, profiling.
 
-| Set (test time, build excluded) | Before                   | After                                          |
-| ------------------------------- | ------------------------ | ---------------------------------------------- |
-| PR label `run-integration`      | 75m (~110m with #82/#83) | **pr: 26m in CI**                              |
-| nightly tier                    | –                        | ~41m, ~104m with #82/#83/#109, ~132m with #116 |
+## gnosis_vpn-testenv tests (#49)
+
+`wireguard.rs` runs gnosis_vpn-testenv's diagnostic tests on the HOPR layer: gnosis_vpn-client's
+WireGuard session (`IntegrationEnv::open_vpn_session`: 1 hop, `Segmentation | NoDelay`, maxed-out
+SURBs, the ping-to-main SURB ramp, robust flow control, PIX off). Its far end echoes, sinks or pushes
+WireGuard-sized datagrams, or terminates TCP: smoltcp runs at both ends of the tunnel, one IP packet
+per 1452 B datagram, with ICMP pings next to the transfer. Tests use testenv's thresholds. One
+3-node cluster with a flat 1 ms latency profile, so `delay_link` can impair a link at runtime.
+
+| testenv                                       | `wireguard::`                                                            |
+| --------------------------------------------- | ------------------------------------------------------------------------ |
+| T04 fixed-throughput, T05 loaded-latency, T06 upload and download arms | `short_tcp_transfers_should_keep_their_rate_and_latency` (20 MB each way, **pr**), `long_tcp_…` (200, 500 MB, nightly) |
+| T07 cold-start, T15 warmup-knee               | `a_fresh_session_should_reach_full_rate_within_its_ramp`                 |
+| T09 impairment-ladder                         | `return_relays_of_unequal_latency_should_carry_the_session` (equal 25/50 ms, gap 50, far 100; the flat rung is every other test) |
+| T10 forced-reconnect                          | `a_session_reopened_under_inbound_traffic_should_carry_it`               |
+| T11 capability-matrix                         | `the_exit_should_shape_exactly_the_rate_controlled_sessions`             |
+| T12 balancer-sweep                            | `every_surb_upstream_should_carry_downloads`                             |
+| T18 capacity-ceiling, T06 after-bulk arm      | `a_download_after_transfers_should_hold_up_to_the_capacity_knee` (one session: 3 transfers, then the rungs) |
+| T19 background-load                           | `a_trickle_on_another_session_should_not_starve_a_transfer`              |
+| T22 concurrent-clients                        | `concurrent_sessions_should_share_the_exit` (1 and 10 TCP downloads)     |
+| T23 sustained-soak, T24 sustained-upload, T06 echo and idle arms, T07's 75 s idle finding | `a_long_session_should_hold_its_loss_and_memory` (600 s call, a transfer a minute, 3 Mbit/s TCP upload, a call after 120 s idle) |
+| T31 frame-forensics                           | every `wireguard` datagram stream: a read that is not one whole datagram fails it |
+
+TCP transfers pass on rate (≥ 7 Mbit/s), no gap over 5 s, a mean ping RTT under 1.5 s and a jitter
+(mean change between consecutive RTTs) between one mixer's mean delay and 250 ms.
+
+Already covered here before #49: T08's split (E11), T20 (E1–E13; its packet-loss ladder needs a loss
+rule the localcluster relays do not have), T30 (A1).
+
+T13 (MTU sweep) needs no cluster: whole datagrams per tunnel MTU are a Session property, so it
+goes to hoprnet's `transport/session` tests (hoprnet#8716).
+
+Left in testenv, because the cause is not in the HOPR layer or the test is not a transport test: T01,
+T02, T03, T14, T16, T17, T21 (stack and client state), the client-side halves of T10 (WireGuard peer
+removal, liveness watchdog) and T12 (the ping-tier mask), T25–T29, T32, T33 (runbook and production).
+
+| Set (test time, build excluded) | Before                   | After                                                                   |
+| ------------------------------- | ------------------------ | ----------------------------------------------------------------------- |
+| PR label `run-integration`      | 75m (~110m with #82/#83) | **pr: 26m in CI**                                                       |
+| nightly tier                    | –                        | ~41m, ~104m with #82/#83/#109, ~132m with #116, ~198m with `wireguard`  |
 
 ## Features
 
@@ -128,15 +165,18 @@ S = strict assertion, w = exercised but weakly or not asserted.
 
 ## Tiers
 
-| Tier      | Trigger                                                      | Suites                                                                                             |
-| --------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| `pr`      | `run-integration` label, merge queue, dispatches, `schedule` | integration, dead_last_hop, pix, pix_shapes mixed                                                  |
-| `nightly` | `run-integration-nightly` label, `schedule`                  | exit_origination, the other four pix_shapes, return_path (all but E12), pix_relay_loss, pix_resume |
+| Tier      | Trigger                                                      | Suites                                                                                                        |
+| --------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `pr`      | `run-integration` label, merge queue, dispatches, `schedule` | integration, dead_last_hop, pix, pix_shapes mixed, wireguard short TCP                                        |
+| `nightly` | `run-integration-nightly` label, `schedule`                  | exit_origination, the other four pix_shapes, return_path (all but E12), pix_relay_loss, pix_resume, wireguard |
 
 - `run.sh` picks the suites from `TIER`.
+- The `nightly` tier runs as two jobs on two runners: `SHARD=a` (exit_origination, wireguard,
+  pix_relay_loss, ~90m) and `SHARD=b` (pix_shapes, return_path, pix_resume, ~105m). Every trigger of
+  `nightly`, the label included, gets both. No `SHARD` runs the whole tier.
 - Each tier is its own job. The merge queue and dispatches run `pr` only; the schedule runs both
   tiers, and the label runs `nightly` on a PR before it is queued. The full table is in the README, under CI.
-- The pass marker's fingerprint carries the tier, so a merge gate never reuses a nightly green.
+- The pass marker's fingerprint carries the tier and shard, so a merge gate never reuses a nightly green.
 
 ## Measured locally
 

@@ -66,6 +66,21 @@ const PIX_RESPONSE_BUFFER_BYTES: u64 = 32_000;
 /// caps the rate rather than the depth.
 const PIX_MAX_SURB_UPSTREAM_BITS: u64 = 20_000_000;
 
+/// gnosis_vpn-client's SURB tiers as (response buffer bytes, SURB upstream bits/s): `SurbBalancing::default`.
+pub const VPN_PING_TIER: (u64, u64) = (1_000_000, 512_000);
+pub const VPN_MAIN_TIER: (u64, u64) = (10_000_000, 16_000_000);
+/// The client's ping→main ramp: 20 s at one step a second (`SurbRampOptions::default`).
+const VPN_RAMP_STEPS: u64 = 20;
+
+/// gnosis_vpn-lib's `to_surb_balancer_config`.
+pub fn vpn_surb_tier((buffer_bytes, upstream_bits): (u64, u64)) -> SurbBalancerConfig {
+    SurbBalancerConfig {
+        target_surb_buffer_size: buffer_bytes / SESSION_MTU as u64,
+        max_surbs_per_sec: upstream_bits / (8 * SURB_SIZE as u64),
+        ..SurbBalancerConfig::default()
+    }
+}
+
 /// Local checks are cheap in-process/loopback calls; a coarse interval only adds dead time.
 const LOCAL_POLL: Duration = Duration::from_millis(500);
 const PEER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -120,15 +135,20 @@ impl NetTuning {
                 min_ack_rate: 0.1, // local cluster probes succeed
                 ..Default::default()
             },
-            probe: cluster::requested_probe_interval().map_or_else(
-                ProbeConfig::default,
-                |interval| ProbeConfig {
-                    timeout: interval,
-                    interval,
-                    recheck_threshold: interval * 10,
-                    ..Default::default()
-                },
-            ),
+            // 40 probes/s, twice the 50 ms default; with probe share 0.4 it held return_path's
+            // three-hop stalling relayer 8/8 (recovery 2.0-7.8 s of 15 s).
+            probe: ProbeConfig {
+                pace: Duration::from_millis(25),
+                ..cluster::requested_probe_interval().map_or_else(
+                    ProbeConfig::default,
+                    |interval| ProbeConfig {
+                        timeout: interval,
+                        interval,
+                        recheck_threshold: interval * 10,
+                        ..Default::default()
+                    },
+                )
+            },
             strategy_tick: Duration::from_secs(10),
             channel_open_timeout: LOCAL_CHANNEL_OPEN_TIMEOUT,
         }
@@ -186,6 +206,7 @@ impl IntegrationEnv {
 
         let (dest_zero_hop, dest_one_hop) = select_session_targets(&edgli).await?;
         let dest_one_hop = exit.unwrap_or(dest_one_hop);
+        await_edgli_route_settled(&edgli, dest_one_hop).await?;
 
         Ok(Self {
             edgli,
@@ -234,6 +255,7 @@ impl IntegrationEnv {
         .await?;
 
         let (dest_zero_hop, dest_one_hop) = select_session_targets(&edgli).await?;
+        await_edgli_route_settled(&edgli, dest_one_hop).await?;
 
         Ok(Self {
             edgli,
@@ -426,6 +448,7 @@ impl IntegrationEnv {
         balance_surbs: bool,
     ) -> anyhow::Result<(HoprSession, Address)> {
         let dest = self.dest_for(forward_hops)?;
+        let main = vpn_surb_tier(VPN_MAIN_TIER);
         let (session, _) = self
             .edgli
             .connect_to(
@@ -446,16 +469,14 @@ impl IntegrationEnv {
                         target_surb_buffer_size: std::env::var("HOPRD_SURB_TARGET")
                             .ok()
                             .and_then(|v| v.parse().ok())
-                            .unwrap_or(10_000_000 / SESSION_MTU as u64),
+                            .unwrap_or(main.target_surb_buffer_size),
                         // Experiment knob: HOPRD_SURB_MAX_PER_SEC caps the mint rate (default: the
                         // 16 Mb/s SURB upstream gnosis_vpn-client provisions).
                         max_surbs_per_sec: std::env::var("HOPRD_SURB_MAX_PER_SEC")
                             .ok()
                             .and_then(|v| v.parse().ok())
-                            .unwrap_or(16_000_000 / (8 * SURB_SIZE as u64)),
-                        // Everything else stays at the default, because that is what the client
-                        // does: `to_surb_balancer_config` in gnosis_vpn-lib sets exactly these two
-                        // fields from the same formulas and then `..Default::default()`.
+                            .unwrap_or(main.max_surbs_per_sec),
+                        // Everything else stays at the default, as in `vpn_surb_tier`.
                         //
                         // In particular `sustain_on_return_path_loss` is left off. It was set here
                         // once, on the reasoning that a lost return relayer reads as a well-stocked
@@ -611,6 +632,66 @@ impl IntegrationEnv {
         Ok((session, dest))
     }
 
+    /// gnosis_vpn-client's WireGuard data session, 1 hop each way (`connection/up/runner.rs`).
+    /// Opens on the ping SURB tier and slews to `main_tier` over the client's 20 s ramp, 1 s a step.
+    /// PIX stays off, as testenv runs these tests, so a failure is attributable to the transport alone.
+    pub async fn open_vpn_session(
+        &self,
+        target: SessionTarget,
+        capabilities: edgli::hopr_lib::exports::transport::SessionCapabilities,
+        main_tier: SurbBalancerConfig,
+    ) -> anyhow::Result<HoprSession> {
+        use edgli::hopr_lib::exports::transport::PACKET_PAYLOAD_SIZE;
+
+        let ping_tier = vpn_surb_tier(VPN_PING_TIER);
+        let (session, configurator) = self
+            .edgli
+            .connect_to(
+                self.dest_for(1)?,
+                target,
+                HoprSessionClientConfig {
+                    forward_path: HopRouting::try_from(1)?,
+                    return_path: HopRouting::try_from(1)?,
+                    capabilities,
+                    max_surbs_per_data_packet: PACKET_PAYLOAD_SIZE / SURB_SIZE,
+                    surb_management: Some(ping_tier),
+                    flow_control: Some(edgli::FlowControlConfig::robust()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        tokio::spawn(async move {
+            let lerp = |from: u64, to: u64, step: u64| {
+                (from as i128 + (to as i128 - from as i128) * step as i128 / VPN_RAMP_STEPS as i128)
+                    as u64
+            };
+            // An absolute schedule, so a late wake does not push the main tier past a caller's
+            // ramp wait.
+            let ramp_start = tokio::time::Instant::now();
+            for step in 1..=VPN_RAMP_STEPS {
+                tokio::time::sleep_until(ramp_start + Duration::from_secs(step)).await;
+                let next = SurbBalancerConfig {
+                    target_surb_buffer_size: lerp(
+                        ping_tier.target_surb_buffer_size,
+                        main_tier.target_surb_buffer_size,
+                        step,
+                    ),
+                    max_surbs_per_sec: lerp(
+                        ping_tier.max_surbs_per_sec,
+                        main_tier.max_surbs_per_sec,
+                        step,
+                    ),
+                    ..main_tier
+                };
+                if let Err(error) = configurator.update_surb_balancer_config(next) {
+                    tracing::debug!(%error, "SURB ramp stopped: the session is gone");
+                    return;
+                }
+            }
+        });
+        Ok(session)
+    }
+
     /// Unallocated wxHOPR in the entry's Safe — the float PIX deposits are paid from.
     ///
     /// The Safe and not the node's own account: since hopr-types 4.0.0 a deposit settles through
@@ -694,7 +775,6 @@ async fn boot_edgli(
         |s: EdgliInitState| tracing::info!(?s, "edgli init"),
     )
     .await?;
-
     tracing::info!("waiting for Edgli to connect to ≥2 peers");
     await_edgli_peers_connected(&edgli, 2).await?;
     if let Some(nodes) = cluster_nodes {
@@ -790,6 +870,59 @@ async fn boot_edgli(
     Ok((edgli, reactor))
 }
 
+/// How long a measured route must hold before the entry counts as settled.
+const ROUTE_SETTLED_FOR: Duration = Duration::from_secs(5);
+const ROUTE_SETTLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Waits until some relay carries a 1-hop route to `exit` both ways, every edge scored above zero.
+/// A booting entry's first loopbacks fail and read its relays as dead for ~20-30 s (edge-client#272),
+/// and a session opened meanwhile finds no path. Warns on timeout; the scenario decides.
+async fn await_edgli_route_settled(edgli: &Edgli, exit: Address) -> anyhow::Result<()> {
+    use edgli::hopr_lib::api::graph::{NetworkGraphView, traits::EdgeObservableRead};
+    use futures::StreamExt as _;
+
+    let key = |address: Address| -> anyhow::Result<_> {
+        edgli
+            .chain_api()
+            .chain_key_to_packet_key(&address)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("{address} has no packet key on chain"))
+    };
+    let (me, exit) = (key(edgli.me_onchain())?, key(exit)?);
+    let started = tokio::time::Instant::now();
+    let mut settled_since = None;
+    loop {
+        let graph = edgli.graph();
+        let measured = |from, to| {
+            graph
+                .edge(from, to)
+                .and_then(|obs| obs.score())
+                .is_some_and(|score| score > 0.0)
+        };
+        let relays: Vec<_> = graph.nodes().collect().await;
+        let routed = relays.iter().any(|relay| {
+            *relay != me
+                && *relay != exit
+                && measured(&me, relay)
+                && measured(relay, &exit)
+                && measured(&exit, relay)
+                && measured(relay, &me)
+        });
+        let now = tokio::time::Instant::now();
+        if !routed {
+            settled_since = None;
+        } else if now - *settled_since.get_or_insert(now) >= ROUTE_SETTLED_FOR {
+            tracing::info!(waited = ?started.elapsed(), "Edgli has a measured route to the exit");
+            return Ok(());
+        }
+        if started.elapsed() >= ROUTE_SETTLE_TIMEOUT {
+            tracing::warn!(%exit, "Edgli has no measured route to the exit; sessions may find no path");
+            return Ok(());
+        }
+        tokio::time::sleep(LOCAL_POLL).await;
+    }
+}
+
 /// Connector tuning every chain-touching path here needs.
 ///
 /// Left at the default it submits the transaction, waits for a confirmation blokli has not indexed
@@ -817,7 +950,7 @@ fn edgli_config(
             config::{StreamProtocolConfig, SurbPopOrder, SurbStoreConfig},
         },
     };
-    HoprLibConfig {
+    let mut cfg = HoprLibConfig {
         host: HostConfig {
             address: HostType::IPv4("0.0.0.0".to_string()),
             port: edge_p2p_port(),
@@ -858,7 +991,11 @@ fn edgli_config(
             module_address: *module_address,
         },
         ..Default::default()
-    }
+    };
+    // Slots probes keep while session data is queued (hoprnet#8705, default 0.1). Entry only; see
+    // the probe pace in NetTuning::local.
+    cfg.protocol.output_priority.probe_share = 0.4;
+    cfg
 }
 
 /// Rotsee configuration read from the environment.

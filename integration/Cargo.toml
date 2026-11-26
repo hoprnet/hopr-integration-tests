@@ -67,6 +67,16 @@ prof = ["dep:console-subscriber"]
 test-log = { version = "0.2", features = ["trace"] }
 # Perfetto/Chrome trace layer for tests/profiling.rs (only referenced under `prof`).
 tracing-chrome = "0.7"
+# tests/wireguard.rs: TCP over the tunnel, as gnosis_vpn-client's traffic mostly is.
+smoltcp = { version = "0.14", default-features = false, features = [
+  "std",
+  "medium-ip",
+  "proto-ipv4",
+  "socket-tcp",
+  "socket-tcp-cubic",
+  "socket-icmp",
+  "auto-icmp-echo-reply",
+] }
 
 # tokio-console build target for the `prof` profiling tests. hopr-lib forces
 # `tracing/release_max_level_debug`, compiling out TRACE callsites (incl. tokio's task

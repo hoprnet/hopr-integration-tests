@@ -440,12 +440,15 @@ cargo_it() {
 # PIX_BIN, a hoprd with the deposit pool, enables the PIX suites.
 # `rotsee` needs a funded Gnosis identity and `profiling` emits traces, so neither is a suite here.
 run_tier() {
-  local suite_rc=0 nodes_bin="${HOPRD_BIN}" mixed scenarios scenario held_out
+  local suite_rc=0 nodes_bin="${HOPRD_BIN}" mixed tcp scenarios scenario held_out
   export CHAIN_SHARED=1
   IT_RESULTS="$(mktemp)" IT_STEP_LOG="$(mktemp)"
   export IT_RESULTS IT_STEP_LOG
 
   in_tier() { [ "${TIER}" = "$1" ]; }
+  # The nightly runs as two shards on two runners, ~90 and ~105 min: a = exit_origination,
+  # wireguard, pix_relay_loss; b = pix_shapes, return_path, pix_resume. No SHARD runs both.
+  in_shard() { [ -z "${SHARD:-}" ] || [ "${SHARD}" = "$1" ]; }
   run_suite() { # target, then any scenarios to HOLD OUT of it
     local target="$1"
     shift
@@ -460,7 +463,11 @@ run_tier() {
   echo "running integration tests (binary chain, tier ${TIER}) ..."
   in_tier pr && run_suite integration
   in_tier pr && run_suite dead_last_hop
-  in_tier nightly && run_suite exit_origination
+  in_tier nightly && in_shard a && run_suite exit_origination
+  # gnosis_vpn-testenv's diagnostic tests on the client's session (#49). Short TCP transfers gate PRs.
+  tcp=short_tcp_transfers_should_keep_their_rate_and_latency
+  in_tier pr && SCENARIOS="${tcp}" run_suite wireguard
+  in_tier nightly && in_shard a && run_suite wireguard "${tcp}"
 
   if [ -n "${PIX_BIN:-}" ]; then
     HOPRD_BIN="${PIX_BIN}"
@@ -471,12 +478,14 @@ run_tier() {
       # The mixed shape also proves the production geometry completes a cycle, so it gates PRs.
       mixed=a_mixed_session_sustains_its_cycles
       in_tier pr && SCENARIOS="${mixed}" run_suite pix_shapes
-      in_tier nightly && run_suite pix_shapes "${mixed}"
+      in_tier nightly && in_shard b && run_suite pix_shapes "${mixed}"
       # Each scenario kills a cluster node, so one cluster each, like return_path.
-      if in_tier nightly; then
+      if in_tier nightly && in_shard a; then
         for scenario in $(list_scenarios pix_relay_loss); do
           SCENARIOS="${scenario}" run_suite pix_relay_loss
         done
+      fi
+      if in_tier nightly && in_shard b; then
         # Needs a localcluster that takes `resume_window` (hoprd#293).
         if pix_check_resume_window "${HOPRD_LOCALCLUSTER_BIN}"; then
           for scenario in $(list_scenarios pix_resume); do
@@ -499,7 +508,7 @@ run_tier() {
   # the scenarios kill nodes or cut links, so one cluster each. The tempering finding is held out:
   # its busiest/least-busy ratio follows the run's live scores (1.27 to 4.47 over 40 runs against a
   # bound of 3.0), so a red says nothing.
-  if in_tier nightly; then
+  if in_tier nightly && in_shard b; then
     chain_stop
     chain_start
     scenarios="$(list_scenarios return_path)"

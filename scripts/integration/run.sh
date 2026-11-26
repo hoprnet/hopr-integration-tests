@@ -13,6 +13,7 @@
 #   BLOKLI_REF       blokli ref override     (default: main)
 #   NIX_SYSTEM_SUFFIX    cross-build to this nix system (default: empty = build for this machine)
 #   TIER             pr | nightly — which suites run (default: pr)
+#   SHARD            a | b — half of the nightly tier, one runner each (default: empty = both)
 set -euo pipefail
 
 # shellcheck source=scripts/integration/lib.sh
@@ -31,6 +32,13 @@ case "${TIER}" in
 pr | nightly) ;;
 *)
   echo "unknown TIER '${TIER}' (pr | nightly)" >&2
+  exit 2
+  ;;
+esac
+case "${SHARD:-}" in
+"" | a | b) ;;
+*)
+  echo "unknown SHARD '${SHARD}' (a | b)" >&2
   exit 2
   ;;
 esac
@@ -93,7 +101,7 @@ fi
 # with the PR head's tree. The toolchain is left out: it is unpinned, so every run would miss.
 tree_of() { gh api "repos/hoprnet/$1/commits/$2" --jq .commit.tree.sha 2>/dev/null || true; }
 upstream_trees="$(tree_of hoprd "${HOPRD_SHA}") $(tree_of edge-client "${EDGLI_SHA}") $(tree_of blokli "${BLOKLI_SHA}")"
-fingerprint_inputs="${TIER} $(git -C "${REPO_ROOT}" rev-parse 'HEAD^{tree}') ${upstream_trees}"
+fingerprint_inputs="${TIER}${SHARD:+-${SHARD}} $(git -C "${REPO_ROOT}" rev-parse 'HEAD^{tree}') ${upstream_trees}"
 IT_FINGERPRINT=""
 if [[ ${upstream_trees} =~ ^[0-9a-f]{40}\ [0-9a-f]{40}\ [0-9a-f]{40}$ ]]; then
   IT_FINGERPRINT="$(sha256sum <<<"${fingerprint_inputs}" | cut -c1-16)"
