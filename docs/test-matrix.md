@@ -66,7 +66,7 @@ per 1452 B datagram, with ICMP pings next to the transfer. Tests use testenv's t
 
 | testenv                                       | `wireguard::`                                                            |
 | --------------------------------------------- | ------------------------------------------------------------------------ |
-| T04 fixed-throughput, T05 loaded-latency, T06 upload and download arms | `short_tcp_transfers_should_keep_their_rate_and_latency` (5, 20 MB each way, **pr**), `long_tcp_…` (200, 500 MB, nightly) |
+| T04 fixed-throughput, T05 loaded-latency, T06 upload and download arms | `short_tcp_transfers_should_keep_their_rate_and_latency` (20 MB each way, **pr**), `long_tcp_…` (200, 500 MB, nightly) |
 | T07 cold-start, T15 warmup-knee               | `a_fresh_session_should_reach_full_rate_within_its_ramp`                 |
 | T09 impairment-ladder                         | `return_relays_of_unequal_latency_should_carry_the_session` (equal 25/50 ms, gap 50, far 100; the flat rung is every other test) |
 | T10 forced-reconnect                          | `a_session_reopened_under_inbound_traffic_should_carry_it`               |
