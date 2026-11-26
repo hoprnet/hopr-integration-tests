@@ -70,7 +70,7 @@ const COLD_ARRIVAL_MIN_PCT: f64 = 1.0;
 async fn vpn_env() -> anyhow::Result<IntegrationEnv> {
     request_latency_profile(FLAT_LATENCY);
     // A test that failed mid-impairment leaves its rules behind; the next one starts clean.
-    IntegrationEnv::setup_with(|cluster| {
+    IntegrationEnv::setup_with(async |cluster| {
         cluster.clear_link_rules()?;
         Ok(None)
     })

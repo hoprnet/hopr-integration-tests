@@ -92,14 +92,15 @@
 //! - All lines on the test's own stdout come from the in-process entry; node logs are separate
 //!   files. A `hopr_transport` target in stdout is the entry, not a relayer.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use edgli::hopr_lib::exports::transport::SESSION_MTU;
 use hoprd_integration_test::{
-    HoprSession, IntegrationEnv,
-    cluster::{NodeInfo, request_cluster_size, request_latency_profile},
+    Address, HoprSession, IntegrationEnv,
+    cluster::{self, NodeInfo, request_cluster_size, request_latency_profile},
     pump::{
-        PumpOpts, PumpOutcome, Transfer, drain_until_quiet, pace_for_rate, pump_halves,
-        tagged_payload,
+        PumpOpts, PumpOutcome, RECORD_SIZE, Transfer, drain_until_quiet, pace_for_rate,
+        pace_for_rate_with_chunk, pump_halves, tagged_payload,
     },
     relayers::{self, RelayerSpread},
     session_metrics, surb_store,
@@ -178,6 +179,11 @@ struct Topology {
     /// Stall every cluster link of the victim instead: alive and connected everywhere, slow in any
     /// position of a path.
     stall_victim: bool,
+    /// After recovering, keep the load on until the dead relayer's probation SURBs are being spent.
+    hold_steady: bool,
+    /// Close the exit's channels to all but this many relayers before the warm-up. The lab exit
+    /// had 3, so a relayer on probation came back as one of 3 return candidates, not one of 7.
+    exit_channels: Option<usize>,
 }
 
 /// Replies travel over one relay; the request path is direct.
@@ -191,6 +197,8 @@ const RETURN_PATH: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
+    exit_channels: None,
 };
 
 /// The mirror image: requests travel over one relay, replies come back directly.
@@ -207,6 +215,8 @@ const FORWARD_PATH: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
+    exit_channels: None,
 };
 
 /// One relay in each direction: what a real deployment runs.
@@ -222,6 +232,8 @@ const SYMMETRIC: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
+    exit_channels: None,
 };
 
 /// Replies over one relay whose link to the exit is cut while Edgli still reaches it.
@@ -233,7 +245,23 @@ const RETURN_EXIT_CUT: Topology = Topology {
     cut_exit_link: true,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
+    exit_channels: None,
 };
+
+/// As [`RETURN_EXIT_CUT`] in the shape of the 2026-11-23 lab arm, held under load until well past
+/// the verdict lapsing into probation: one hop each way, an exit with channels to three relayers,
+/// and an entry with a floor of three and no channel to the exit.
+const RETURN_EXIT_CUT_HELD: Topology = Topology {
+    direction: "return-exit-cut-held",
+    forward_hops: 1,
+    hold_steady: true,
+    exit_channels: Some(3),
+    ..RETURN_EXIT_CUT
+};
+
+/// The lab client's `min_paths_anonymity_floor`.
+const LAB_ANONYMITY_FLOOR: usize = 3;
 
 /// As [`RETURN_EXIT_CUT`] over two-hop return paths.
 const TWO_HOP_RETURN_EXIT_CUT: Topology = Topology {
@@ -244,6 +272,8 @@ const TWO_HOP_RETURN_EXIT_CUT: Topology = Topology {
     cut_exit_link: true,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
+    exit_channels: None,
 };
 
 /// Replies over one relay whose link to the exit stalls periodically: alive, connected, too slow.
@@ -255,6 +285,8 @@ const RETURN_EXIT_STALL: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: true,
     stall_victim: false,
+    hold_steady: false,
+    exit_channels: None,
 };
 
 /// Two relays each way, busiest one killed: the victim can sit anywhere on either path,
@@ -267,6 +299,8 @@ const TWO_HOP_SYMMETRIC: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
+    exit_channels: None,
 };
 
 /// Three relays each way: a killed relayer sits in the middle or last position of most paths
@@ -279,6 +313,8 @@ const THREE_HOP_SYMMETRIC: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: false,
+    hold_steady: false,
+    exit_channels: None,
 };
 
 /// Three relays each way with the busiest one stalling on every link.
@@ -290,6 +326,8 @@ const THREE_HOP_STALL: Topology = Topology {
     cut_exit_link: false,
     stall_exit_link: false,
     stall_victim: true,
+    hold_steady: false,
+    exit_channels: None,
 };
 
 /// Warm-up payload: enough packets to make the relayer histogram unambiguous, no more.
@@ -558,6 +596,55 @@ async fn setup_env_with_hops(
     Ok((env, session, candidates))
 }
 
+/// The 2026-11-23 lab arm's shape: before the entry boots, the exit (node 1, as in the other
+/// scenarios' runs) closes its channels to all but `keep` relayers and every relayer closes its
+/// channel to the exit; the entry then opens channels to every node but the exit. Returns the
+/// relayers the exit closed its channel to.
+async fn setup_lab_env(
+    topology: Topology,
+    keep: usize,
+) -> anyhow::Result<(IntegrationEnv, HoprSession, Vec<NodeInfo>, Vec<Address>)> {
+    request_cluster_size(topology.nodes);
+    request_latency_profile(LATENCY_PROFILE);
+    cluster::request_lab_entry(LAB_ANONYMITY_FLOOR);
+    let mut closed = Vec::new();
+    let env = IntegrationEnv::setup_with(async |cluster| {
+        let exit = cluster
+            .nodes
+            .get(1)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the lab shape needs at least two cluster nodes"))?;
+        let relayers: Vec<_> = cluster
+            .nodes
+            .iter()
+            .filter(|n| n.address != exit.address)
+            .cloned()
+            .collect();
+        let (kept, rest) = relayers.split_at(keep.min(relayers.len()));
+        close_channels(&exit, rest).await?;
+        // The lab exit had no incoming channel at all. Without a relayer -> exit edge in the entry's
+        // graph, neither a SURB round-trip nor a loopback probe can be attributed to exit -> relayer.
+        for relayer in &relayers {
+            close_channels(relayer, std::slice::from_ref(&exit)).await?;
+        }
+        tracing::info!(
+            kept = ?kept.iter().map(|n| n.address).collect::<Vec<_>>(),
+            "the exit keeps channels to these return relayers only, and none lead to it"
+        );
+        closed = rest.iter().map(|n| n.address).collect();
+        Ok(Some(exit.address))
+    })
+    .await?;
+    let (session, exit) = env
+        .open_unreliable_session_paths(topology.forward_hops, topology.return_hops)
+        .await?;
+    let candidates = env.relayer_candidates(exit)?;
+    // The lab client, once connected, probed at a low dial focused on the exits it was not using.
+    env.apply_connected_client_probing(&closed)?;
+    tracing::info!(%exit, candidates = candidates.len(), "lab-shaped env ready");
+    Ok((env, session, candidates, closed))
+}
+
 /// Pump `payload` while sampling the forwarded-packet counters either side of it.
 ///
 /// Takes the session halves by reference so a scenario can pump the *same* session more than once.
@@ -697,8 +784,15 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         "relayer-loss scenario"
     );
     // Held for the cluster lifetime; the scenario itself never opens a second session.
-    let (env, session, candidates) =
-        setup_env_with_hops(topology.forward_hops, topology.return_hops, topology.nodes).await?;
+    let (env, session, candidates, closed) = match topology.exit_channels {
+        Some(keep) => setup_lab_env(topology, keep).await?,
+        None => {
+            let (env, session, candidates) =
+                setup_env_with_hops(topology.forward_hops, topology.return_hops, topology.nodes)
+                    .await?;
+            (env, session, candidates, Vec::new())
+        }
+    };
 
     // Split once and keep the halves: both phases run over this one session, so what is measured
     // is the *established* stream surviving. A replacement session opened after the kill would
@@ -726,7 +820,6 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
          kill, so the result would say nothing about resilience",
         before_kill.arrival_pct(),
     );
-
     // Phase 2 -- quiesce: everything still in flight from the warm-up has to land before the kill,
     // or it is counted as survival-phase arrival and a dead stream reads as a recovering one.
     let leftover = drain_until_quiet(&mut rx, DRAIN_QUIET, "warm-up").await;
@@ -749,8 +842,12 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
     // session sustains. Never offer more than the paced baseline carried.
     let offered_mbps = offered_mbps.min(baseline.mbps);
 
+    // A relayer the exit has no channel to can still carry forward traffic, but no replies.
     let busiest = spread
-        .busiest()
+        .per_relayer
+        .iter()
+        .map(|(relayer, _)| *relayer)
+        .find(|relayer| !closed.contains(relayer))
         .ok_or_else(|| anyhow::anyhow!("no relayer forwarded anything; nothing to kill"))?;
     let victim = candidates
         .iter()
@@ -811,6 +908,7 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
     } else {
         victim.kill()?;
     }
+    let fault_at = Instant::now();
 
     // Phase 3 -- settle: let the kill land before any new data is offered.
     //
@@ -874,7 +972,221 @@ async fn session_should_survive_relayer_loss(topology: Topology) -> anyhow::Resu
         counters.nonzero()
     );
 
-    assert_recovered(&baseline, &after_kill, &spread, &spread_after)
+    assert_recovered(&baseline, &after_kill, &spread, &spread_after)?;
+    if topology.hold_steady {
+        let exit = exit_node(&env, &candidates)?;
+        tracing::info!(
+            "entry graph before the held load:\n{}",
+            env.graph_report().await
+        );
+        let held =
+            hold_steady_past_probation(&exit, &mut rx, &mut tx, offered_mbps, fault_at).await;
+        tracing::info!(
+            "entry graph after the held load:\n{}",
+            env.graph_report().await
+        );
+        // Diagnostic, off by default. With `HOPRD_HEAL_SECS=<n>` the cut is lifted after the held
+        // load and the same paced load is offered for another n seconds. The log then shows whether
+        // the relayer comes back: the entry's `relayer revived by a reply` line against `healed`
+        // below, and the victim's share of the return packets. Nothing here is gated.
+        let heal_secs = std::env::var("HOPRD_HEAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        if heal_secs > 0 && topology.cut_exit_link {
+            env.cluster()?.restore_links()?;
+            let healed_after_fault = fault_at.elapsed();
+            tracing::info!(
+                "healed: the exit link is restored {:.0} s after the fault",
+                healed_after_fault.as_secs_f64()
+            );
+            drain_until_quiet(&mut rx, DRAIN_QUIET, "steady").await;
+            let bytes = (offered_mbps * 1_000_000.0 * heal_secs as f64) as usize;
+            let heal = pump_and_measure(
+                &mut rx,
+                &mut tx,
+                &candidates,
+                &tagged_payload(HEAL_PHASE, bytes),
+                "heal",
+                PumpOpts {
+                    pace: pace_for_rate_with_chunk(offered_mbps, STEADY_CHUNK),
+                    phase: Some(HEAL_PHASE),
+                    chunk: Some(STEADY_CHUNK),
+                    idle_budget: Some(SURVIVAL_IDLE_BUDGET),
+                    tail_grace: Some(SURVIVAL_TAIL_GRACE),
+                    ..PumpOpts::default()
+                },
+            )
+            .await;
+            match heal {
+                Ok((transfer, spread)) => {
+                    let lost = transfer.lost_writes();
+                    let victim_packets = spread
+                        .per_relayer
+                        .iter()
+                        .find(|(address, _)| *address == victim.address)
+                        .map_or(0, |&(_, packets)| packets);
+                    tracing::info!(
+                        "heal phase: {:.2}% of the load back, {} of {} writes lost (s after the heal: {}); \
+                         victim {} forwarded {victim_packets} of {} return packets ({:.1}%)",
+                        transfer.arrival_pct(),
+                        lost.len(),
+                        transfer.offered.len(),
+                        format_offer_times(&lost, 0.0, 100),
+                        victim.address,
+                        spread.total,
+                        victim_packets as f64 / spread.total.max(1) as f64 * 100.0,
+                    );
+                }
+                Err(error) => tracing::warn!("the heal phase failed: {error:#}"),
+            }
+        }
+        held?;
+    }
+    Ok(())
+}
+
+/// Phase tag for the load held on after recovery.
+const STEADY_PHASE: u8 = 5;
+
+/// Phase tag for the load offered after the exit link is restored.
+const HEAL_PHASE: u8 = 6;
+
+/// `+123.4` for each offer time shifted by `offset`, space separated, at most `limit` of them.
+fn format_offer_times(times: &[f64], offset: f64, limit: usize) -> String {
+    let mut list = times
+        .iter()
+        .take(limit)
+        .map(|at| format!("+{:.1}", at + offset))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if times.len() > limit {
+        list.push_str(" ...");
+    }
+    list
+}
+
+/// Upstream `PENDING_SURB_TTL`: a dead verdict lapses into probation once this has passed without
+/// a reply through the relayer still due.
+const PENDING_SURB_TTL: Duration = Duration::from_secs(60);
+
+/// Upstream `IMPLAUSIBLE_PROBE_INTERVAL`: the planner's exploration may mint one SURB per interval
+/// through a relayer on probation. That probe is the only loss probation is meant to cost.
+const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long the held load is offered for, after the survival phase.
+const STEADY_LOAD_DURATION: Duration = Duration::from_secs(240);
+
+/// The final stretch of the held load that has to come back whole.
+const LATE_WINDOW: Duration = Duration::from_secs(60);
+
+const MIN_LATE_ARRIVAL_PCT: f64 = 99.0;
+
+/// One whole-record write per session segment, so a lost reply packet loses exactly one write.
+/// Larger writes span 63 segments and turn 1 % packet loss into ~50 % frame loss.
+const STEADY_CHUNK: usize = SESSION_MTU / RECORD_SIZE * RECORD_SIZE;
+
+/// Hoprnet#8750: a dead relayer that lapses into probation keeps being drawn for ordinary return
+/// paths, and the Exit spends those SURBs FIFO about one stock turnover later, losing the replies.
+/// Requires the last [`LATE_WINDOW`] of a long load to come back whole.
+async fn hold_steady_past_probation(
+    exit: &NodeInfo,
+    rx: &mut tokio::io::ReadHalf<HoprSession>,
+    tx: &mut tokio::io::WriteHalf<HoprSession>,
+    offered_mbps: f64,
+    fault_at: Instant,
+) -> anyhow::Result<()> {
+    drain_until_quiet(rx, DRAIN_QUIET, "survival").await;
+    let exit_stock = surb_store::surbs_held(exit).await?;
+    let bytes = (offered_mbps * 1_000_000.0 * STEADY_LOAD_DURATION.as_secs_f64()) as usize;
+    let started_after_fault = fault_at.elapsed();
+    tracing::info!(
+        ?started_after_fault,
+        ?exit_stock,
+        "holding {:.2} MB/s for {STEADY_LOAD_DURATION:?} in {STEADY_CHUNK} B writes",
+        offered_mbps
+    );
+    let steady = pump_halves(
+        rx,
+        tx,
+        &tagged_payload(STEADY_PHASE, bytes),
+        "steady",
+        PUMP_TIMEOUT,
+        PumpOpts {
+            pace: pace_for_rate_with_chunk(offered_mbps, STEADY_CHUNK),
+            phase: Some(STEADY_PHASE),
+            chunk: Some(STEADY_CHUNK),
+            idle_budget: Some(SURVIVAL_IDLE_BUDGET),
+            tail_grace: Some(SURVIVAL_TAIL_GRACE),
+            ..PumpOpts::default()
+        },
+    )
+    .await?;
+
+    let lost = steady.lost_writes();
+    let at_fault = started_after_fault.as_secs_f64();
+    tracing::info!(
+        "held load: {} writes offered, {} lost; lost at (s after the fault): {}",
+        steady.offered.len(),
+        lost.len(),
+        format_offer_times(&lost, at_fault, 600)
+    );
+    let mut per_30s = vec![
+        0usize;
+        steady
+            .offered
+            .last()
+            .map_or(0, |&(at, _)| ((at_fault + at) / 30.0) as usize + 1)
+    ];
+    for at in &lost {
+        per_30s[((at_fault + at) / 30.0) as usize] += 1;
+    }
+    tracing::info!("held load: lost writes per 30 s from the fault: {per_30s:?}");
+
+    let offer_seconds = steady
+        .offer_completed_at
+        .ok_or_else(|| anyhow::anyhow!("the held load was never fully offered"))?;
+    let writes_per_sec = steady.offered.len() as f64 / offer_seconds;
+    let window_from_fault =
+        started_after_fault.as_secs_f64() + offer_seconds - LATE_WINDOW.as_secs_f64();
+    // FIFO: a SURB minted at probation onset is spent one stock turnover later.
+    if let Some(stock) = exit_stock {
+        let poisoned_spend_from = PENDING_SURB_TTL.as_secs_f64() + stock as f64 / writes_per_sec;
+        anyhow::ensure!(
+            window_from_fault >= poisoned_spend_from,
+            "the late window opens {window_from_fault:.0} s after the fault, before the Exit spends \
+             SURBs minted at probation onset (~{poisoned_spend_from:.0} s: {stock} SURBs at \
+             {writes_per_sec:.0}/s); lengthen STEADY_LOAD_DURATION"
+        );
+    }
+
+    let (arrived, offered) = steady
+        .late_window_records(LATE_WINDOW)
+        .ok_or_else(|| anyhow::anyhow!("the held load ran shorter than {LATE_WINDOW:?}"))?;
+    let arrival_pct = arrived as f64 / offered.max(1) as f64 * 100.0;
+    let lost_replies_per_sec = (offered - arrived) as f64
+        / (STEADY_CHUNK / RECORD_SIZE) as f64
+        / LATE_WINDOW.as_secs_f64();
+    let probe_budget = 1.0 / PROBE_INTERVAL.as_secs_f64();
+    tracing::info!(
+        "late window (+{window_from_fault:.0} s to +{:.0} s after the fault): {arrival_pct:.2}% \
+         of {offered} records back, {lost_replies_per_sec:.2} replies lost/s against a probe \
+         budget of {probe_budget:.0}/s at {writes_per_sec:.0} replies/s; whole load {:.2}%",
+        window_from_fault + LATE_WINDOW.as_secs_f64(),
+        steady.arrival_pct(),
+    );
+    anyhow::ensure!(
+        arrival_pct >= MIN_LATE_ARRIVAL_PCT,
+        "only {arrival_pct:.2}% of the load offered over the last {LATE_WINDOW:?} came back (need \
+         {MIN_LATE_ARRIVAL_PCT}%), {window_from_fault:.0} s after the fault: replies are still \
+         being spent on SURBs through the dead relayer (hoprnet#8750)"
+    );
+    anyhow::ensure!(
+        lost_replies_per_sec <= probe_budget,
+        "{lost_replies_per_sec:.2} replies/s lost over the last {LATE_WINDOW:?}, above the \
+         {probe_budget:.0}/s probe budget a relayer on probation may cost (hoprnet#8750)"
+    );
+    Ok(())
 }
 
 /// The original incident: the entry reassembles the reply stream, and a return relay dies under it.
@@ -902,6 +1214,15 @@ async fn session_should_survive_forward_relayer_loss() -> anyhow::Result<()> {
 #[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
 async fn a_one_hop_session_should_survive_exit_losing_its_return_relayer() -> anyhow::Result<()> {
     session_should_survive_relayer_loss(RETURN_EXIT_CUT).await
+}
+
+/// As above, then held under load for four more minutes: the dead relayer goes on probation, and
+/// the stream must not keep losing the replies sent on SURBs through it (hoprnet#8750).
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires hoprd/hoprd-localcluster binaries + a chain"]
+async fn a_one_hop_session_should_hold_steady_once_its_dead_return_relayer_is_on_probation()
+-> anyhow::Result<()> {
+    session_should_survive_relayer_loss(RETURN_EXIT_CUT_HELD).await
 }
 
 /// As above over two-hop return paths.
@@ -1256,6 +1577,37 @@ async fn common_mode_return_outage(shape: OutageShape) -> anyhow::Result<()> {
 
 /// The cluster node outside `candidates`: the Exit, which [`IntegrationEnv::relayer_candidates`]
 /// leaves out.
+/// Closes `from`'s channels to each of `to`, and waits until `from`'s chain view agrees.
+async fn close_channels(from: &NodeInfo, to: &[NodeInfo]) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let open = cluster::open_outgoing_channels(from).await?;
+        let still_open: Vec<_> = to
+            .iter()
+            .filter(|peer| {
+                open.iter()
+                    .any(|(address, _)| address.eq_ignore_ascii_case(&peer.address.to_string()))
+            })
+            .collect();
+        if still_open.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "{} still lists channels it closed as open: {open:?}",
+            from.address
+        );
+        // The close tx often lands although the REST call times out waiting for it, so the chain
+        // view decides, not the status code.
+        for peer in still_open {
+            if let Err(error) = cluster::close_outgoing_channel(from, peer.address).await {
+                tracing::warn!(from = %from.address, to = %peer.address, "closing a channel: {error:#}");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
 fn exit_node(env: &IntegrationEnv, candidates: &[NodeInfo]) -> anyhow::Result<NodeInfo> {
     let mut others = env
         .cluster()?

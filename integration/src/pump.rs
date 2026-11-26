@@ -229,6 +229,10 @@ pub struct Transfer {
     pub progress: Vec<(f64, usize)>,
     /// Seconds from the pump start to the writer's final flush; `None` if it never finished.
     pub offer_completed_at: Option<f64>,
+    /// `(seconds since the pump started, cumulative bytes offered)`, one per write.
+    pub offered: Vec<(f64, usize)>,
+    /// Per payload record, whether it came back. Empty for an unphased pump.
+    pub arrived_records: Vec<bool>,
 }
 
 impl Transfer {
@@ -333,6 +337,45 @@ impl Transfer {
             .map(|&(_, bytes)| bytes)
             .unwrap_or(0);
         ((total.saturating_sub(at_from)) as f64) / 1_000_000.0 / window_s
+    }
+
+    /// Of the records offered in the final `window` of the offer, how many came back, as
+    /// `(arrived, offered)`. `None` before the offer has run that long or for an unphased pump.
+    pub fn late_window_records(&self, window: Duration) -> Option<(usize, usize)> {
+        let offer_end = self.offer_completed_at?;
+        let from = offer_end - window.as_secs_f64();
+        if from < 0.0 || self.arrived_records.is_empty() {
+            return None;
+        }
+        let offered_before = self
+            .offered
+            .iter()
+            .take_while(|(at, _)| *at < from)
+            .last()
+            .map_or(0, |&(_, bytes)| bytes);
+        let window_records = &self.arrived_records[offered_before / RECORD_SIZE..];
+        let arrived = window_records.iter().filter(|arrived| **arrived).count();
+        Some((arrived, window_records.len()))
+    }
+
+    /// When each write that did not come back whole was offered, in seconds since the pump started:
+    /// a write counts as lost if any of its records is missing. Empty for an unphased pump.
+    pub fn lost_writes(&self) -> Vec<f64> {
+        if self.arrived_records.is_empty() {
+            return Vec::new();
+        }
+        let mut previous = 0;
+        self.offered
+            .iter()
+            .filter_map(|&(at, cumulative)| {
+                let records = previous / RECORD_SIZE..cumulative / RECORD_SIZE;
+                previous = cumulative;
+                let lost = records
+                    .into_iter()
+                    .any(|i| !self.arrived_records.get(i).copied().unwrap_or(false));
+                lost.then_some(at)
+            })
+            .collect()
     }
 
     /// Seconds until throughput first sustains `target_mbps` over a `window`.
@@ -616,6 +659,7 @@ pub async fn pump_halves(
     // When the writer finished offering, shared with the reader so the tail cap has something to
     // measure from. Written once by the writer, read on the reader's poll cadence.
     let offer_completed_ms = std::sync::atomic::AtomicU64::new(OFFER_IN_FLIGHT);
+    let mut offered: Vec<(f64, usize)> = Vec::new();
 
     let send = async {
         let mut offset = 0;
@@ -631,6 +675,7 @@ pub async fn pump_halves(
             tx.write_all(&payload[offset..end]).await?;
             let written = end - offset;
             offset = end;
+            offered.push((pump_started.elapsed().as_secs_f64(), offset));
 
             match opts.shape.unwrap_or_default() {
                 Shape::Constant => {
@@ -835,6 +880,16 @@ pub async fn pump_halves(
     if let (Some(first), last) = foreign_window {
         tracing::info!("{label}: foreign records arrived between +{first:.2}s and +{last:.2}s");
     }
+    let mut arrived_records = Vec::new();
+    if opts.phase.is_some() {
+        arrived_records.resize(total_bytes / RECORD_SIZE, false);
+        for record in mine_buf.as_chunks::<RECORD_SIZE>().0 {
+            let index = u64::from_le_bytes(record[8..16].try_into().expect("8-byte index"));
+            if let Some(arrived) = arrived_records.get_mut(index as usize) {
+                *arrived = true;
+            }
+        }
+    }
 
     let transfer = Transfer {
         outcome,
@@ -851,6 +906,8 @@ pub async fn pump_halves(
             OFFER_IN_FLIGHT => None,
             at => Some(at as f64 / 1000.0),
         },
+        offered,
+        arrived_records,
     };
 
     tracing::info!(
@@ -973,7 +1030,39 @@ mod tests {
             wall_seconds,
             progress: progress.to_vec(),
             offer_completed_at: None,
+            offered: Vec::new(),
+            arrived_records: Vec::new(),
         }
+    }
+
+    #[test]
+    fn late_window_should_count_only_records_offered_inside_it() {
+        let mut t = transfer(10.0, &[]);
+        t.offered = (1..=10).map(|s| (s as f64, s * 10 * RECORD_SIZE)).collect();
+        t.offer_completed_at = Some(10.0);
+        t.arrived_records = (0..100).map(|i| i < 90 || i % 2 == 0).collect();
+
+        assert_eq!(
+            t.late_window_records(Duration::from_secs(3)),
+            Some((35, 40)),
+            "records 60..100 were offered after +7 s; the odd ones from 90 on are lost"
+        );
+        assert_eq!(t.late_window_records(Duration::from_secs(11)), None);
+    }
+
+    #[test]
+    fn lost_writes_should_list_the_offer_time_of_every_write_missing_a_record() {
+        let mut t = transfer(10.0, &[]);
+        t.offered = (1..=10).map(|s| (s as f64, s * 10 * RECORD_SIZE)).collect();
+        t.arrived_records = (0..100).map(|i| i != 35 && i < 90).collect();
+
+        assert_eq!(t.lost_writes(), vec![4.0, 10.0]);
+
+        t.arrived_records.clear();
+        assert!(
+            t.lost_writes().is_empty(),
+            "an unphased pump has no records"
+        );
     }
 
     /// One megabyte per arrival, one arrival per second, from `from` to `to` inclusive.

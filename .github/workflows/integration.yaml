@@ -196,7 +196,8 @@ jobs:
       # exactly what left run 34098266229 undiagnosable.
       HOPRD_KEEP_ARTIFACTS: 1
       HOPR_LOG_DIR: ${{ github.workspace }}/logs/ci
-      RUST_LOG: warn,hoprd_integration_test=info,return_path=info
+      # surb_telemetry=info: a handful of verdict / probation lines, the timeline behind hoprnet#8750.
+      RUST_LOG: warn,hoprd_integration_test=info,return_path=info,hopr_transport::protocol::surb_telemetry=info
       HOPRD_NODE_RUST_LOG: info
       # Without this libtest captures a PASSING test's output, so a green run would
       # show no measurements at all — the one thing worth reading. Safe to enable

@@ -177,7 +177,7 @@ impl IntegrationEnv {
     /// Bring up the local cluster, boot Edgli on the pre-funded extra identity, start
     /// the channel strategy, and wait until at least one outgoing channel is open.
     pub async fn setup() -> anyhow::Result<Self> {
-        Self::setup_with(|_| Ok(None)).await
+        Self::setup_with(async |_| Ok(None)).await
     }
 
     /// As [`Self::setup`], but `prepare` runs on the running cluster before the entry boots, so a
@@ -187,20 +187,38 @@ impl IntegrationEnv {
     /// A scenario that cuts links to one node has to name that node, since it is chosen before the
     /// entry can look at its peers.
     pub async fn setup_with(
-        prepare: impl FnOnce(&ClusterSummary) -> anyhow::Result<Option<Address>>,
+        prepare: impl AsyncFnOnce(&ClusterSummary) -> anyhow::Result<Option<Address>>,
     ) -> anyhow::Result<Self> {
         let cluster = cluster::bring_up_shared().await?;
         let summary = cluster.summary.clone();
-        let exit = prepare(&summary)?;
+        let exit = prepare(&summary).await?;
         let extra = summary.extras[0].clone();
 
+        let mut tuning = NetTuning::local();
+        let mut channel_allowlist = None;
+        if let Some(floor) = cluster::lab_entry_floor() {
+            let exit = exit.context("a lab entry needs the scenario to name its exit")?;
+            tuning.path_planner.min_paths_anonymity_floor = floor;
+            channel_allowlist = Some(
+                summary
+                    .nodes
+                    .iter()
+                    .map(|n| n.address)
+                    .filter(|address| *address != exit)
+                    .collect::<std::collections::HashSet<_>>(),
+            );
+            tracing::info!(floor, %exit, "entry set up like the lab client: no channel to the exit");
+        }
         let (edgli, reactor) = boot_edgli(
             &summary.blokli_url,
             &extra,
-            &NetTuning::local(),
-            cluster_size(),
+            &tuning,
+            channel_allowlist
+                .as_ref()
+                .map_or(cluster_size(), |peers| peers.len()),
             Some(cluster_size()),
             None,
+            channel_allowlist,
         )
         .await?;
 
@@ -251,6 +269,7 @@ impl IntegrationEnv {
             cluster_size(),
             Some(cluster_size()),
             Some(pix),
+            None,
         )
         .await?;
 
@@ -283,6 +302,7 @@ impl IntegrationEnv {
             &rotsee.extra,
             &NetTuning::local(),
             ROTSEE_TARGET_CHANNELS,
+            None,
             None,
             None,
         )
@@ -377,6 +397,30 @@ impl IntegrationEnv {
     }
 
     /// The cluster this env owns; an error for a Rotsee env, which has none.
+    /// Probes the way gnosis_vpn-client does once connected: `Dial::LOW`, focused on `focus` (the
+    /// client focuses on the exits it is *not* connected to; `apply_probing` in gnosis_vpn-lib).
+    /// `HOPRD_LAB_PROBING=off` stops probing instead, to tell probe evidence from SURB evidence.
+    pub fn apply_connected_client_probing(&self, focus: &[Address]) -> anyhow::Result<()> {
+        if std::env::var("HOPRD_LAB_PROBING").is_ok_and(|v| v == "off") {
+            tracing::info!("entry probing stopped (HOPRD_LAB_PROBING=off)");
+            self.edgli.set_probing_dial(None);
+            return Ok(());
+        }
+        let chain = self.edgli.chain_api();
+        let keys = focus
+            .iter()
+            .map(|address| {
+                chain
+                    .chain_key_to_packet_key(address)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                    .ok_or_else(|| anyhow::anyhow!("{address} has no packet key on chain"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.edgli.set_probing_dial(Some(edgli::Dial::LOW));
+        self.edgli.set_probing_focus(keys);
+        Ok(())
+    }
+
     pub fn cluster(&self) -> anyhow::Result<&ClusterSummary> {
         self._cluster
             .as_ref()
@@ -757,6 +801,7 @@ async fn boot_edgli(
     target_channels: usize,
     cluster_nodes: Option<usize>,
     pix: Option<edgli::PixEntryConfig>,
+    channel_allowlist: Option<std::collections::HashSet<Address>>,
 ) -> anyhow::Result<(Edgli, futures::future::AbortHandle)> {
     let hopr_keys: HoprKeys = IdentityRetrievalModes::FromFile {
         password: &extra.password,
@@ -827,6 +872,7 @@ async fn boot_edgli(
             lc.eligibility = EligibilityConfig {
                 min_peer_quality_score: 0.0,
                 require_observed_since_start: false,
+                allowlist: channel_allowlist.clone(),
                 ..Default::default()
             };
             // Never close a channel over its peer's quality score.

@@ -146,6 +146,20 @@ pub fn edgli_max_openers() -> Option<usize> {
     REQUESTED_EDGLI_MAX_OPENERS.get().copied()
 }
 
+static REQUESTED_LAB_ENTRY_FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Ask for an entry set up like the gnosis_vpn client of the 2026-11-23 lab arm, before setup: path
+/// planner floor `floor`, and no channel to the exit `IntegrationEnv::setup_with` names, so it
+/// reaches the exit only through relays. First call in a test binary wins.
+pub fn request_lab_entry(floor: usize) {
+    REQUESTED_LAB_ENTRY_FLOOR.get_or_init(|| floor);
+}
+
+/// The floor requested via [`request_lab_entry`], if any.
+pub fn lab_entry_floor() -> Option<usize> {
+    REQUESTED_LAB_ENTRY_FLOOR.get().copied()
+}
+
 static REQUESTED_PIX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Ask for the cluster to be started with PIX enabled, before the first [`bring_up`].
@@ -352,6 +366,22 @@ impl ClusterSummary {
     /// running and every other link (including Edgli's) intact. Needs a latency profile.
     pub fn cut_link(&self, a: Address, b: Address) -> anyhow::Result<()> {
         self.append_link_rule("blocked_links", a, b, "")
+    }
+
+    /// Lifts every cut made with [`cut_link`](Self::cut_link): the latency relays re-read the file, so
+    /// emptying it restores the links within their poll interval (250 ms).
+    pub fn restore_links(&self) -> anyhow::Result<()> {
+        let data_dir = self
+            .log_dir
+            .as_ref()
+            .and_then(|d| d.parent())
+            .ok_or_else(|| anyhow::anyhow!("cluster data dir unknown; cannot restore the links"))?;
+        std::fs::write(data_dir.join("blocked_links"), b"").context("writing blocked_links")?;
+        tracing::info!(
+            file = "blocked_links",
+            "lifted every link cut between cluster nodes"
+        );
+        Ok(())
     }
 
     /// Stalls all traffic between `a` and `b`: for `stall` out of every `period` each datagram is
@@ -984,6 +1014,23 @@ fn auth_header() -> String {
 /// built from [`auth_header`] can be rejected by a node that has its own -- or that has none.
 fn node_auth_header(node: &NodeInfo) -> Option<String> {
     node.api_token.as_ref().map(|t| format!("Bearer {t}"))
+}
+
+/// Closes `node`'s outgoing channel to `peer`. `Open` only moves to `PendingToClose`, which already
+/// drops the edge's balance from every node's graph and invalidates `node`'s SURBs through `peer`.
+pub async fn close_outgoing_channel(node: &NodeInfo, peer: Address) -> anyhow::Result<()> {
+    let mut req = node_http_client()
+        .delete(format!("{}/api/v4/channels/{peer}", node.api_url))
+        .timeout(INTRACLUSTER_CHANNEL_TIMEOUT);
+    if let Some(header) = node_auth_header(node) {
+        req = req.header("Authorization", header);
+    }
+    req.send()
+        .await
+        .context("DELETE /api/v4/channels")?
+        .error_for_status()
+        .context("DELETE /api/v4/channels returned an error status")?;
+    Ok(())
 }
 
 /// `node`'s open outgoing channels as `(destination, balance)`, as its REST API reports them from the
