@@ -3,7 +3,7 @@ name: Integration throughput test
 # docs/test-matrix.md. Which jobs a trigger runs is the `plan` step below (table in README "CI").
 # Triggered by:
 #   * hoprd, blokli or edge-client merge queues for `main` (via repository_dispatch),
-#   * a nightly schedule, running both tiers,
+#   * a nightly schedule, running both tiers and the `pr` tier's cross-version legs,
 #   * manual workflow_dispatch,
 #   * the MERGE QUEUE for this repo's own `main` — so a change here cannot land
 #     without the test passing, whether or not anyone remembered the label,
@@ -44,6 +44,12 @@ on:
         description: "Run the tests from this open hopr-integration-tests PR instead of main (companion of a breaking upstream PR)"
         required: false
         default: ""
+      compat:
+        description: "Cross-version leg for every job: same, old-node (latest hoprd v5 release) or old-edge (edgli of the latest gnosis_vpn-client release)"
+        required: false
+        type: choice
+        default: "same"
+        options: ["same", "old-node", "old-edge"]
   pull_request:
     # `opened` too: without it a new unlabelled PR never reports the required gate below.
     types: [opened, labeled, synchronize, reopened]
@@ -89,6 +95,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           TIER: ${{ inputs.tier || github.event.client_payload.tier || 'pr' }}
+          COMPAT: ${{ inputs.compat || 'same' }}
         run: |
           set -euo pipefail
           jobs=()
@@ -112,14 +119,20 @@ jobs:
           esac
           # Every way of asking for the nightly (schedule, label, dispatch) gets both shards, each on its
           # own runner; `run_tier` in lib.sh says which suites a shard runs.
+          # Entries are tier:shard:compat. The schedule adds the cross-version legs on the pr tier
+          # (#115, docs/test-matrix.md); a manual run puts its `compat` on every job.
           shards=()
           for job in "${jobs[@]}"; do
             case "${job}" in
             nightly) shards+=(nightly:a nightly:b) ;;
-            *) shards+=("${job}") ;;
+            *) shards+=("${job}:") ;;
             esac
           done
-          matrix=$(printf '%s\n' "${shards[@]}" | jq -Rnc '[inputs | select(length > 0) | split(":") | {tier: .[0], shard: (.[1] // "")}]')
+          if [ "${COMPAT}" != same ]; then
+            shards=("${shards[@]/%/:${COMPAT}}")
+          fi
+          [ "${EVENT}" != schedule ] || shards+=(pr::old-node pr::old-edge)
+          matrix=$(printf '%s\n' "${shards[@]}" | jq -Rnc '[inputs | select(length > 0) | split(":") | {tier: .[0], shard: (.[1] // ""), compat: (.[2] // "")}]')
           echo "jobs: ${matrix}"
           echo "matrix=${matrix}" >>"${GITHUB_OUTPUT}"
       - id: resolve
@@ -147,7 +160,8 @@ jobs:
           } >>"${GITHUB_OUTPUT}"
   integration:
     # Required checks and upstream gates match the `gate` job below, never this name.
-    name: Integration throughput (${{ matrix.tier }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }})
+    # The compat suffix is absent on the `same` legs, so their names stay what they were.
+    name: Integration throughput (${{ matrix.tier }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }}${{ matrix.compat && format(', {0}', matrix.compat) || '' }})
     needs: companions
     # Empty on a PR with no `run-integration*` label.
     if: needs.companions.outputs.matrix != '[]'
@@ -167,12 +181,13 @@ jobs:
       max-parallel: 4
       matrix:
         include: ${{ fromJSON(needs.companions.outputs.matrix) }}
-    # Per job: ~29 min of tests on pr, ~90 on nightly a and ~105 on nightly b (one shared chain each),
-    # plus 15-20 min of build on a Cachix miss.
+    # Per job: ~29 min of tests on pr (~27 on a cross leg), ~90 on nightly a and ~105 on nightly b
+    # (one shared chain each), plus 15-20 min of build on a Cachix miss.
     timeout-minutes: 180
     env:
       TIER: ${{ matrix.tier }}
       SHARD: ${{ matrix.shard }}
+      COMPAT: ${{ matrix.compat || 'same' }}
       PROJECT: ${{ inputs.project || github.event.client_payload.project }}
       OVERRIDE_REV: ${{ inputs.rev || github.event.client_payload.rev }}
       # `workflow_dispatch` delivers its arguments under `inputs.*` while
@@ -428,7 +443,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: integration-logs-${{ matrix.tier }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: integration-logs-${{ matrix.tier }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}${{ matrix.compat && format('-{0}', matrix.compat) || '' }}-${{ github.run_id }}-${{ github.run_attempt }}
           # Cluster dirs live under HOPR_LOG_DIR (logs/ci/); the shared chain under IT_TMP_ROOT.
           # Nothing from /tmp: the other runner on this box writes there too.
           path: |
@@ -452,7 +467,7 @@ jobs:
           # job died before run.sh got as far as resolving them (a runner/setup problem
           # rather than a stack problem), which is itself the useful signal.
           content: |
-            **Integration throughput test FAILED** (${{ matrix.tier }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }} tier) — ${{ env.TRIGGER }}${{ env.TESTS_FROM }}
+            **Integration throughput test FAILED** (${{ matrix.tier }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }} tier${{ matrix.compat && format(', {0}', matrix.compat) || '' }}) — ${{ env.TRIGGER }}${{ env.TESTS_FROM }}
             * hoprd `${{ env.RESOLVED_HOPRD || 'unresolved' }}`
             * edge-client `${{ env.RESOLVED_EDGLI || 'unresolved' }}`
             * blokli `${{ env.RESOLVED_BLOKLI || 'unresolved' }}`

@@ -178,6 +178,30 @@ S = strict assertion, w = exercised but weakly or not asserted.
   tiers, and the label runs `nightly` on a PR before it is queued. The full table is in the README, under CI.
 - The pass marker's fingerprint carries the tier and shard, so a merge gate never reuses a nightly green.
 
+## Cross-version legs (#115)
+
+The schedule runs the `pr` tier twice more, each time with one side on a version still in the
+field: `old-node` (newest hoprd `v5.*` release) and `old-edge` (the edgli rev the latest
+gnosis_vpn-client release locks). The README, under CI, says how the refs are chosen and when a leg
+is skipped.
+
+A cross leg runs the tests that need both sides to agree on the wire, Session and PIX protocol,
+and that the old version passes against itself. A test of a fix newer than the old
+release would go red on every leg and say nothing about compatibility.
+
+| Test                  | Cross legs | Why                                                                    |
+| --------------------- | ---------- | ---------------------------------------------------------------------- |
+| A1 `zero_one_two_hop` | yes        | packet, SURB and Session format at 0, 1 and 2 hops, SHA intact         |
+| `wireguard` short TCP | yes        | the Session configuration gnosis_vpn-client ships                      |
+| C1, C2 `pix`          | yes        | PIX deposits, budget and sweep between the Entry and the Exit          |
+| D4 `pix_shapes` mixed | yes        | strict share accounting at the production geometry (P3, P6-P8)         |
+| `dead_last_hop`       | no         | the entry's probing: an old edgli fails for a missing fix, not a break |
+| the nightly tier      | no         | resilience of one implementation, not interop; about 200 min per leg   |
+
+About 27 minutes of tests per leg. The legs fill the runner that the nightly shards leave free, so
+the night ends no later. The test crate builds against the old edgli. When it no longer does, the
+`old-edge` leg fails at build with the compile error.
+
 ## Measured locally
 
 `just tier` on an Apple-silicon Mac, 2026-10-28. Stack: hoprd `main` (flake) plus the PIX hoprd
