@@ -14,6 +14,7 @@
 #   NIX_SYSTEM_SUFFIX    cross-build to this nix system (default: empty = build for this machine)
 #   TIER             pr | nightly — which suites run (default: pr)
 #   SHARD            a | b — half of the nightly tier, one runner each (default: empty = both)
+#   COMPAT           same | old-node | old-edge — cross-version leg, see docs/test-matrix.md (default: same)
 set -euo pipefail
 
 # shellcheck source=scripts/integration/lib.sh
@@ -42,6 +43,14 @@ case "${SHARD:-}" in
   exit 2
   ;;
 esac
+COMPAT="${COMPAT:-same}"
+case "${COMPAT}" in
+same | old-node | old-edge) ;;
+*)
+  echo "unknown COMPAT '${COMPAT}' (same | old-node | old-edge)" >&2
+  exit 2
+  ;;
+esac
 
 companion_refs
 HOPRD_REF="${HOPRD_REF:-main}"
@@ -60,6 +69,49 @@ blokli) BLOKLI_REF="${OVERRIDE_REV:?OVERRIDE_REV required for PROJECT=blokli}" ;
   ;;
 esac
 
+skip_leg() {
+  echo "${COMPAT} leg skipped: $1" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  exit 0
+}
+
+# Cross-version legs: one side from a release in the field, the other as resolved above.
+edgli_label="${EDGLI_REF}"
+case "${COMPAT}" in
+old-node)
+  [ "${PROJECT:-}" != hoprd ] || {
+    echo "COMPAT=old-node picks the hoprd ref itself; drop PROJECT=hoprd" >&2
+    exit 2
+  }
+  old="$(latest_hoprd_release)"
+  [ -n "${old}" ] || {
+    echo "could not find the latest hoprd v5 release" >&2
+    exit 1
+  }
+  old_locks="$(protocol_locks hoprd "${old}")"
+  new_locks="$(protocol_locks hoprd "${HOPRD_REF}")"
+  [ -n "${old_locks}" ] && [ -n "${new_locks}" ] || {
+    echo "could not read the hopr-lib / hopr-strategy locks of hoprd ${old} or ${HOPRD_REF}" >&2
+    exit 1
+  }
+  [ "${old_locks}" != "${new_locks}" ] || skip_leg "hoprd ${old} locks the same hopr-lib and hopr-strategy as ${HOPRD_REF}"
+  HOPRD_REF="${old}"
+  ;;
+old-edge)
+  [ "${PROJECT:-}" != edge-client ] || {
+    echo "COMPAT=old-edge picks the edge-client ref itself; drop PROJECT=edge-client" >&2
+    exit 2
+  }
+  read -r client_tag old < <(shipped_edgli_rev) || {
+    echo "could not read the edgli rev of the latest gnosis_vpn-client release" >&2
+    exit 1
+  }
+  [ "${old}" != "$(resolve_sha hoprnet/edge-client "${EDGLI_REF}")" ] ||
+    skip_leg "gnosis_vpn-client ${client_tag} ships edge-client ${EDGLI_REF} (${old:0:8})"
+  EDGLI_REF="${old}"
+  edgli_label="gnosis_vpn-client ${client_tag}"
+  ;;
+esac
+
 EDGLI_SHA="$(resolve_sha hoprnet/edge-client "${EDGLI_REF}")"
 [ -n "${EDGLI_SHA}" ] || {
   echo "could not resolve edge-client ref '${EDGLI_REF}'" >&2
@@ -74,10 +126,12 @@ BLOKLI_SHA="$(resolve_sha hoprnet/blokli "${BLOKLI_REF}")"
   exit 1
 }
 
-echo "resolved versions:"
+echo "resolved versions (${COMPAT}):"
 echo "  hoprd        = ${HOPRD_REF} (${HOPRD_SHA})"
-echo "  edge-client  = ${EDGLI_REF} (${EDGLI_SHA})"
+echo "  edge-client  = ${edgli_label} (${EDGLI_SHA})"
 echo "  blokli       = ${BLOKLI_REF} (${BLOKLI_SHA})"
+echo "${TIER}${SHARD:+ ${SHARD}}, ${COMPAT}: hoprd \`${HOPRD_REF}\` (\`${HOPRD_SHA:0:8}\`), edge-client \`${edgli_label}\` (\`${EDGLI_SHA:0:8}\`), blokli \`${BLOKLI_REF}\` (\`${BLOKLI_SHA:0:8}\`)" \
+  >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 # Hand the resolved versions to the workflow so a failure notification can report
 # what actually ran. The dispatch inputs are no good for this: they only ever carry
@@ -91,7 +145,7 @@ if [ -n "${GITHUB_ENV:-}" ]; then
   [[ ${HOPRD_REF} =~ ^[0-9a-f]{40}$ ]] && hoprd_display="${HOPRD_REF:0:8}"
   {
     echo "RESOLVED_HOPRD=${hoprd_display}"
-    echo "RESOLVED_EDGLI=${EDGLI_REF} (${EDGLI_SHA:0:8})"
+    echo "RESOLVED_EDGLI=${edgli_label} (${EDGLI_SHA:0:8})"
     echo "RESOLVED_BLOKLI=${BLOKLI_REF} (${BLOKLI_SHA:0:8})"
   } >>"${GITHUB_ENV}"
 fi
@@ -101,7 +155,10 @@ fi
 # with the PR head's tree. The toolchain is left out: it is unpinned, so every run would miss.
 tree_of() { gh api "repos/hoprnet/$1/commits/$2" --jq .commit.tree.sha 2>/dev/null || true; }
 upstream_trees="$(tree_of hoprd "${HOPRD_SHA}") $(tree_of edge-client "${EDGLI_SHA}") $(tree_of blokli "${BLOKLI_SHA}")"
-fingerprint_inputs="${TIER}${SHARD:+-${SHARD}} $(git -C "${REPO_ROOT}" rev-parse 'HEAD^{tree}') ${upstream_trees}"
+leg="${TIER}${SHARD:+-${SHARD}}"
+# A cross leg skips suites, so its green must never stand in for a gate's.
+[ "${COMPAT}" = same ] || leg+="-${COMPAT}"
+fingerprint_inputs="${leg} $(git -C "${REPO_ROOT}" rev-parse 'HEAD^{tree}') ${upstream_trees}"
 IT_FINGERPRINT=""
 if [[ ${upstream_trees} =~ ^[0-9a-f]{40}\ [0-9a-f]{40}\ [0-9a-f]{40}$ ]]; then
   IT_FINGERPRINT="$(sha256sum <<<"${fingerprint_inputs}" | cut -c1-16)"
@@ -200,7 +257,11 @@ pin_edgli "${EDGLI_SHA}"
 # The cluster's nodes and the edgli entry must speak the same wire format (packet size, SURBs).
 HOPRD_HOPRLIB_REV="$(locked_hoprlib_rev hoprd "${HOPRD_SHA}")" || true
 if [ "${HOPRD_HOPRLIB_REV}" != "${EDGLI_HOPRLIB_REV}" ]; then
-  echo "::warning::hoprd locks hoprnet ${HOPRD_HOPRLIB_REV:-unknown}, edge-client ${EDGLI_HOPRLIB_REV}; a wire change between them breaks every session" >&2
+  if [ "${COMPAT}" = same ]; then
+    echo "::warning::hoprd locks hoprnet ${HOPRD_HOPRLIB_REV:-unknown}, edge-client ${EDGLI_HOPRLIB_REV}; a wire change between them breaks every session" >&2
+  else
+    echo "${COMPAT}: hoprd locks hoprnet ${HOPRD_HOPRLIB_REV:-unknown}, edge-client ${EDGLI_HOPRLIB_REV}, the skew this leg tests"
+  fi
 fi
 
 # ── Run the tier's suites on one shared chain ──

@@ -111,6 +111,29 @@ locked_hoprlib_rev() { # repo ref
     sed -n '/^name = "hopr-lib"$/,/^source/ s/.*#\([0-9a-f]\{40\}\)"$/\1/p'
 }
 
+# The nightly's cross-version legs (#115) pair main with what runs in the field.
+# The release list also carries v4 tags.
+latest_hoprd_release() {
+  gh api repos/hoprnet/hoprd/releases \
+    --jq '[.[] | select((.tag_name | startswith("v5.")) and (.prerelease | not))][0].tag_name // empty' 2>/dev/null
+}
+
+# Prints `<tag> <edgli sha>`. gnosis_vpn-client pins edgli by branch, so only its lock names the rev.
+shipped_edgli_rev() {
+  local tag sha
+  tag="$(gh api repos/gnosis/gnosis_vpn-client/releases/latest --jq .tag_name 2>/dev/null)" || return 1
+  sha="$(gh api -H "Accept: application/vnd.github.raw" "repos/gnosis/gnosis_vpn-client/contents/Cargo.lock?ref=${tag}" 2>/dev/null |
+    sed -n '/^name = "edgli"$/,/^source/ s/.*#\([0-9a-f]\{40\}\)"$/\1/p')"
+  [ -n "${tag}" ] && [ -n "${sha}" ] && echo "${tag} ${sha}"
+}
+
+# hopr-lib and hopr-strategy carry the wire and PIX protocol: two hoprd refs that lock the same pair
+# differ in hoprd alone.
+protocol_locks() { # repo ref
+  gh api -H "Accept: application/vnd.github.raw" "repos/hoprnet/$1/contents/Cargo.lock?ref=$2" 2>/dev/null |
+    awk '/^name = "(hopr-lib|hopr-strategy)"$/ { name = $3; getline version; getline source; print name, version, source }'
+}
+
 # Pin edgli in integration/Cargo.toml to a sha, and hopr-lib / hopr-strategy to what that edgli
 # pins. Sets EDGLI_HOPRLIB_REV.
 pin_edgli() {
@@ -462,7 +485,9 @@ run_tier() {
 
   echo "running integration tests (binary chain, tier ${TIER}) ..."
   in_tier pr && run_suite integration
-  in_tier pr && run_suite dead_last_hop
+  # Tests the entry's probing, which an old edgli runs on its own defaults: a cross leg red here
+  # would name a missing fix, not a wire break.
+  in_tier pr && [ "${COMPAT:-same}" = same ] && run_suite dead_last_hop
   in_tier nightly && in_shard a && run_suite exit_origination
   # gnosis_vpn-testenv's diagnostic tests on the client's session (#49). Short TCP transfers gate PRs.
   tcp=short_tcp_transfers_should_keep_their_rate_and_latency

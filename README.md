@@ -182,6 +182,7 @@ dedicated self-hosted runners. It is triggered by:
 - this repo's merge queue, and PRs carrying a `run-integration*` label;
 - a nightly run at 02:00 UTC;
 - manual runs: `gh workflow run integration.yaml -f tier=nightly -f project=hoprd -f rev=<sha>`.
+  Add `-f compat=old-node` or `-f compat=old-edge` to run every job as that cross-version leg.
 
 Each trigger runs one job per tier, side by side when runners are free. The `nightly` tier is two
 jobs, shards `a` and `b` (`SHARD`, see `run_tier` in `scripts/integration/lib.sh`), on two runners:
@@ -193,11 +194,24 @@ jobs, shards `a` and `b` (`SHARD`, see `run_tier` in `scripts/integration/lib.sh
 | manual run, `tier=nightly`         | –    | yes       |
 | manual run, `tier=all`             | yes  | yes       |
 | nightly schedule                   | yes  | yes       |
+| nightly schedule, cross-version    | yes  | –         |
 | PR label `run-integration`         | yes  | –         |
 | PR label `run-integration-nightly` | –    | yes       |
 
 PR labels add up. The merge queue and the upstream gates run the `pr` tier only; a new or changed
 nightly test needs the `run-integration-nightly` label before it is queued.
+
+The nightly also runs the `pr` tier, minus `dead_last_hop`, as two cross-version legs (`COMPAT` in
+`run.sh`). Each leg checks a version still in the field against `main`:
+
+| Leg (`COMPAT`) | edge-client (entry)                                   | hoprd (relays, exit)        | Skipped when                                        |
+| -------------- | ----------------------------------------------------- | --------------------------- | --------------------------------------------------- |
+| `same`         | `main`                                                | `main`                      | –                                                   |
+| `old-node`     | `main`                                                | newest hoprd `v5.*` release | the release locks main's hopr-lib and hopr-strategy |
+| `old-edge`     | the edgli rev in the latest gnosis_vpn-client release | `main`                      | that rev is edge-client `main`                      |
+
+A skipped leg is green and says why in the job summary. Blokli stays on `main`. Relays and the exit
+are one hoprd binary, so a relay-only cross leg waits for the relay/exit split.
 
 No versions are stored. The project that triggered the run supplies its rev, and every other ref
 is the current head of its `main`. `run.sh` builds hoprd, localcluster and the blokli chain, pins
