@@ -440,13 +440,16 @@ cargo_it() {
 # PIX_BIN, a hoprd with the deposit pool, enables the PIX suites.
 # `rotsee` needs a funded Gnosis identity and `profiling` emits traces, so neither is a suite here.
 run_tier() {
-  local suite_rc=0 nodes_bin="${HOPRD_BIN}" mixed tcp scenarios scenario held_out
+  local suite_rc=0 nodes_bin="${HOPRD_BIN}" mixed tcp scenarios scenario held_out lab
   export CHAIN_SHARED=1
   IT_RESULTS="$(mktemp)" IT_STEP_LOG="$(mktemp)"
   export IT_RESULTS IT_STEP_LOG
+  # A step timeout kills this shell before print_summary; the workflow renders these files instead.
+  [ -z "${GITHUB_ENV:-}" ] ||
+    printf 'IT_RESULTS=%s\nIT_STEP_LOG=%s\nIT_STARTED=%s\n' "${IT_RESULTS}" "${IT_STEP_LOG}" "$(date +%s)" >>"${GITHUB_ENV}"
 
   in_tier() { [ "${TIER}" = "$1" ]; }
-  # The nightly runs as two shards on two runners, ~90 and ~105 min: a = exit_origination,
+  # The nightly runs as two shards on two runners, ~90 and ~120 min: a = exit_origination,
   # wireguard, pix_relay_loss; b = pix_shapes, return_path, pix_resume. No SHARD runs both.
   in_shard() { [ -z "${SHARD:-}" ] || [ "${SHARD}" = "$1" ]; }
   run_suite() { # target, then any scenarios to HOLD OUT of it
@@ -513,10 +516,20 @@ run_tier() {
     chain_start
     scenarios="$(list_scenarios return_path)"
     held_out="return_paths_should_track_the_tempered_score"
+    # Last: it closes the exit's channels, and every later cluster's frozen identities would find
+    # them pending-to-close and time out opening their full mesh (nightly of 2026-11-27).
+    lab=a_one_hop_session_should_hold_steady_once_its_dead_return_relayer_is_on_probation
     for scenario in ${scenarios}; do
-      case " ${held_out} " in *" ${scenario} "*) continue ;; esac
+      case " ${held_out} ${lab} " in *" ${scenario} "*) continue ;; esac
       SCENARIOS="${scenario}" run_suite return_path
     done
+    case " ${scenarios} " in
+    *" ${lab} "*) SCENARIOS="${lab}" run_suite return_path ;;
+    *)
+      echo "::error::return_path has no '${lab}' to run last; was it renamed?" >&2
+      suite_rc=1
+      ;;
+    esac
   fi
 
   print_summary
@@ -569,7 +582,7 @@ record_results() { # target, captured output, cargo rc
 print_summary() {
   [ -s "${IT_RESULTS:-}" ] || return 0
   local report
-  report="$(awk -F'\t' -v steps="${IT_STEP_LOG:-/dev/null}" -v secs="${SECONDS}" '
+  report="$(awk -F'\t' -v steps="${IT_STEP_LOG:-/dev/null}" -v secs="${IT_ELAPSED:-${SECONDS}}" '
     BEGIN {
       while ((getline l < steps) > 0) {
         split(l, s, "\t")
