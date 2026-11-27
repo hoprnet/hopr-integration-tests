@@ -167,7 +167,7 @@ jobs:
       max-parallel: 4
       matrix:
         include: ${{ fromJSON(needs.companions.outputs.matrix) }}
-    # Per job: ~29 min of tests on pr, ~90 on nightly a and ~105 on nightly b (one shared chain each),
+    # Per job: ~29 min of tests on pr, ~90 on nightly a and ~120 on nightly b (one shared chain each),
     # plus 15-20 min of build on a Cachix miss.
     timeout-minutes: 180
     env:
@@ -373,6 +373,9 @@ jobs:
           fi
       - name: Resolve versions, build stack, run test
         id: integration
+        # Below the job's: a step timeout fails the step, so the summary, upload and Zulip steps
+        # still run. A job timeout cancels it and skips all three (nightly of 2026-11-27).
+        timeout-minutes: 160
         # Pinned rather than left to run.sh's native default: the runners are x86_64-linux,
         # and the suffixed outputs are the static musl builds CI has always run.
         env:
@@ -382,10 +385,13 @@ jobs:
           nix develop github:hoprnet/hoprnet --command bash scripts/integration/run.sh || code=$?
           echo "exit_code=${code}" >>"${GITHUB_OUTPUT}"
           exit "${code}"
+      - name: Summarise a run killed by its timeout
+        if: failure() && steps.integration.outputs.tests_started == 'true' && steps.integration.outputs.exit_code == ''
+        run: IT_ELAPSED=$(($(date +%s) - IT_STARTED)) bash scripts/integration/lib.sh print_summary
       # Check the real suites' artifacts, including failed runs. A reused pass or a
       # stack build failure never starts the suites and has no run folders to check.
       - name: Verify run logs and final status
-        if: ${{ !cancelled() && steps.integration.outputs.tests_started == 'true' }}
+        if: ${{ !cancelled() && steps.integration.outputs.tests_started == 'true' && steps.integration.outputs.exit_code != '' }}
         env:
           EXIT_CODE: ${{ steps.integration.outputs.exit_code }}
         run: |
@@ -425,7 +431,7 @@ jobs:
       # The console now carries a summary; this is where the detail lives when a run
       # goes red. Only on failure, so a green run stores nothing.
       - name: Upload logs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: integration-logs-${{ matrix.tier }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -438,7 +444,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Notify failure (Zulip)
-        if: failure()
+        # A cancelled nightly is news; a PR run superseded by a push is not.
+        if: failure() || (cancelled() && github.event_name == 'schedule')
         uses: zulip/github-actions-zulip/send-message@f675f2b4eb2a95fae974215476dcb7ad8dfeff6b # v2.0.2
         with:
           api-key: ${{ secrets.ZULIP_API_KEY }}
@@ -452,7 +459,7 @@ jobs:
           # job died before run.sh got as far as resolving them (a runner/setup problem
           # rather than a stack problem), which is itself the useful signal.
           content: |
-            **Integration throughput test FAILED** (${{ matrix.tier }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }} tier) — ${{ env.TRIGGER }}${{ env.TESTS_FROM }}
+            **Integration throughput test ${{ job.status == 'cancelled' && 'CANCELLED' || 'FAILED' }}**${{ job.status != 'cancelled' && steps.integration.outputs.tests_started == 'true' && steps.integration.outputs.exit_code == '' && ' (step timed out)' || '' }} (${{ matrix.tier }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }} tier) — ${{ env.TRIGGER }}${{ env.TESTS_FROM }}
             * hoprd `${{ env.RESOLVED_HOPRD || 'unresolved' }}`
             * edge-client `${{ env.RESOLVED_EDGLI || 'unresolved' }}`
             * blokli `${{ env.RESOLVED_BLOKLI || 'unresolved' }}`

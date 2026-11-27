@@ -172,7 +172,7 @@ S = strict assertion, w = exercised but weakly or not asserted.
 
 - `run.sh` picks the suites from `TIER`.
 - The `nightly` tier runs as two jobs on two runners: `SHARD=a` (exit_origination, wireguard,
-  pix_relay_loss, ~90m) and `SHARD=b` (pix_shapes, return_path, pix_resume, ~105m). Every trigger of
+  pix_relay_loss, ~90m) and `SHARD=b` (pix_shapes, return_path, pix_resume, ~120m). Every trigger of
   `nightly`, the label included, gets both. No `SHARD` runs the whole tier.
 - Each tier is its own job. The merge queue and dispatches run `pr` only; the schedule runs both
   tiers, and the label runs `nightly` on a PR before it is queued. The full table is in the README, under CI.
