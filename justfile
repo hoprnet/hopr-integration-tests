@@ -355,6 +355,25 @@ attach *filter:
     export HOPRD_CLUSTER_DATA_DIR='{{data_dir}}'
     HOPRNET_SHELL='{{hoprnet}}' cargo_it integration '{{filter}}'
 
+# Traffic overhead and latency regression suite on the v5 line.
+# Override the default packet/SURB/ack-batch ceilings via HOPR_MAX_EXIT_PKTS_DL,
+# HOPR_MAX_SURBS_PRODUCED_DL, HOPR_MAX_EXIT_ACK_BATCHES_DL, and HOPR_MAX_EXIT_PKTS_LOOPBACK when
+# measuring an unoptimized baseline.
+traffic-overhead *filter:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    unset TEST_TARGETS
+    export LINE=v5
+    just build-chain
+    export TEST_TARGET=traffic_overhead
+    export TEST_PROFILE=release
+    export TEST_ARGS="${TEST_ARGS:---nocapture}"
+    [ -n '{{filter}}' ] && export SCENARIOS='{{filter}}'
+    export RUST_LOG="${RUST_LOG:-info,hoprd_integration_test=info,traffic_overhead=info}"
+    export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+    HOPRNET_SHELL='{{hoprnet}}' bash scripts/integration/with-v5-deps.sh \
+        bash scripts/integration/run-binchain.sh
+
 # Fast unit tests (gate + parse logic; no cluster).
 unit:
     nix develop {{hoprnet}} -c cargo test --manifest-path integration/Cargo.toml --lib

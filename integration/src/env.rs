@@ -441,6 +441,37 @@ impl IntegrationEnv {
             .collect())
     }
 
+    /// Open a non-PIX unreliable (`Segmentation | NoDelay`) session to an arbitrary
+    /// [`SessionTarget`], using the library's default `max_surbs_per_data_packet` and the caller's
+    /// SURB balancer configuration.
+    ///
+    /// Unlike [`Self::open_unreliable_session_paths`], this deliberately omits [`SessionCapability::UsePIX`]
+    /// even on a v5 cluster so traffic-overhead benchmarks measure VPN datagram packing and SURB
+    /// piggybacking independently of PIX fill cycles.
+    pub async fn open_unreliable_session_to(
+        &self,
+        hops: usize,
+        target: SessionTarget,
+        surb_management: Option<SurbBalancerConfig>,
+    ) -> anyhow::Result<(HoprSession, Address)> {
+        let dest = self.dest_for(hops)?;
+        let (session, _) = self
+            .edgli
+            .connect_to(
+                dest,
+                target,
+                HoprSessionClientConfig {
+                    forward_path: HopRouting::try_from(hops)?,
+                    return_path: HopRouting::try_from(hops)?,
+                    capabilities: SessionCapability::Segmentation | SessionCapability::NoDelay,
+                    surb_management,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok((session, dest))
+    }
+
     /// Open an unreliable (`Segmentation`-only, no retransmission) session over
     /// `hops` relays to the exit node's built-in loopback service. Rate control
     /// is left ON.
